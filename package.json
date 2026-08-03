@@ -1,0 +1,40 @@
+{
+  "name": "mergestorm",
+  "version": "0.3.7",
+  "description": "Mergestorm CLI — interactive shell and one-shot review commands",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "mergestorm": "./dist/cli.js",
+    "mg": "./dist/cli.js"
+  },
+  "homepage": "https://mergestorm.ai/docs#review-jobs-api",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marginsystems/mergestorm-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/marginsystems/mergestorm-cli/issues"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/*.test.ts src/**/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
