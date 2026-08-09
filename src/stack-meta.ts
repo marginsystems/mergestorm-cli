@@ -16,7 +16,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { CommandError } from "./errors.js";
+import { CommandError, isCommandErrorCode } from "./errors.js";
 import { git } from "./git.js";
 import {
   cliStacksRoot,
@@ -294,15 +294,9 @@ export async function resetStackMeta(
     stateFile = stackMetaPath(cwd, stacksRoot);
     legacyFile = legacyStackMetaPath(cwd);
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    if (code !== undefined) throw err;
-    if (
-      err instanceof Error &&
-      (err.message.includes("not a git repository") ||
-        err.message.includes("git common directory is missing"))
-    ) {
-      return;
-    }
+    // Outside a worktree / deleted main repo: reset is a no-op (nothing to clear).
+    // Match on CommandError.code — do not treat it as a Node errno.
+    if (isCommandErrorCode(err, "not_a_repo")) return;
     throw err;
   }
   await rm(stateFile, { force: true });

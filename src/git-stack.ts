@@ -101,6 +101,19 @@ export function defaultLayerBranchName(explicit?: string): string {
   return `ms/${new Date().toISOString().slice(0, 10)}-${Date.now().toString(36).slice(-4)}`;
 }
 
+/**
+ * How many commits are on `head` that are not reachable from `base`
+ * (`git rev-list --count base..head`). Used by stack submit to refuse empty layers.
+ */
+export function commitsAheadOf(base: string, head: string, cwd = process.cwd()): number {
+  const out = git(["rev-list", "--count", `${base}..${head}`], cwd).trim();
+  const n = Number.parseInt(out, 10);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(`Could not count commits on ${head} ahead of ${base}`);
+  }
+  return n;
+}
+
 /** Push branch to origin and set upstream. */
 export function pushBranch(branch: string, cwd = process.cwd()): void {
   try {

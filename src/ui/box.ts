@@ -7,21 +7,34 @@ export function visibleWidth(str: string): number {
   return str.replace(ANSI_PATTERN, "").length;
 }
 
+/** Below this width, boxed chrome wraps on real TTYs — prefer plain output. */
+export const MIN_BOXED_COLUMNS = 48;
+
 /** Usable terminal columns (TTY), with a sensible fallback for pipes/tests. */
 export function terminalColumns(fallback = 80): number {
   const cols = stdout.columns;
-  if (typeof cols === "number" && Number.isFinite(cols) && cols >= 40) {
+  if (typeof cols === "number" && Number.isFinite(cols) && cols >= 1) {
     return cols;
   }
   return fallback;
 }
 
 /**
+ * Whether rounded/full-bleed boxes fit without wrapping.
+ * Non-TTY (unknown columns) keeps boxes for tests and CI logs.
+ */
+export function preferBoxedUi(): boolean {
+  const cols = stdout.columns;
+  if (typeof cols !== "number" || !Number.isFinite(cols)) return true;
+  return cols >= MIN_BOXED_COLUMNS;
+}
+
+/**
  * Outer box width for Claude-style full-bleed frames.
- * Leaves 1 col margin so the right border doesn't wrap.
+ * Never wider than the terminal (minus 1 so the right border doesn't wrap).
  */
 export function frameWidth(fallback = 80): number {
-  return Math.max(48, terminalColumns(fallback) - 1);
+  return Math.max(20, terminalColumns(fallback) - 1);
 }
 
 export interface RoundedBoxOptions {

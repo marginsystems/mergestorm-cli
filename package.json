@@ -1,9 +1,19 @@
 {
   "name": "mergestorm",
-  "version": "0.3.7",
-  "description": "Mergestorm CLI — interactive shell and one-shot review commands",
+  "version": "0.3.9",
+  "description": "Mergestorm CLI (mg) — local reviews & stacked PRs. MIT; build from source: https://github.com/marginsystems/mergestorm-cli",
   "license": "MIT",
   "type": "module",
+  "author": "Margin Systems <hello@mergestorm.ai>",
+  "keywords": [
+    "mergestorm",
+    "code-review",
+    "cli",
+    "git",
+    "pull-request",
+    "stacked-prs",
+    "review"
+  ],
   "bin": {
     "mergestorm": "./dist/cli.js",
     "mg": "./dist/cli.js"
@@ -26,7 +36,8 @@
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/*.test.ts src/**/*.test.ts"
+    "test": "tsx --test src/*.test.ts src/**/*.test.ts",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && node dist/cli.js --version"
   },
   "engines": {
     "node": ">=22.0.0"

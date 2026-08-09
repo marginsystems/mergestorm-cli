@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { stdout } from "node:process";
-import { frameWidth, roundedBox, sideBySide, visibleWidth } from "./box.js";
+import {
+  frameWidth,
+  preferBoxedUi,
+  roundedBox,
+  sideBySide,
+  visibleWidth,
+} from "./box.js";
 
 const STRIP_ANSI = /\u001b\[[0-9;]*m/g;
 const stripAnsi = (s: string): string => s.replace(STRIP_ANSI, "");
@@ -91,13 +97,33 @@ test("sideBySide pads left column to a fixed width", () => {
   assert.equal(rows[1], "bb    " + "  " + "");
 });
 
-test("frameWidth is at least 48", () => {
-  const restore = (stdout as any).columns;
-  (stdout as any).columns = undefined;
+test("frameWidth never exceeds the terminal", () => {
+  const restore = (stdout as { columns?: number }).columns;
   try {
-    assert.equal(frameWidth(40), 48);
-    assert.equal(frameWidth(80), Math.max(48, 80 - 1));
+    (stdout as { columns?: number }).columns = undefined;
+    assert.equal(frameWidth(80), 79);
+    assert.equal(frameWidth(40), 39);
+
+    (stdout as { columns?: number }).columns = 45;
+    assert.equal(frameWidth(), 44);
+
+    (stdout as { columns?: number }).columns = 120;
+    assert.equal(frameWidth(), 119);
   } finally {
-    (stdout as any).columns = restore;
+    (stdout as { columns?: number }).columns = restore;
+  }
+});
+
+test("preferBoxedUi is false on narrow TTYs", () => {
+  const restore = (stdout as { columns?: number }).columns;
+  try {
+    (stdout as { columns?: number }).columns = 40;
+    assert.equal(preferBoxedUi(), false);
+    (stdout as { columns?: number }).columns = 80;
+    assert.equal(preferBoxedUi(), true);
+    (stdout as { columns?: number }).columns = undefined;
+    assert.equal(preferBoxedUi(), true);
+  } finally {
+    (stdout as { columns?: number }).columns = restore;
   }
 });

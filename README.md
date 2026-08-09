@@ -6,27 +6,28 @@ Requires **Node.js 22+**.
 
 ## Install
 
-One-liner (installs the global `mergestorm` binary, then sign in via your browser):
+Recommended — install from npm (same package the one-liner uses):
+
+```bash
+npm install -g mergestorm
+mergestorm --version   # confirm install
+mergestorm login
+# or the short alias (same binary):
+mg login
+```
+
+Optional curl installer (checks Node 22+, then runs `npm install -g mergestorm`):
 
 ```bash
 curl -fsSL https://mergestorm.ai/install.sh | bash
 mergestorm login
 ```
 
-Or install directly with npm:
-
-```bash
-npm install -g mergestorm
-mergestorm login
-# or the short alias (same binary):
-mg login
-```
-
 After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.7`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.9`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -41,19 +42,18 @@ mergestorm
 
 Development without a build step: `npm run dev`.
 
-
 ## Interactive shell
 
 On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a **full-width** welcome panel (logo + status on the left, tips / what's new on the right) and a **full-width** bordered input box with a live `/` slash-command dropdown. Non-TTY (CI/pipes) prints usage instead — no hanging prompt.
 
 ```
-╭─ mergestorm v0.3.7 ──────────────────────────────────────────────────────────╮
+╭─ mergestorm v0.3.9 ──────────────────────────────────────────────────────────╮
 │      ▟██████████▛       Tips for getting started                             │
-│       ▜████████▛          review      review main...HEAD                     │
+│       ▜████████▛          review      review origin/HEAD or main             │
 │        ▝▜████▛▘           stack       create → submit → restack → land       │
 │          ▜██▛             /help       list all commands                      │
 │           ██                                                                 │
-│           ▝▘            What's new in v0.3.7                                 │
+│           ▝▘            What's new in v0.3.9                                 │
 │  ● msk…  ·  maelstrom     • MIT license + public source (mergestorm-cli)       │
 │  [████░░░░░░░░░░] 12% used                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -61,7 +61,7 @@ mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ › /re                                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-  /review       Review git diff (default main...HEAD)
+  /review       Review git diff (default origin/HEAD or main or master)
 
 mergestorm> credits
 mergestorm> branches
@@ -83,8 +83,8 @@ mergestorm shell                Explicit shell entry
 mergestorm login                Sign in via browser; stores an API key in ~/.mergestorm/config.json
 mergestorm login --key          Paste an existing API key instead (headless/CI)
 mergestorm logout               Remove the stored API key
-mergestorm review [base] [head] Review git diff base...head (default: main...HEAD)
-mergestorm status <job_id>      Poll a review job and print JSON
+mergestorm review [base] [head] Review git diff base...head (default: origin/HEAD or main or master)
+mergestorm status <job_id>      Fetch a review job and print JSON (one shot)
 mergestorm credits [--json]     Standard + premium credit balance (usage bars)
 mergestorm jobs [n] [--json]    Recent review jobs (default 10, max 50)
 mergestorm branches [n]         Recently reviewed branches (arrow-pick on TTY)
@@ -96,12 +96,12 @@ mergestorm stack submit         Push layers, open chained PRs (`gh`), register v
 mergestorm stack list [--json]  List registered stacks
 mergestorm stack adopt <owner/repo>#<pr>  Import an existing open PR chain
 mergestorm stack restack <stack-id>  Restack descendants
-mergestorm stack land <stack-id>     Land the bottom open PR
-mergestorm stack auto-land on|off <stack-id>  Toggle auto-land when green
+mergestorm stack land <stack-id>     Land / promote (into review unit when present)
+mergestorm stack auto-promote on|off <stack-id>  Toggle auto-promote when green
 mergestorm stack reset --force  Clear local authoring state (not branches/PRs)
 ```
 
-`mg` is a short alias for `mergestorm` (same binary), e.g. `mg stack create`. Happy path: **create → commit → submit → restack → land**. `stack adopt` is for importing a chain that already exists on GitHub (legacy / Graphite). Restack/land use the same login key (`/api/v1/stacks`).
+`mg` is a short alias for `mergestorm` (same binary), e.g. `mg stack create`. Happy path: **create → commit → submit → restack → land**. On review-unit stacks, `stack land` **promotes** the tip into the unit (same gates as the dashboard); otherwise it lands the bottom open PR. `stack auto-promote` turns on land-when-green for a registered stack (`auto-land` remains a deprecated alias). `stack adopt` is for importing a chain that already exists on GitHub (legacy / Graphite). Restack/land use the same login key (`/api/v1/stacks`).
 
 `stack create` is local-only: it checks out a new branch from the current tip (or `--onto <branch>`), discovers trunk (`main` / `master` / `origin/HEAD`, overridable with `--trunk`), and records `{ branch, parentBranch }` in CLI-managed state under **`~/.mergestorm/stacks/<repo-id>/stack.json`**. The CLI updates this automatically; never edit it. Linked worktrees share state, while independent clones remain isolated. Creating onto trunk with a non-empty active stack starts a new one. No repository file, GitHub call, or API call is made.
 
@@ -113,7 +113,7 @@ Legacy repo-local `.mergestorm/stack.json` state migrates automatically on the n
 
 Runs a browser device-authorization flow: prints a short code, opens `https://mergestorm.ai/cli/auth`, and — once you approve — mints and stores an API key in `~/.mergestorm/config.json` (mode `600`). No key copy/paste needed.
 
-For headless or CI environments, use `mergestorm login --key` to paste an existing `msk_live_…` key (create one on the dashboard [API tab](https://mergestorm.ai/dashboard/api)).
+For headless or CI environments, use `mergestorm login --key` to paste an existing `msk_live_…` key (create one on the dashboard [Settings → API](https://mergestorm.ai/settings#api)). On a TTY the paste is hidden (not echoed); the CLI verifies the key with the API before saving.
 
 ### `logout`
 
@@ -121,10 +121,10 @@ Removes `~/.mergestorm/config.json` so the stored key is no longer used.
 
 ### `review [base] [head]`
 
-Collects `git diff base...head` (default `main...HEAD`), attaches the changed file contents (up to 40 files, skipping files > 400 KB), submits the job, and polls until it finishes (~3 min max). The thread slug is derived from the current branch (`local/<branch>`), so repeated runs on the same branch chain their findings. Programmatic callers can provide explicit review context through the Review Jobs API.
+Collects `git diff base...head` (default: discovered trunk — `origin/HEAD`, `main`, or `master`), attaches the changed file contents (up to 40 files, skipping files > 400 KB), submits the job, and polls until it finishes (~3 min max). The thread slug is derived from the current branch (`local/<branch>`), so repeated runs on the same branch chain their findings. Programmatic callers can provide explicit review context through the Review Jobs API.
 
 ```bash
-mergestorm review              # main...HEAD
+mergestorm review              # discovered trunk (origin/HEAD, main, or master)...HEAD
 mergestorm review develop      # develop...HEAD
 mergestorm review main feat/x  # main...feat/x
 ```

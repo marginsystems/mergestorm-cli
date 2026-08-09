@@ -2,7 +2,7 @@ import * as readline from "node:readline";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { ansi } from "./ansi.js";
-import { frameWidth, roundedBox, visibleWidth } from "./box.js";
+import { frameWidth, preferBoxedUi, roundedBox, visibleWidth } from "./box.js";
 import { CTRL_C_EXIT_HINT, CtrlCExitGate } from "./ctrl-c-exit.js";
 
 export interface CommandSpec {
@@ -64,8 +64,10 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
     input.setRawMode(true);
     input.resume();
 
+    const boxed = preferBoxedUi();
     // Row (0-based) of the "› buffer" content line among the rows we draw each frame.
-    const inputRow = (opts.prompt ? 1 : 0) + 1;
+    // Boxed: optional prompt + top border + content. Plain: optional prompt + content.
+    const inputRow = (opts.prompt ? 1 : 0) + (boxed ? 1 : 0);
 
     function currentDropdown(): CommandSpec[] {
       if (!buffer.startsWith("/")) return [];
@@ -80,13 +82,14 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
 
       const rows: string[] = [];
       if (opts.prompt) rows.push(ansi.dim(opts.prompt));
-      // Full terminal width input frame, not content-sized.
-      rows.push(
-        ...roundedBox([`${ansi.green("›")} ${buffer}`], {
-          padding: 1,
-          width: frameWidth(),
-        }),
-      );
+      const inputLine = `${ansi.green("›")} ${buffer}`;
+      if (boxed) {
+        // Full terminal width input frame, not content-sized.
+        rows.push(...roundedBox([inputLine], { padding: 1, width: frameWidth() }));
+      } else {
+        // Plain prompt on narrow TTYs (avoids wrapped borders).
+        rows.push(inputLine);
+      }
 
       const dropdown = currentDropdown();
       if (dropdown.length) {
@@ -103,7 +106,8 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
       linesDrawn = rows.length;
 
       const prefixWidth = visibleWidth(`${ansi.green("›")} `);
-      const targetCol = 1 + 1 + prefixWidth + cursor + 1;
+      // Boxed: border col + padding; plain: column 1.
+      const targetCol = (boxed ? 1 + 1 : 0) + prefixWidth + cursor + 1;
       output.write(`${up(linesDrawn - inputRow)}${col(targetCol)}`);
     }
 

@@ -7,12 +7,30 @@ import { git } from "./git.js";
 
 export const LEGACY_STACK_META_REL = path.join(".mergestorm", "stack.json");
 
+/** Classify git "not a repo" failures once at the boundary; callers match on code. */
+function rethrowIfNotARepo(err: unknown): never {
+  const detail = err instanceof Error ? err.message : String(err);
+  if (/not a git repository/i.test(detail)) {
+    throw new CommandError(detail, 1, "not_a_repo");
+  }
+  throw err;
+}
+
 export function gitTopLevel(cwd = process.cwd()): string {
-  return realpathSync(git(["rev-parse", "--show-toplevel"], cwd).trim());
+  try {
+    return realpathSync(git(["rev-parse", "--show-toplevel"], cwd).trim());
+  } catch (err) {
+    rethrowIfNotARepo(err);
+  }
 }
 
 export function gitCommonDir(cwd = process.cwd()): string {
-  const raw = git(["rev-parse", "--git-common-dir"], cwd).trim();
+  let raw: string;
+  try {
+    raw = git(["rev-parse", "--git-common-dir"], cwd).trim();
+  } catch (err) {
+    rethrowIfNotARepo(err);
+  }
   const absolute = path.isAbsolute(raw) ? raw : path.resolve(cwd, raw);
   try {
     return realpathSync(absolute);
@@ -20,6 +38,8 @@ export function gitCommonDir(cwd = process.cwd()): string {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
       throw new CommandError(
         `git common directory is missing (${absolute}); this is often a linked worktree whose main repository was deleted. Run \`mg stack reset --force\` to clear local pre-submit state.`,
+        1,
+        "not_a_repo",
       );
     }
     throw err;

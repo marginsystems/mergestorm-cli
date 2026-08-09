@@ -1,11 +1,10 @@
 import { spawn } from "node:child_process";
 import { platform } from "node:os";
-import { createInterface, Interface } from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
-import { apiBase, configPath, loadConfig, saveConfig } from "../config.js";
-import { devicePost } from "../api.js";
+import { apiBase, configPath, loadConfig, saveConfig, type Config } from "../config.js";
+import { devicePost, getMe, type MeResponse } from "../api.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
+import { readSecretLine } from "../ui/secret-input.js";
 
 function openBrowser(url: string): void {
   const os = platform();
@@ -20,27 +19,51 @@ function openBrowser(url: string): void {
   }
 }
 
-async function loginWithKey(existingRl?: Interface): Promise<void> {
-  if (!existingRl) input.resume();
-  const rl = existingRl ?? createInterface({ input, output });
-  const ownRl = !existingRl;
+/**
+ * Probe /api/v1/me with an in-memory config. Does not write disk.
+ * Throws CommandError when the key must not be saved.
+ */
+export async function validateApiKey(cfg: Config): Promise<MeResponse> {
   try {
-    const key = (await rl.question("Paste your Mergestorm API key (msk_live_...): ")).trim();
-    if (!key.startsWith("msk_live_")) {
-      throw new CommandError("Key should start with msk_live_");
+    const me = await getMe(cfg);
+    if (!me) {
+      throw new CommandError(
+        "Could not verify API key (API unreachable or too old). Key was not saved.",
+      );
     }
-    const cfg = await loadConfig();
-    cfg.apiKey = key;
-    await saveConfig(cfg);
-    console.log(`Saved to ${configPath()}`);
-  } finally {
-    if (ownRl) rl.close();
+    return me;
+  } catch (err) {
+    if (err instanceof CommandError && err.code === "auth_invalid") {
+      throw new CommandError(
+        "API key invalid or revoked. Key was not saved. Check the key and run `mergestorm login --key` again.",
+        1,
+        "auth_invalid",
+      );
+    }
+    throw err;
   }
 }
 
-export async function cmdLogin(args: string[], rl?: Interface): Promise<void> {
+async function loginWithKey(): Promise<void> {
+  // Always use muted secret input on TTY so the key never lands in
+  // question()/history echo.
+  const key = (
+    await readSecretLine("Paste your Mergestorm API key (msk_live_...): ")
+  ).trim();
+  if (!key.startsWith("msk_live_")) {
+    throw new CommandError("Key should start with msk_live_");
+  }
+  const cfg = await loadConfig();
+  cfg.apiKey = key;
+  const me = await validateApiKey(cfg);
+  await saveConfig(cfg);
+  const prefix = me.key?.prefix?.trim() || "msk_live_…";
+  console.log(`Verified ${prefix}… · saved to ${configPath()}`);
+}
+
+export async function cmdLogin(args: string[]): Promise<void> {
   if (args.includes("--key")) {
-    await loginWithKey(rl);
+    await loginWithKey();
     return;
   }
 
@@ -113,7 +136,7 @@ export async function cmdLogin(args: string[], rl?: Interface): Promise<void> {
     }
     if (err === "key_limit_reached") {
       throw new CommandError(
-        "You have reached the max active API keys. Revoke one at https://mergestorm.ai/dashboard/api and try again.",
+        "You have reached the max active API keys. Revoke one at https://mergestorm.ai/settings#api and try again.",
       );
     }
     if (err === "expired_token") {

@@ -1,39 +1,17 @@
 import { stdout as output } from "node:process";
 import { loadConfig, resolveApiKey } from "./config.js";
 import { CommandError, DetachedError } from "./errors.js";
-import { cmdBranches, cmdChain } from "./commands/branches.js";
-import { cmdCredits } from "./commands/credits.js";
-import { cmdJobs, cmdThread } from "./commands/jobs.js";
-import { cmdLogin } from "./commands/login.js";
-import { cmdLogout } from "./commands/logout.js";
-import { cmdReview } from "./commands/review.js";
-import { cmdStack } from "./commands/stack.js";
-import { cmdStatus } from "./commands/status.js";
-import { cmdWhoami } from "./commands/whoami.js";
+import {
+  dispatchCommand,
+  shellCommandSpecs,
+} from "./commands/registry.js";
 import { ansi } from "./ui/ansi.js";
 import { printBannerHeader, shellPrompt } from "./ui/banner.js";
 import { CTRL_C_EXIT_HINT, CtrlCExitGate } from "./ui/ctrl-c-exit.js";
-import { askLine, PromptClosedError, type CommandSpec } from "./ui/prompt.js";
+import { askLine, PromptClosedError } from "./ui/prompt.js";
 
-export const COMMANDS: CommandSpec[] = [
-  { name: "help", summary: "Show available commands" },
-  { name: "login", summary: "Sign in via browser (or paste a key)" },
-  { name: "logout", summary: "Remove the stored API key" },
-  { name: "review", summary: "Review git diff (default main...HEAD)" },
-  { name: "status", summary: "Show a review job" },
-  { name: "credits", summary: "Credit balance with usage bars" },
-  { name: "usage", summary: "Credit balance with usage bars" },
-  { name: "jobs", summary: "Recent review jobs (default 10)" },
-  { name: "branches", summary: "Pick a recently reviewed branch" },
-  { name: "chains", summary: "Alias for branches" },
-  { name: "chain", summary: "Show a branch review-chain timeline" },
-  { name: "whoami", summary: "Key + plan + API base" },
-  { name: "thread", summary: "Jobs in a review thread" },
-  { name: "stack", summary: "Stacks: create, submit, list, adopt, restack, land" },
-  { name: "clear", summary: "Clear screen and reprint banner" },
-  { name: "exit", summary: "Leave the shell" },
-  { name: "quit", summary: "Leave the shell" },
-];
+/** Shell autocomplete + `/help` — derived from the command registry (STRUCT-01). */
+export const COMMANDS = shellCommandSpecs();
 
 function printHelp(): void {
   const rows = COMMANDS.map((c) => `  ${ansi.green("/" + c.name.padEnd(10))} ${c.summary}`).join(
@@ -43,7 +21,7 @@ function printHelp(): void {
   ${ansi.bold("Commands")}
 ${rows}
 
-  Dashboard: https://mergestorm.ai/dashboard/api
+  Dashboard: https://mergestorm.ai/settings#api
 `);
 }
 
@@ -124,37 +102,14 @@ export async function runShell(): Promise<void> {
 
       busyAbort = new AbortController();
       try {
-        if (cmd === "login") {
-          await cmdLogin(args);
-          await printBannerHeader();
-        } else if (cmd === "logout") {
-          await cmdLogout();
-          await printBannerHeader();
-        } else if (cmd === "review") {
-          await cmdReview(args, { signal: busyAbort.signal, interactive: true });
-        } else if (cmd === "status") {
-          if (!args[0]) {
-            throw new CommandError('usage: status <job_id>');
-          }
-          await cmdStatus(args[0], { format: "pretty", signal: busyAbort.signal });
-        } else if (cmd === "credits" || cmd === "usage") {
-          await cmdCredits(args);
-        } else if (cmd === "jobs") {
-          await cmdJobs(args);
-        } else if (cmd === "branches" || cmd === "chains") {
-          await cmdBranches(args);
-        } else if (cmd === "chain") {
-          await cmdChain(args);
-        } else if (cmd === "whoami") {
-          await cmdWhoami(args);
-        } else if (cmd === "thread") {
-          if (!args[0]) {
-            throw new CommandError("usage: thread <slug>");
-          }
-          await cmdThread(args[0], args.slice(1));
-        } else if (cmd === "stack") {
-          await cmdStack(args);
-        } else {
+        const ok = await dispatchCommand(cmd, args, {
+          mode: "shell",
+          signal: busyAbort.signal,
+          afterAuth: async () => {
+            try { await printBannerHeader(); } catch { /* banner is best-effort */ }
+          },
+        });
+        if (!ok) {
           console.error(ansi.dim(`unknown command "${cmd}" -- type help`));
         }
       } catch (err) {

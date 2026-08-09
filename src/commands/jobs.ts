@@ -47,7 +47,7 @@ export async function cmdJobs(args: string[]): Promise<void> {
     "  " + cols.map((c, i) => c.padEnd(widths[i]!)).join("  ");
   console.log(ansi.dim(fmt(header)));
   for (const r of rows) console.log(fmt(r));
-  console.log(ansi.dim("  branches: `branches` · full history: https://mergestorm.ai/dashboard/api"));
+  console.log(ansi.dim("  branches: `branches` · full history: https://mergestorm.ai/settings#api"));
 }
 
 /** Numbered chain timeline for a thread (branch/PR meta when present). */

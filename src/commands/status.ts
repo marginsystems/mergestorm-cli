@@ -2,6 +2,7 @@ import { apiFetch } from "../api.js";
 import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
+import { renderFindings, type ReviewFindings } from "../ui/findings.js";
 
 export type StatusOptions = {
   format?: "json" | "pretty";
@@ -27,28 +28,12 @@ export async function cmdStatus(jobId: string, opts: StatusOptions = {}): Promis
     summary?: string | null;
     verdict?: string | null;
     error?: string | null;
-    findings?: {
-      inline?: { path: string; line: number; severity: string; body: string; title?: string }[];
-      off_diff?: { path?: string; severity: string; body: string }[];
-      offDiff?: { path?: string; severity: string; body: string }[];
-    } | null;
+    findings?: ReviewFindings | null;
   };
 
   console.log(`Status:  ${row.status}`);
   if (row.verdict) console.log(`Verdict: ${ansi.bold(row.verdict)}`);
   if (row.summary) console.log(row.summary);
   if (row.error) console.log(ansi.red(`Error: ${row.error}`));
-  const inline = row.findings?.inline ?? [];
-  const off = row.findings?.off_diff ?? row.findings?.offDiff ?? [];
-  for (const c of inline) {
-    console.log(`\n[${c.severity}] ${c.path}:${c.line}${c.title ? ` — ${c.title}` : ""}`);
-    console.log(c.body);
-  }
-  for (const c of off) {
-    console.log(`\n[${c.severity}] off-diff ${c.path ?? ""}`);
-    console.log(c.body);
-  }
-  if (inline.length === 0 && off.length === 0 && row.status === "completed") {
-    console.log("\nNo findings.");
-  }
+  renderFindings(row.findings, { emptyMessage: row.status === "completed" });
 }

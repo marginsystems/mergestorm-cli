@@ -1,10 +1,12 @@
 import { getMe, type MeResponse } from "../api.js";
+import { CommandError } from "../errors.js";
 import { keyDisplay, loadConfig, resolveApiKey } from "../config.js";
 import { cliVersion } from "../version.js";
 import { ansi } from "./ansi.js";
 import {
   frameWidth,
   padVisible,
+  preferBoxedUi,
   roundedBox,
   sideBySide,
   visibleWidth,
@@ -47,7 +49,7 @@ const WHATS_NEW: Record<string, string[]> = {
     "`mg` short alias — same binary as `mergestorm`",
   ],
   "0.3.3": [
-    "`stack list` / `adopt` / `restack` / `land` / `auto-land`",
+    "`stack list` / `adopt` / `restack` / `land` / `auto-promote`",
   ],
   "0.3.4": [
     "`stack create` / `submit` — author stacks with `mg` (not Graphite)",
@@ -65,13 +67,34 @@ const WHATS_NEW: Record<string, string[]> = {
     "MIT license + public source at github.com/marginsystems/mergestorm-cli",
     "npm repository/bugs point at the public CLI repo",
   ],
+  "0.3.8": [
+    "Command registry + CommandError.code (no message-regex control flow)",
+    "cmdStackSubmit unit-tested; shared findings renderer; origin parse in git.ts",
+    "Review poll retries + status <job_id> recovery; empty-submit / narrow-TTY fixes",
+    "login --key muted + validated; API timeouts; Node 22 hard-fail; --version",
+  ],
+  "0.3.9": [
+    "Public source repo open (github.com/marginsystems/mergestorm-cli)",
+    "npm description points at MIT build-from-source URL",
+    "Dashboard links → Settings → API / Work (product URL cleanup)",
+  ],
 };
 
-function formatStatusLines(me: MeResponse | null, key: string | undefined, barWidth: number): string[] {
+function formatStatusLines(
+  me: MeResponse | null,
+  key: string | undefined,
+  barWidth: number,
+  keyInvalid = false,
+): string[] {
   if (!key) {
     return [
       `${ansi.dim("○")} not logged in — type ${ansi.green("login")} to sign in`,
       `  or ${ansi.green("login --key")} to paste an API key`,
+    ];
+  }
+  if (keyInvalid) {
+    return [
+      `${ansi.dim("○")} API key invalid or revoked — type ${ansi.green("login")} to sign in again`,
     ];
   }
   const display = me?.key.prefix ?? keyDisplay(key) ?? "msk_live_…";
@@ -89,7 +112,7 @@ function formatStatusLines(me: MeResponse | null, key: string | undefined, barWi
 function tipsLines(): string[] {
   return [
     ansi.dim("Tips for getting started"),
-    `  ${ansi.green("review")}      review main...HEAD`,
+    `  ${ansi.green("review")}      review origin/HEAD or main`,
     `  ${ansi.green("stack")}       create → submit → restack → land`,
     `  ${ansi.green("/help")}       list all commands`,
   ];
@@ -114,8 +137,18 @@ export async function printBannerHeader(): Promise<void> {
   const cfg = await loadConfig();
   const key = resolveApiKey(cfg);
   let me: MeResponse | null = null;
+  let keyInvalid = false;
   if (key) {
-    me = await getMe(cfg);
+    try {
+      // Short probe so a hung API cannot stall shell startup for the full request budget.
+      me = await getMe(cfg, { timeoutMs: 8_000 });
+    } catch (err) {
+      if (err instanceof CommandError) {
+        keyInvalid = true;
+      } else {
+        throw err;
+      }
+    }
   }
 
   const version = cliVersion();
@@ -134,7 +167,7 @@ export async function printBannerHeader(): Promise<void> {
   const leftCol = [
     ...logoLines,
     "",
-    ...formatStatusLines(me, key, barWidth),
+    ...formatStatusLines(me, key, barWidth, keyInvalid),
   ];
 
   const rightCol = [
@@ -149,6 +182,13 @@ export async function printBannerHeader(): Promise<void> {
   );
 
   const rows = sideBySide(leftCol, rightClipped, leftColW, 2);
+  if (!preferBoxedUi()) {
+    // Narrow panes — plain lines beat wrapped box frames.
+    console.log(ansi.boldGreen(`mergestorm v${version}`));
+    for (const line of rows) console.log(line);
+    console.log("");
+    return;
+  }
   const panel = roundedBox(rows, {
     title: `mergestorm v${version}`,
     width: outer,

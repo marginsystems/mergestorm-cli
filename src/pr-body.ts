@@ -1,5 +1,5 @@
 /**
- * Build a GitHub PR body from a tip commit message (#217).
+ * Build a GitHub PR body from a tip commit message.
  * Pure — no git / network.
  */
 

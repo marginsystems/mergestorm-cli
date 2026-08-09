@@ -9,8 +9,10 @@ import {
 import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
 import { createPr, findOpenPrNumber, requireGh } from "../gh.js";
+import { parseGithubOriginRepo } from "../git.js";
 import {
   branchExists,
+  commitsAheadOf,
   createBranchFromHead,
   currentBranch,
   defaultLayerBranchName,
@@ -34,7 +36,6 @@ import {
   selectStackForCreate,
 } from "../stack-meta.js";
 import { ansi } from "../ui/ansi.js";
-import { parseGithubOriginRepo } from "./review.js";
 
 const STACK_USAGE = `usage:
   mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--json]
@@ -249,20 +250,59 @@ async function cmdStackCreate(args: string[]): Promise<void> {
   console.log(ansi.dim("  authoring state: managed automatically outside the repository"));
 }
 
-async function cmdStackSubmit(args: string[]): Promise<void> {
+/** Injectable seams for unit tests (STRUCT-04). Production callers omit deps. */
+export type StackSubmitDeps = {
+  cwd?: string;
+  gitTopLevel?: (cwd?: string) => string;
+  loadStackMeta?: typeof loadStackMeta;
+  saveStackMeta?: typeof saveStackMeta;
+  parseGithubOriginRepo?: typeof parseGithubOriginRepo;
+  requireGh?: (cwd?: string) => void;
+  branchExists?: typeof branchExists;
+  pushBranch?: typeof pushBranch;
+  findOpenPrNumber?: typeof findOpenPrNumber;
+  commitsAheadOf?: typeof commitsAheadOf;
+  tipCommitSubject?: typeof tipCommitSubject;
+  tipCommitMessage?: typeof tipCommitMessage;
+  buildPrBodyFromCommit?: typeof buildPrBodyFromCommit;
+  createPr?: typeof createPr;
+  loadConfig?: typeof loadConfig;
+  adoptStack?: typeof adoptStack;
+};
+
+export async function cmdStackSubmit(
+  args: string[],
+  deps: StackSubmitDeps = {},
+): Promise<void> {
   const asJson = args.includes("--json");
   if (args.some((a) => a !== "--json")) {
     throw new CommandError("usage: mergestorm stack submit [--json]");
   }
-  const cwd = process.cwd();
+  const cwd = deps.cwd ?? process.cwd();
+  const gitTopLevelFn = deps.gitTopLevel ?? gitTopLevel;
+  const loadStackMetaFn = deps.loadStackMeta ?? loadStackMeta;
+  const saveStackMetaFn = deps.saveStackMeta ?? saveStackMeta;
+  const parseOriginFn = deps.parseGithubOriginRepo ?? parseGithubOriginRepo;
+  const requireGhFn = deps.requireGh ?? requireGh;
+  const branchExistsFn = deps.branchExists ?? branchExists;
+  const pushBranchFn = deps.pushBranch ?? pushBranch;
+  const findOpenPrNumberFn = deps.findOpenPrNumber ?? findOpenPrNumber;
+  const commitsAheadOfFn = deps.commitsAheadOf ?? commitsAheadOf;
+  const tipCommitSubjectFn = deps.tipCommitSubject ?? tipCommitSubject;
+  const tipCommitMessageFn = deps.tipCommitMessage ?? tipCommitMessage;
+  const buildPrBodyFn = deps.buildPrBodyFromCommit ?? buildPrBodyFromCommit;
+  const createPrFn = deps.createPr ?? createPr;
+  const loadConfigFn = deps.loadConfig ?? loadConfig;
+  const adoptStackFn = deps.adoptStack ?? adoptStack;
+
   try {
-    gitTopLevel(cwd);
+    gitTopLevelFn(cwd);
   } catch {
     throw new CommandError(
       "Not in a git repository. Run `mg stack submit` from inside the repo whose stack you want to push.",
     );
   }
-  const meta = await loadStackMeta(cwd);
+  const meta = await loadStackMetaFn(cwd);
   const layers = meta ? activeLayers(meta) : [];
   if (!meta || layers.length === 0) {
     throw new CommandError(
@@ -270,7 +310,7 @@ async function cmdStackSubmit(args: string[]): Promise<void> {
     );
   }
 
-  const origin = parseGithubOriginRepo(cwd);
+  const origin = parseOriginFn(cwd);
   if (!origin) {
     throw new CommandError(
       "Could not parse GitHub owner/repo from `origin`. Set a github.com remote and retry.",
@@ -278,29 +318,45 @@ async function cmdStackSubmit(args: string[]): Promise<void> {
   }
   const { owner, repo } = origin;
 
-  requireGh(cwd);
+  requireGhFn(cwd);
 
   const opened: { branch: string; base: string; prNumber: number; created: boolean }[] = [];
 
   for (const layer of layers) {
     const base = layer.parentBranch || meta.trunk;
-    if (!branchExists(layer.branch, cwd)) {
+    if (!branchExistsFn(layer.branch, cwd)) {
       throw new CommandError(`Stack layer branch missing locally: ${layer.branch}`);
     }
     console.log(ansi.dim(`  Pushing ${layer.branch} …`));
     try {
-      pushBranch(layer.branch, cwd);
+      pushBranchFn(layer.branch, cwd);
     } catch (err) {
       throw new CommandError(err instanceof Error ? err.message : String(err));
     }
 
-    let prNumber = findOpenPrNumber(owner, repo, layer.branch, cwd);
+    let prNumber = findOpenPrNumberFn(owner, repo, layer.branch, cwd);
     let created = false;
     if (prNumber == null) {
-      const title = tipCommitSubject(layer.branch, cwd);
-      const body = buildPrBodyFromCommit(tipCommitMessage(layer.branch, cwd));
+      // Refuse empty layers before `gh pr create` dumps opaque stderr.
+      if (!branchExistsFn(base, cwd)) {
+        throw new CommandError(`Stack base branch missing locally: ${base}`);
+      }
+      let ahead: number;
+      try {
+        ahead = commitsAheadOfFn(base, layer.branch, cwd);
+      } catch (err) {
+        throw new CommandError(err instanceof Error ? err.message : String(err));
+      }
+      if (ahead < 1) {
+        throw new CommandError(
+          `No commits on \`${layer.branch}\` ahead of \`${base}\`. ` +
+            `Commit your changes, then retry \`mg stack submit\`.`,
+        );
+      }
+      const title = tipCommitSubjectFn(layer.branch, cwd);
+      const body = buildPrBodyFn(tipCommitMessageFn(layer.branch, cwd));
       console.log(ansi.dim(`  Opening PR ${layer.branch} → ${base} …`));
-      prNumber = createPr({
+      prNumber = createPrFn({
         owner,
         repo,
         base,
@@ -317,9 +373,9 @@ async function cmdStackSubmit(args: string[]): Promise<void> {
   }
 
   const registerPr = opened[0]!.prNumber;
-  const cfg = await loadConfig();
+  const cfg = await loadConfigFn();
   console.log(ansi.dim(`  Registering stack via import (${owner}/${repo}#${registerPr}) …`));
-  const body = await adoptStack(owner, repo, registerPr, cfg);
+  const body = await adoptStackFn(owner, repo, registerPr, cfg);
   if (typeof body !== "object" || body === null) {
     throw new CommandError("Unexpected response shape from adopt API");
   }
@@ -333,7 +389,7 @@ async function cmdStackSubmit(args: string[]): Promise<void> {
   const stackId = data.stack.id;
 
   // Drop the submitted local stack so the next create onto trunk starts fresh.
-  await saveStackMeta(removeActiveStack(meta), cwd);
+  await saveStackMetaFn(removeActiveStack(meta), cwd);
 
   if (asJson) {
     console.log(
@@ -366,7 +422,7 @@ async function cmdStackSubmit(args: string[]): Promise<void> {
   } else {
     console.log(ansi.dim("  Stack registration returned no stack ID"));
   }
-  console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard/stacks"));
+  console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
 }
 
 async function cmdStackReset(args: string[]): Promise<void> {
@@ -394,14 +450,14 @@ async function cmdStackList(args: string[]): Promise<void> {
     console.log(
       ansi.dim("  Import an existing chain only: `stack adopt owner/repo#pr`"),
     );
-    console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard/stacks"));
+    console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
     return;
   }
   for (const s of stacks) {
     for (const line of formatStackHuman(s)) console.log(line);
     console.log("");
   }
-  console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard/stacks"));
+  console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
 }
 
 async function cmdStackAdopt(args: string[]): Promise<void> {
@@ -433,7 +489,7 @@ async function cmdStackAdopt(args: string[]): Promise<void> {
   if (stack?.trunkBranch) {
     console.log(ansi.dim(`  trunk: ${stack.trunkBranch}`));
   }
-  console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard/stacks"));
+  console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
 }
 
 async function cmdStackRestack(args: string[]): Promise<void> {
@@ -461,7 +517,7 @@ async function cmdStackLand(args: string[]): Promise<void> {
     "usage: mergestorm stack land <stack-id>",
   );
   const cfg = await loadConfig();
-  // Server routes unit stacks to promote-next (#244 / AUD-07).
+  // Server routes unit stacks to promote-next (land tip into review unit).
   const body = await landNextStack(id, cfg);
   if (asJson) {
     console.log(JSON.stringify(body, null, 2));
@@ -515,8 +571,10 @@ async function cmdStackAutoLand(args: string[]): Promise<void> {
 export async function cmdStack(args: string[]): Promise<void> {
   const sub = args[0]?.toLowerCase();
   const rest = args.slice(1);
-  if (!sub || sub === "-h" || sub === "--help") {
-    throw new CommandError(STACK_USAGE);
+  // Help must exit 0 — print usage, do not throw CommandError.
+  if (!sub || sub === "-h" || sub === "--help" || sub === "help") {
+    console.log(STACK_USAGE);
+    return;
   }
   if (sub === "create") return cmdStackCreate(rest);
   if (sub === "submit") return cmdStackSubmit(rest);

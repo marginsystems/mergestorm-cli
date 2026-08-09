@@ -1,31 +1,115 @@
 import { apiBase, loadConfig, resolveApiKey, type Config } from "./config.js";
 import { CommandError } from "./errors.js";
 
+/** Default per-request timeout so a hung API cannot stall the shell/CI forever. */
+export const DEFAULT_API_TIMEOUT_MS = 30_000;
+
+/** Message prefix of the CommandError thrown when a request exceeds its timeout. */
+export const API_TIMEOUT_PREFIX = "Request timed out after";
+
+export type ApiFetchInit = RequestInit & {
+  json?: unknown;
+  /** Override {@link DEFAULT_API_TIMEOUT_MS}. */
+  timeoutMs?: number;
+};
+
+function isAbortLike(err: unknown): err is Error {
+  return (
+    err instanceof Error &&
+    (err.name === "AbortError" || err.name === "TimeoutError")
+  );
+}
+
+/**
+ * Combine an optional caller signal with a ref'd timeout.
+ * (Built-in `AbortSignal.timeout` unrefs its timer, which can leave hung
+ * fetches without a live timer in edge cases / tests.)
+ */
+function withRequestSignal(
+  userSignal: AbortSignal | null | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; dispose: () => void } {
+  const ac = new AbortController();
+  const timer = setTimeout(() => {
+    ac.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+  }, timeoutMs);
+
+  const onUserAbort = () => {
+    ac.abort(userSignal!.reason);
+  };
+  if (userSignal) {
+    if (userSignal.aborted) onUserAbort();
+    else userSignal.addEventListener("abort", onUserAbort, { once: true });
+  }
+
+  return {
+    signal: ac.signal,
+    dispose: () => {
+      clearTimeout(timer);
+      userSignal?.removeEventListener("abort", onUserAbort);
+    },
+  };
+}
+
+/** Map hung-request aborts to CommandError; preserve caller cancel (Ctrl+C detach). */
+function rethrowFetchAbort(err: unknown, timeoutMs: number): never {
+  if (isAbortLike(err)) {
+    if (err.name === "AbortError") throw err;
+    throw new CommandError(
+      `${API_TIMEOUT_PREFIX} ${Math.round(timeoutMs / 1000)}s. Check network connectivity and API status.`,
+      1,
+      "api_timeout",
+    );
+  }
+  throw err;
+}
+
 export async function apiFetch(
   cfg: Config,
   route: string,
-  init: RequestInit & { json?: unknown } = {},
+  init: ApiFetchInit = {},
 ): Promise<{ status: number; body: unknown }> {
   const key = resolveApiKey(cfg);
   if (!key) {
-    throw new CommandError("No API key. Run `mergestorm login` or set MERGESTORM_API_KEY.");
+    throw new CommandError(
+      "No API key. Run `mergestorm login` or set MERGESTORM_API_KEY.",
+      1,
+      "missing_api_key",
+    );
   }
+  const { json, timeoutMs = DEFAULT_API_TIMEOUT_MS, signal: userSignal, ...rest } = init;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${key}`,
-    ...(init.headers as Record<string, string> | undefined),
+    ...(rest.headers as Record<string, string> | undefined),
   };
-  let body = init.body;
-  if (init.json !== undefined) {
+  let body = rest.body;
+  if (json !== undefined) {
     headers["Content-Type"] = "application/json";
-    body = JSON.stringify(init.json);
+    body = JSON.stringify(json);
   }
-  const res = await fetch(`${apiBase(cfg)}${route}`, { ...init, headers, body });
-  const text = await res.text();
+  const { signal, dispose } = withRequestSignal(userSignal, timeoutMs);
+  let res: Response;
+  let text = "";
+  try {
+    res = await fetch(`${apiBase(cfg)}${route}`, { ...rest, headers, body, signal });
+    text = await res.text();
+  } catch (err) {
+    rethrowFetchAbort(err, timeoutMs);
+  } finally {
+    dispose();
+  }
   let parsed: unknown = text;
   try {
     parsed = JSON.parse(text);
   } catch {
     // keep text
+  }
+  if (res.status === 401) {
+    throw new CommandError(
+      "API key invalid or revoked. Run `mergestorm login`.",
+      1,
+      "auth_invalid",
+    );
   }
   return { status: res.status, body: parsed };
 }
@@ -34,13 +118,25 @@ export async function devicePost(
   base: string,
   route: string,
   json: unknown,
+  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<{ status: number; body: any }> {
-  const res = await fetch(`${base}${route}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(json),
-  });
-  const text = await res.text();
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_API_TIMEOUT_MS;
+  const { signal, dispose } = withRequestSignal(opts.signal, timeoutMs);
+  let res: Response;
+  let text = "";
+  try {
+    res = await fetch(`${base}${route}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(json),
+      signal,
+    });
+    text = await res.text();
+  } catch (err) {
+    rethrowFetchAbort(err, timeoutMs);
+  } finally {
+    dispose();
+  }
   let parsed: unknown = text;
   try {
     parsed = JSON.parse(text);
@@ -111,14 +207,25 @@ export type ThreadDetail = {
 };
 
 /** Fetch /api/v1/me; returns null on 404/network so callers can degrade. */
-export async function getMe(cfg?: Config): Promise<MeResponse | null> {
+export async function getMe(
+  cfg?: Config,
+  opts?: { timeoutMs?: number },
+): Promise<MeResponse | null> {
   const resolved = cfg ?? (await loadConfig());
   try {
-    const { status, body } = await apiFetch(resolved, "/api/v1/me");
+    const { status, body } = await apiFetch(resolved, "/api/v1/me", {
+      timeoutMs: opts?.timeoutMs,
+    });
     if (status === 404) return null;
     if (status !== 200) return null;
     return body as MeResponse;
-  } catch {
+  } catch (err) {
+    // 401 (and missing-key) must surface — do not misdiagnose as offline/old API.
+    // Timeouts degrade like other network failures (banner / soft probes).
+    if (err instanceof CommandError) {
+      if (err.code === "api_timeout") return null;
+      throw err;
+    }
     return null;
   }
 }
