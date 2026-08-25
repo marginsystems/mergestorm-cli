@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { apiFetch, getMe } from "./api.js";
+import { apiFetch, getMe, getReview, parseRetryAfterSeconds } from "./api.js";
 import type { Config } from "./config.js";
 import { CommandError } from "./errors.js";
 
@@ -111,4 +111,63 @@ test("apiFetch preserves caller AbortError for Ctrl+C detach", async () => {
 test("getMe returns null on request timeout (banner soft-fail)", async () => {
   mockHangingFetch();
   assert.equal(await getMe(cfg, { timeoutMs: 25 }), null);
+});
+
+test("getReview returns the job body on HTTP 200", async () => {
+  mockFetch(200, { job_id: "job_1", status: "completed" });
+  assert.deepEqual(await getReview("job_1", cfg), {
+    job_id: "job_1",
+    status: "completed",
+  });
+});
+
+test("parseRetryAfterSeconds prefers the larger of header and body", () => {
+  assert.equal(
+    parseRetryAfterSeconds({
+      header: "8",
+      body: { retry_after_seconds: 30 },
+    }),
+    30,
+  );
+  assert.equal(parseRetryAfterSeconds({ header: "12", body: { error: "busy" } }), 12);
+  assert.equal(parseRetryAfterSeconds({ body: { retry_after_seconds: 4.2 } }), 4.2);
+  assert.equal(parseRetryAfterSeconds({ header: "nope", body: {} }), undefined);
+});
+
+test("apiFetch exposes Retry-After and retry_after_seconds", async () => {
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ error: "rate_limited", retry_after_seconds: 15 }), {
+      status: 429,
+      headers: { "Content-Type": "application/json", "Retry-After": "15" },
+    });
+  const res = await apiFetch(cfg, "/api/v1/reviews");
+  assert.equal(res.status, 429);
+  assert.equal(res.retryAfterSeconds, 15);
+});
+
+test("getReview throws rate_limited on HTTP 429", async () => {
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ error: "rate_limited", retry_after_seconds: 9 }), {
+      status: 429,
+      headers: { "Content-Type": "application/json", "Retry-After": "9" },
+    });
+  await assert.rejects(
+    () => getReview("job_1", cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "rate_limited" &&
+      err.exitCode === 7 &&
+      err.retryAfterSeconds === 9,
+  );
+});
+
+test("getReview throws on HTTP 404", async () => {
+  mockFetch(404, { error: "not_found" });
+  await assert.rejects(
+    () => getReview("missing", cfg),
+    (err: unknown) =>
+      err instanceof CommandError && err.message === "Review not found: missing",
+  );
 });

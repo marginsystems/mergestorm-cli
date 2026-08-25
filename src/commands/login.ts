@@ -71,14 +71,32 @@ export async function cmdLogin(args: string[]): Promise<void> {
   const base = apiBase(cfg);
 
   let start;
-  try {
-    start = await devicePost(base, "/api/v1/cli/device", {});
-  } catch {
-    throw new CommandError(
-      "Could not start device login. The API may be unreachable or misconfigured.\n" +
-        "Run `mergestorm login --key` to paste an existing API key instead.",
+  let attempt = 0;
+  do {
+    try {
+      start = await devicePost(base, "/api/v1/cli/device", {});
+    } catch {
+      throw new CommandError(
+        "Could not start device login. The API may be unreachable or misconfigured.\n" +
+          "Run `mergestorm login --key` to paste an existing API key instead.",
+      );
+    }
+    const err = start.body?.error;
+    if (err !== "rate_limited" && err !== "slow_down") break;
+    if (start.status !== 429 && start.status !== 400) break;
+    const backoff = Number(start.body?.retry_after_seconds);
+    const waitMs = Number.isFinite(backoff) && backoff > 0 ? backoff * 1000 : 5000;
+    if (attempt === 2) {
+      throw new CommandError(
+        `Device login is rate limited for this IP. Wait ${Math.ceil(waitMs / 1000)}s, then run \`mergestorm login\` again.`,
+      );
+    }
+    console.log(
+      `Device login is rate limited. Waiting ${Math.ceil(waitMs / 1000)}s before trying again…`,
     );
-  }
+    await new Promise((r) => setTimeout(r, waitMs));
+    attempt += 1;
+  } while (attempt < 3);
   if (start.status !== 200 || !start.body?.device_code) {
     throw new CommandError(
       `Could not start device login (HTTP ${start.status}). The API may be unreachable or misconfigured.\n` +
@@ -132,6 +150,13 @@ export async function cmdLogin(args: string[]): Promise<void> {
     const err = poll.body?.error;
     if (err === "authorization_pending") {
       process.stdout.write(".");
+      continue;
+    }
+    if (err === "slow_down" || err === "rate_limited") {
+      const backoff = Number(poll.body?.retry_after_seconds);
+      await new Promise((r) =>
+        setTimeout(r, Number.isFinite(backoff) && backoff > 0 ? backoff * 1000 : pollMs),
+      );
       continue;
     }
     if (err === "key_limit_reached") {

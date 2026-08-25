@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { COMMANDS, parseLine } from "./shell.js";
+import { matchSlashCommands } from "./ui/prompt.js";
 
 test("parseLine strips a leading slash", () => {
   assert.deepEqual(parseLine("/review main head"), {
@@ -30,13 +31,11 @@ test("COMMANDS has no duplicate names and every entry has a summary", () => {
 });
 
 test("COMMANDS filters by prefix like the shell dropdown does", () => {
-  const term = "lo";
-  const hits = COMMANDS.filter((c) => c.name.startsWith(term)).map((c) => c.name);
+  const hits = matchSlashCommands("/lo", COMMANDS).map((c) => c.name);
   assert.deepEqual(hits.sort(), ["login", "logout"].sort());
 
-  const noHits = COMMANDS.filter((c) => c.name.startsWith("zzz"));
-  assert.equal(noHits.length, 0);
-
-  const all = COMMANDS.filter((c) => c.name.startsWith(""));
-  assert.equal(all.length, COMMANDS.length);
+  assert.equal(matchSlashCommands("/zzz", COMMANDS).length, 0);
+  assert.equal(matchSlashCommands("/", COMMANDS).length, COMMANDS.length);
+  assert.equal(matchSlashCommands("/us", COMMANDS)[0]?.name, "credits");
+  assert.equal(matchSlashCommands("/q", COMMANDS)[0]?.name, "exit");
 });

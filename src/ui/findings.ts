@@ -1,11 +1,13 @@
 /** Shared review-job findings payload (API may send snake or camel for off-diff). */
 export type ReviewFindings = {
+  specialists_run?: string[];
   inline?: {
     path: string;
     line: number;
     severity: string;
     body: string;
     title?: string;
+    specialist?: string;
   }[];
   off_diff?: {
     path?: string;
@@ -34,7 +36,8 @@ export function renderFindings(
   const inline = findings?.inline ?? [];
   const off = findings?.off_diff ?? findings?.offDiff ?? [];
   for (const c of inline) {
-    console.log(`\n[${c.severity}] ${c.path}:${c.line}${c.title ? ` — ${c.title}` : ""}`);
+    const lane = c.specialist ? `[${c.specialist}]` : "";
+    console.log(`\n[${c.severity}]${lane} ${c.path}:${c.line}${c.title ? ` — ${c.title}` : ""}`);
     console.log(c.body);
   }
   for (const c of off) {

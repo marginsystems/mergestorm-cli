@@ -59,6 +59,45 @@ test("roundedBox width option stretches to full outer width", () => {
   });
 });
 
+test("roundedBox never exceeds width: a 300-char line is clipped at width 40", () => {
+  withEnv({ FORCE_COLOR: "1", TERM: "xterm-256color", NO_COLOR: undefined }, () => {
+    const long = "x".repeat(300);
+    const box = roundedBox([long, "short"], { width: 40 });
+    assert.equal(box.length, 4);
+    for (const row of box) assert.equal(visibleWidth(row), 40);
+    const stripped = box.map(stripAnsi);
+    assert.ok(stripped[1]!.startsWith("│ " + "x".repeat(36) + " │"));
+    assert.ok(stripped[2]!.includes("short"));
+  });
+});
+
+test("roundedBox clamps CJK content by cells, not code units", () => {
+  withEnv({ FORCE_COLOR: "1", TERM: "xterm-256color", NO_COLOR: undefined }, () => {
+    const cjk = "日本語".repeat(20); // 60 code units, 120 cells
+    const box = roundedBox([cjk], { width: 40 });
+    for (const row of box) assert.equal(visibleWidth(row), 40);
+    const coloured = `\u001b[32m${"y".repeat(100)}\u001b[0m`;
+    for (const row of roundedBox([coloured], { width: 40, title: "t".repeat(80) })) {
+      assert.equal(visibleWidth(row), 40);
+    }
+  });
+});
+
+test("roundedBox minWidth still grows to content", () => {
+  withEnv({ FORCE_COLOR: "1", TERM: "xterm-256color", NO_COLOR: undefined }, () => {
+    const box = roundedBox(["x".repeat(60)], { minWidth: 40 });
+    assert.equal(visibleWidth(box[0]!), 64);
+    assert.equal(visibleWidth(box[1]!), 64);
+  });
+});
+
+test("preferBoxedUi / frameWidth honor injected columns", () => {
+  assert.equal(preferBoxedUi(40), false);
+  assert.equal(preferBoxedUi(100), true);
+  assert.equal(frameWidth(80, 100), 99);
+  assert.equal(frameWidth(80, 40), 39);
+});
+
 test("roundedBox centers a title in the top border", () => {
   withEnv({ FORCE_COLOR: "1", TERM: "xterm-256color", NO_COLOR: undefined }, () => {
     const box = roundedBox(["hello world"], { title: "demo", width: 40 });

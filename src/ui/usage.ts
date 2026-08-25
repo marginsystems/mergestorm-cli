@@ -1,4 +1,6 @@
 import { ansi } from "./ansi.js";
+import { frameWidth } from "./box.js";
+import { padVisible, visibleWidth } from "./width.js";
 
 export type UsageBarOpts = {
   /** Bar width in cells (default 56). */
@@ -12,7 +14,7 @@ export type UsageBarOpts = {
  *   `[████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 7% used`
  *
  * No used/limit clutter. Edge cases:
- * - `limit === 0` → dim "not included" (premium on non-Maelstrom)
+ * - `limit === 0` → dim "not included"
  * - `limit == null` → "unlimited" (dev-bypass)
  */
 export function usageBar(
@@ -84,4 +86,77 @@ export function formatResetLabel(iso: string | null | undefined, now = new Date(
 /** Alias kept for callers that still import `formatResetDate`. */
 export function formatResetDate(iso: string | null | undefined): string {
   return formatResetLabel(iso);
+}
+
+/** Bar cells so `  [bar] 100% used` stays inside the terminal. */
+export function usageBarWidth(columns: number): number {
+  return Math.max(8, frameWidth(80, columns) - 13);
+}
+
+export type UsagePanelJob = {
+  job: string;
+  verdict: string;
+  thread: string;
+  credits: string;
+  when: string;
+};
+
+export type UsagePanelInput = {
+  keyPrefix: string;
+  plan: string;
+  used: number;
+  limit: number | null;
+  resetsAt: string | null | undefined;
+  jobs: UsagePanelJob[];
+  columns: number;
+  color?: boolean;
+};
+
+function clipLine(line: string, columns: number): string {
+  if (visibleWidth(line) <= columns) return line;
+  return padVisible(line, columns);
+}
+
+/**
+ * Static `/usage` panel: identity, a bar sized from `frameWidth()`, reset
+ * line, then the last five jobs. Every row is clipped to `columns`.
+ */
+export function formatUsagePanel(input: UsagePanelInput): string[] {
+  const columns = Math.max(20, input.columns);
+  const color = input.color ?? false;
+  const identity = `● ${input.keyPrefix} · ${input.plan}`;
+  const bar = usageBar(input.used, input.limit, {
+    width: usageBarWidth(columns),
+    color,
+  });
+  const lines = [
+    `  ${identity}`,
+    `  ${bar}`,
+    `  ${formatResetLabel(input.resetsAt)}`,
+    "",
+  ];
+
+  if (input.jobs.length === 0) {
+    lines.push("  No review jobs yet.");
+    return lines.map((line) => clipLine(line, columns));
+  }
+
+  const inner = Math.max(20, columns - 2);
+  const jobW = 8;
+  const verdictW = 15;
+  const creditsW = 7;
+  const whenW = 8;
+  const gaps = 8;
+  const threadW = Math.max(6, inner - jobW - verdictW - creditsW - whenW - gaps);
+  const header = ["JOB", "VERDICT", "THREAD", "CREDITS", "WHEN"];
+  const widths = [jobW, verdictW, threadW, creditsW, whenW];
+  const fmt = (cols: string[]) =>
+    "  " + cols.map((c, i) => padVisible(c, widths[i]!)).join("  ");
+  lines.push(fmt(header));
+  for (const job of input.jobs.slice(0, 5)) {
+    lines.push(
+      fmt([job.job, job.verdict, job.thread, job.credits, job.when]),
+    );
+  }
+  return lines.map((line) => clipLine(line, columns));
 }

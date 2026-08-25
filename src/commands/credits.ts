@@ -1,8 +1,19 @@
-import { getMe } from "../api.js";
+import { getMe, listJobs, type JobListItem } from "../api.js";
 import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
-import { formatResetLabel, usageBar } from "../ui/usage.js";
+import { formatUsagePanel, type UsagePanelJob } from "../ui/usage.js";
+import { relativeWhen } from "./jobs.js";
+
+function toPanelJob(job: JobListItem): UsagePanelJob {
+  return {
+    job: job.job_id.slice(0, 8),
+    verdict: job.verdict ?? job.status ?? "-",
+    thread: job.thread_slug ?? "-",
+    credits: job.credits ? String(job.credits.standard) : "-",
+    when: relativeWhen(job.created_at),
+  };
+}
 
 export async function cmdCredits(args: string[]): Promise<void> {
   const asJson = args.includes("--json");
@@ -14,19 +25,36 @@ export async function cmdCredits(args: string[]): Promise<void> {
         "Try `mergestorm login` or open https://mergestorm.ai/billing",
     );
   }
+
+  let recentJobs: JobListItem[] = [];
+  try {
+    recentJobs = await listJobs(5, cfg);
+  } catch {
+    recentJobs = [];
+  }
+
   if (asJson) {
-    console.log(JSON.stringify({ usage: me.usage, resets_at: me.resets_at ?? null }, null, 2));
+    console.log(
+      JSON.stringify(
+        { usage: me.usage, resets_at: me.resets_at ?? null, recent_jobs: recentJobs },
+        null,
+        2,
+      ),
+    );
     return;
   }
-  const s = me.usage.standard;
-  const p = me.usage.premium;
 
-  // Claude Usage tab layout: label → long bar + "N% used" → Resets line.
-  console.log(`  ${ansi.bold("Standard")}`);
-  console.log(`  ${usageBar(s.used, s.limit)}`);
-  console.log("");
-  console.log(`  ${ansi.bold("Premium")}`);
-  console.log(`  ${usageBar(p.used, p.limit)}`);
-  console.log("");
-  console.log(`  ${ansi.dim(formatResetLabel(me.resets_at))}`);
+  const s = me.usage.standard;
+  const columns = process.stdout.columns || 80;
+  const lines = formatUsagePanel({
+    keyPrefix: me.key.prefix,
+    plan: me.plan_label_key ?? me.plan_key,
+    used: s.used,
+    limit: s.limit,
+    resetsAt: me.resets_at,
+    jobs: recentJobs.map(toPanelJob),
+    columns,
+    color: ansi.enabled,
+  });
+  for (const line of lines) console.log(line);
 }

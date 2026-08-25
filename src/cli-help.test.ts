@@ -45,6 +45,7 @@ describe("CLI help exits", { skip: !nodeBin }, () => {
     const r = runCli(["--help"]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Usage:/);
+    assert.match(r.stdout, /--router/);
     assert.equal(r.stderr.trim(), "");
   });
 

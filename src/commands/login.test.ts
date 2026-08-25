@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import type { Config } from "../config.js";
 import { CommandError } from "../errors.js";
-import { validateApiKey } from "./login.js";
+import { cmdLogin, validateApiKey } from "./login.js";
 
 const cfg: Config = {
   apiKey: "msk_live_candidate_key",
@@ -30,7 +30,6 @@ test("validateApiKey accepts a working key", async () => {
     plan_key: "pro",
     usage: {
       standard: { used: 0, limit: 100, remaining: 100 },
-      premium: { used: 0, limit: 10, remaining: 10 },
     },
   });
   const me = await validateApiKey(cfg);
@@ -55,4 +54,84 @@ test("validateApiKey rejects unreachable / non-200 without saving", async () => 
     (err: unknown) =>
       err instanceof CommandError && /not saved/i.test(err.message),
   );
+});
+
+test("cmdLogin backs off and retries when device start is rate limited", async () => {
+  const startPaths: string[] = [];
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/cli/device")) {
+      startPaths.push(url);
+      if (startPaths.length === 1) {
+        return new Response(
+          JSON.stringify({ error: "rate_limited", retry_after_seconds: 0.01 }),
+          { status: 429, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          device_code: "device-123",
+          user_code: "ABCD-EFGH",
+          verification_uri: "https://mergestorm.ai/cli/auth",
+          verification_uri_complete: "https://mergestorm.ai/cli/auth?code=ABCD-EFGH",
+          interval: 1,
+          expires_in: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response(
+      JSON.stringify({ error: "authorization_pending" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  await assert.rejects(
+    () => cmdLogin([]),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      /timed out/i.test(err.message) &&
+      !/unreachable or misconfigured/i.test(err.message),
+  );
+  assert.equal(startPaths.length, 2);
+});
+
+test("cmdLogin backs off and retries when device start returns slow_down (HTTP 400)", async () => {
+  const startPaths: string[] = [];
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/cli/device")) {
+      startPaths.push(url);
+      if (startPaths.length === 1) {
+        return new Response(
+          JSON.stringify({ error: "slow_down", retry_after_seconds: 0.01 }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          device_code: "device-123",
+          user_code: "ABCD-EFGH",
+          verification_uri: "https://mergestorm.ai/cli/auth",
+          verification_uri_complete: "https://mergestorm.ai/cli/auth?code=ABCD-EFGH",
+          interval: 1,
+          expires_in: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response(
+      JSON.stringify({ error: "authorization_pending" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  await assert.rejects(
+    () => cmdLogin([]),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      /timed out/i.test(err.message) &&
+      !/unreachable or misconfigured/i.test(err.message),
+  );
+  assert.equal(startPaths.length, 2);
 });

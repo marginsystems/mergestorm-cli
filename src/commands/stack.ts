@@ -1,5 +1,6 @@
 import {
   adoptStack,
+  ensureUpperPark,
   landNextStack,
   listStacks,
   restackStack,
@@ -18,6 +19,7 @@ import {
   defaultLayerBranchName,
   deleteBranch,
   discoverTrunk,
+  fetchRemoteBranch,
   pushBranch,
   tipCommitMessage,
   tipCommitSubject,
@@ -35,11 +37,12 @@ import {
   saveStackMeta,
   selectStackForCreate,
 } from "../stack-meta.js";
+import { isMgParkBranch, planSubmitLayerBases } from "../submit-pr-base.js";
 import { ansi } from "../ui/ansi.js";
 
 const STACK_USAGE = `usage:
-  mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--json]
-  mergestorm stack submit [--json]
+  mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend] [--json]
+  mergestorm stack submit [--extend] [--json]
   mergestorm stack reset --force
   mergestorm stack list [--json]
   mergestorm stack adopt <owner/repo>#<pr>
@@ -48,8 +51,80 @@ const STACK_USAGE = `usage:
   mergestorm stack auto-promote on|off <stack-id> [--json]
 
   stack submit opens PRs with a body generated from each layer tip commit.
-  stack land promotes into the review unit when one exists; otherwise lands
-  the bottom open PR (unit-less stacks).`;
+  Layers 1–2 use the git parent as GitHub base. Layer 3+ opens onto the
+  review-unit park freeze (mg-park-*) so adopt does not retarget after open.
+  Parenting onto a branch that already belongs to a registered (submitted)
+  stack requires --extend on create and submit — otherwise mg starts a new
+  stack from trunk. stack land promotes into the review unit when one exists;
+  otherwise lands the bottom open PR (unit-less stacks).`;
+
+/** Cap the registered-stack guard's API probe so it cannot stall local authoring. */
+const STACK_GUARD_TIMEOUT_MS = 8_000;
+
+/** A registered stack layer that would become the parent of a new layer. */
+export type RegisteredParentHit = {
+  stackId: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  prNumber: number;
+  position: number;
+};
+
+/** Find a registered stack layer whose branch matches `parentBranch`. */
+export function findRegisteredParent(
+  stacks: StackDto[],
+  parentBranch: string,
+  owner?: string,
+  repo?: string,
+): RegisteredParentHit | null {
+  const want = parentBranch.trim();
+  if (!want) return null;
+  for (const s of stacks) {
+    if (owner !== undefined && repo !== undefined) {
+      if (s.owner !== owner || s.repo !== repo) continue;
+    }
+    for (const layer of s.layers) {
+      if (layer.branch === want) {
+        return {
+          stackId: s.id,
+          owner: s.owner,
+          repo: s.repo,
+          branch: layer.branch,
+          prNumber: layer.prNumber,
+          position: layer.position,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Refuse silently growing an already-registered stack.
+ * Local unsubmitted parents are fine; only API-listed layers trip this.
+ */
+export function assertMayParentOntoRegistered(
+  parentBranch: string,
+  stacks: StackDto[],
+  extend: boolean,
+  verb: "create" | "submit",
+  owner?: string,
+  repo?: string,
+): RegisteredParentHit | null {
+  const hit = findRegisteredParent(stacks, parentBranch, owner, repo);
+  if (!hit) return null;
+  if (extend) return hit;
+  const pr = hit.prNumber > 0 ? `PR #${hit.prNumber}` : "an open PR";
+  throw new CommandError(
+    `Parent \`${hit.branch}\` is already layer ${hit.position} of registered stack ${hit.stackId} (${hit.owner}/${hit.repo}, ${pr}).\n` +
+      `Refusing to ${verb} a new layer onto that stack without an explicit opt-in.\n` +
+      `• New independent stack: check out trunk and pass \`--onto <trunk>\` (e.g. \`mg stack create --onto main\`).\n` +
+      `• Intentionally grow that stack: pass \`--extend\` on \`stack ${verb}\`.`,
+    1,
+    "registered_parent",
+  );
+}
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -109,11 +184,13 @@ export function parseStackCreateArgs(args: string[]): {
   name?: string;
   onto?: string;
   trunk?: string;
+  extend: boolean;
   asJson: boolean;
 } {
   let name: string | undefined;
   let onto: string | undefined;
   let trunk: string | undefined;
+  let extend = false;
   let asJson = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -121,9 +198,17 @@ export function parseStackCreateArgs(args: string[]): {
       asJson = true;
       continue;
     }
+    if (a === "--extend") {
+      extend = true;
+      continue;
+    }
     if (a === "--onto") {
       const v = args[++i];
-      if (!v) throw new CommandError("usage: mergestorm stack create [name] [--onto <branch>]");
+      if (!v) {
+        throw new CommandError(
+          "usage: mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend]",
+        );
+      }
       onto = v;
       continue;
     }
@@ -133,7 +218,11 @@ export function parseStackCreateArgs(args: string[]): {
     }
     if (a === "--trunk") {
       const v = args[++i];
-      if (!v) throw new CommandError("usage: mergestorm stack create [name] [--trunk <branch>]");
+      if (!v) {
+        throw new CommandError(
+          "usage: mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend]",
+        );
+      }
       trunk = v;
       continue;
     }
@@ -145,11 +234,34 @@ export function parseStackCreateArgs(args: string[]): {
       throw new CommandError(`${STACK_USAGE}\nunknown flag: ${a}`);
     }
     if (name != null) {
-      throw new CommandError("usage: mergestorm stack create [name] [--onto <branch>] [--trunk <branch>]");
+      throw new CommandError(
+        "usage: mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend]",
+      );
     }
     name = a;
   }
-  return { name, onto, trunk, asJson };
+  return { name, onto, trunk, extend, asJson };
+}
+
+/** Parse `stack submit` argv. Exported for tests. */
+export function parseStackSubmitArgs(args: string[]): {
+  extend: boolean;
+  asJson: boolean;
+} {
+  let extend = false;
+  let asJson = false;
+  for (const a of args) {
+    if (a === "--json") {
+      asJson = true;
+      continue;
+    }
+    if (a === "--extend") {
+      extend = true;
+      continue;
+    }
+    throw new CommandError("usage: mergestorm stack submit [--extend] [--json]");
+  }
+  return { extend, asJson };
 }
 
 export function parseStackResetArgs(args: string[]): void {
@@ -160,9 +272,23 @@ export function parseStackResetArgs(args: string[]): void {
   }
 }
 
-async function cmdStackCreate(args: string[]): Promise<void> {
-  const { name, onto, trunk: trunkFlag, asJson } = parseStackCreateArgs(args);
-  const cwd = process.cwd();
+/** Injectable seams for unit tests. Production callers omit deps. */
+export type StackCreateDeps = {
+  cwd?: string;
+  listStacks?: typeof listStacks;
+  loadConfig?: typeof loadConfig;
+  parseGithubOriginRepo?: typeof parseGithubOriginRepo;
+};
+
+async function cmdStackCreate(
+  args: string[],
+  deps: StackCreateDeps = {},
+): Promise<void> {
+  const { name, onto, trunk: trunkFlag, extend, asJson } = parseStackCreateArgs(args);
+  const cwd = deps.cwd ?? process.cwd();
+  const listStacksFn = deps.listStacks ?? listStacks;
+  const loadConfigFn = deps.loadConfig ?? loadConfig;
+  const parseOriginFn = deps.parseGithubOriginRepo ?? parseGithubOriginRepo;
   try {
     gitTopLevel(cwd);
   } catch {
@@ -202,6 +328,57 @@ async function cmdStackCreate(args: string[]): Promise<void> {
     );
   }
 
+  // --trunk only sets metadata; parent defaults to current branch. Call that out
+  // when someone passes --trunk while sitting on a different branch without --onto.
+  if (trunkFlag?.trim() && !onto?.trim() && parentBranch !== trunk) {
+    console.error(
+      ansi.dim(
+        `  note: --trunk ${trunk} does not change the parent; new layer parents onto \`${parentBranch}\`. ` +
+          `Pass \`--onto ${trunk}\` for a fresh stack from trunk.`,
+      ),
+    );
+  }
+
+  // Block silent attach onto an already-submitted stack tip (requires --extend).
+  // --trunk is user metadata, so a registered tip must not be able to masquerade
+  // as trunk — always consult the stacks API rather than trusting parent === trunk.
+  // Best-effort: API/key failures degrade to a warning so create stays local.
+  const origin = parseOriginFn(cwd);
+  let registeredHit: RegisteredParentHit | null = null;
+  if (origin) {
+    try {
+      const cfg = await loadConfigFn();
+      const registered = await listStacksFn(cfg, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
+      registeredHit = assertMayParentOntoRegistered(
+        parentBranch,
+        registered,
+        extend,
+        "create",
+        origin.owner,
+        origin.repo,
+      );
+    } catch (err) {
+      if (err instanceof CommandError && err.code === "registered_parent") throw err;
+      console.error(
+        ansi.dim(
+          `  warning: could not check registered stacks (${err instanceof Error ? err.message : String(err)}); ` +
+            `skipping --extend guard. Pass --extend if you intend to grow an open stack.`,
+        ),
+      );
+    }
+  } else {
+    console.error(
+      ansi.dim(
+        "  warning: could not determine GitHub owner/repo from `origin`; skipping --extend guard. Pass --extend if you intend to grow an open stack.",
+      ),
+    );
+  }
+  if (parentBranch === trunk && extend && !registeredHit) {
+    throw new CommandError(
+      "`--extend` is only valid when parenting onto a registered stack layer, not trunk. Omit --extend (or pass --onto <tip> --extend).",
+    );
+  }
+
   try {
     meta = selectStackForCreate(meta, parentBranch);
   } catch (err) {
@@ -230,6 +407,7 @@ async function cmdStackCreate(args: string[]): Promise<void> {
           branch,
           parentBranch,
           trunk: meta.trunk,
+          extend: Boolean(registeredHit),
           active: meta.active,
           stacks: meta.stacks.length,
           layers,
@@ -242,6 +420,14 @@ async function cmdStackCreate(args: string[]): Promise<void> {
     return;
   }
   console.log(ansi.green(`  Created ${branch} (onto ${parentBranch})`));
+  if (registeredHit) {
+    console.log(
+      ansi.dim(
+        `  extending registered stack ${registeredHit.stackId}` +
+          (registeredHit.prNumber > 0 ? ` (from #${registeredHit.prNumber})` : ""),
+      ),
+    );
+  }
   console.log(
     ansi.dim(
       `  trunk: ${meta.trunk} · local stacks: ${meta.stacks.length} · active layers: ${layers.length}`,
@@ -259,6 +445,7 @@ export type StackSubmitDeps = {
   parseGithubOriginRepo?: typeof parseGithubOriginRepo;
   requireGh?: (cwd?: string) => void;
   branchExists?: typeof branchExists;
+  fetchRemoteBranch?: typeof fetchRemoteBranch;
   pushBranch?: typeof pushBranch;
   findOpenPrNumber?: typeof findOpenPrNumber;
   commitsAheadOf?: typeof commitsAheadOf;
@@ -267,17 +454,16 @@ export type StackSubmitDeps = {
   buildPrBodyFromCommit?: typeof buildPrBodyFromCommit;
   createPr?: typeof createPr;
   loadConfig?: typeof loadConfig;
+  listStacks?: typeof listStacks;
   adoptStack?: typeof adoptStack;
+  ensureUpperPark?: typeof ensureUpperPark;
 };
 
 export async function cmdStackSubmit(
   args: string[],
   deps: StackSubmitDeps = {},
 ): Promise<void> {
-  const asJson = args.includes("--json");
-  if (args.some((a) => a !== "--json")) {
-    throw new CommandError("usage: mergestorm stack submit [--json]");
-  }
+  const { extend, asJson } = parseStackSubmitArgs(args);
   const cwd = deps.cwd ?? process.cwd();
   const gitTopLevelFn = deps.gitTopLevel ?? gitTopLevel;
   const loadStackMetaFn = deps.loadStackMeta ?? loadStackMeta;
@@ -285,6 +471,7 @@ export async function cmdStackSubmit(
   const parseOriginFn = deps.parseGithubOriginRepo ?? parseGithubOriginRepo;
   const requireGhFn = deps.requireGh ?? requireGh;
   const branchExistsFn = deps.branchExists ?? branchExists;
+  const fetchRemoteBranchFn = deps.fetchRemoteBranch ?? fetchRemoteBranch;
   const pushBranchFn = deps.pushBranch ?? pushBranch;
   const findOpenPrNumberFn = deps.findOpenPrNumber ?? findOpenPrNumber;
   const commitsAheadOfFn = deps.commitsAheadOf ?? commitsAheadOf;
@@ -293,7 +480,9 @@ export async function cmdStackSubmit(
   const buildPrBodyFn = deps.buildPrBodyFromCommit ?? buildPrBodyFromCommit;
   const createPrFn = deps.createPr ?? createPr;
   const loadConfigFn = deps.loadConfig ?? loadConfig;
+  const listStacksFn = deps.listStacks ?? listStacks;
   const adoptStackFn = deps.adoptStack ?? adoptStack;
+  const ensureUpperParkFn = deps.ensureUpperPark ?? ensureUpperPark;
 
   try {
     gitTopLevelFn(cwd);
@@ -320,10 +509,45 @@ export async function cmdStackSubmit(
 
   requireGhFn(cwd);
 
-  const opened: { branch: string; base: string; prNumber: number; created: boolean }[] = [];
+  // Safety net: refuse submit that would open/register onto a registered tip
+  // without --extend. Check every layer's parent (mid-stack layers from older
+  // local state must not sail through), scoped to this repo, and fail closed
+  // when the API cannot be consulted — otherwise the attach happens anyway.
+  // meta.trunk is user metadata, so it must not exempt a registered tip from
+  // the check (a tip can masquerade as trunk via --trunk at create).
+  const parents = [...new Set(layers.map((l) => l.parentBranch || meta.trunk))];
+  let registeredHits = 0;
+  let registered: StackDto[] = [];
+  try {
+    const cfg = await loadConfigFn();
+    registered = await listStacksFn(cfg, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
+    for (const parent of parents) {
+      if (assertMayParentOntoRegistered(parent, registered, extend, "submit", owner, repo)) {
+        registeredHits += 1;
+      }
+    }
+  } catch (err) {
+    if (err instanceof CommandError && err.code === "registered_parent") throw err;
+    throw new CommandError(
+      `Could not verify that the stack parents onto registered stacks (${err instanceof Error ? err.message : String(err)}); ` +
+        `refusing to submit. If a layer grows a registered stack, pass --extend (retry when the API is reachable).`,
+    );
+  }
+  if (extend && registeredHits === 0 && parents.every((p) => p === meta.trunk)) {
+    throw new CommandError(
+      "`--extend` is only valid when a layer parents onto a registered stack layer, not trunk.",
+    );
+  }
+
+  const plans = planSubmitLayerBases({
+    layers,
+    trunk: meta.trunk,
+    registered,
+    owner,
+    repo,
+  });
 
   for (const layer of layers) {
-    const base = layer.parentBranch || meta.trunk;
     if (!branchExistsFn(layer.branch, cwd)) {
       throw new CommandError(`Stack layer branch missing locally: ${layer.branch}`);
     }
@@ -333,60 +557,122 @@ export async function cmdStackSubmit(
     } catch (err) {
       throw new CommandError(err instanceof Error ? err.message : String(err));
     }
+  }
 
-    let prNumber = findOpenPrNumberFn(owner, repo, layer.branch, cwd);
-    let created = false;
-    if (prNumber == null) {
-      // Refuse empty layers before `gh pr create` dumps opaque stderr.
-      if (!branchExistsFn(base, cwd)) {
-        throw new CommandError(`Stack base branch missing locally: ${base}`);
-      }
-      let ahead: number;
+  const opened: { branch: string; base: string; prNumber: number; created: boolean }[] = [];
+  const pendingPark = plans.filter((plan) => {
+    if (findOpenPrNumberFn(owner, repo, plan.branch, cwd) != null) return false;
+    return plan.githubBase == null;
+  });
+
+  const openLayerPr = (branch: string, base: string): { prNumber: number; created: boolean } => {
+    const existing = findOpenPrNumberFn(owner, repo, branch, cwd);
+    if (existing != null) {
+      console.log(ansi.dim(`  PR #${existing} already open for ${branch}`));
+      return { prNumber: existing, created: false };
+    }
+    const aheadRef = isMgParkBranch(base) ? `origin/${base}` : base;
+    if (isMgParkBranch(base)) {
       try {
-        ahead = commitsAheadOfFn(base, layer.branch, cwd);
+        fetchRemoteBranchFn(base, cwd);
       } catch (err) {
-        throw new CommandError(err instanceof Error ? err.message : String(err));
-      }
-      if (ahead < 1) {
         throw new CommandError(
-          `No commits on \`${layer.branch}\` ahead of \`${base}\`. ` +
-            `Commit your changes, then retry \`mg stack submit\`.`,
+          `Could not fetch park base \`${base}\` (${err instanceof Error ? err.message : String(err)}).`,
         );
       }
-      const title = tipCommitSubjectFn(layer.branch, cwd);
-      const body = buildPrBodyFn(tipCommitMessageFn(layer.branch, cwd));
-      console.log(ansi.dim(`  Opening PR ${layer.branch} → ${base} …`));
-      prNumber = createPrFn({
+    } else if (!branchExistsFn(base, cwd)) {
+      throw new CommandError(`Stack base branch missing locally: ${base}`);
+    }
+    let ahead: number;
+    try {
+      ahead = commitsAheadOfFn(aheadRef, branch, cwd);
+    } catch (err) {
+      throw new CommandError(err instanceof Error ? err.message : String(err));
+    }
+    if (ahead < 1) {
+      throw new CommandError(
+        `No commits on \`${branch}\` ahead of \`${base}\`. ` +
+          `Commit your changes, then retry \`mg stack submit\`.`,
+      );
+    }
+    const title = tipCommitSubjectFn(branch, cwd);
+    const body = buildPrBodyFn(tipCommitMessageFn(branch, cwd));
+    console.log(ansi.dim(`  Opening PR ${branch} → ${base} …`));
+    return {
+      prNumber: createPrFn({
         owner,
         repo,
         base,
-        head: layer.branch,
+        head: branch,
         title,
         body,
         cwd,
-      });
-      created = true;
-    } else {
-      console.log(ansi.dim(`  PR #${prNumber} already open for ${layer.branch}`));
+      }),
+      created: true,
+    };
+  };
+
+  for (const plan of plans) {
+    if (plan.githubBase == null && findOpenPrNumberFn(owner, repo, plan.branch, cwd) == null) {
+      continue;
     }
-    opened.push({ branch: layer.branch, base, prNumber, created });
+    const base = plan.githubBase ?? plan.gitParent;
+    const { prNumber, created } = openLayerPr(plan.branch, base);
+    opened.push({ branch: plan.branch, base, prNumber, created });
   }
 
-  const registerPr = opened[0]!.prNumber;
   const cfg = await loadConfigFn();
-  console.log(ansi.dim(`  Registering stack via import (${owner}/${repo}#${registerPr}) …`));
-  const body = await adoptStackFn(owner, repo, registerPr, cfg);
-  if (typeof body !== "object" || body === null) {
-    throw new CommandError("Unexpected response shape from adopt API");
+  type AdoptPayload = {
+    error?: string;
+    stack?: { id?: string; trunkBranch?: string } | null;
+    chain?: unknown[];
+  };
+  let adoptData: AdoptPayload | null = null;
+  let stackId = plans.find((plan) => plan.stackId)?.stackId ?? null;
+
+  const registerPr = async (prNumber: number): Promise<void> => {
+    console.log(ansi.dim(`  Registering stack via import (${owner}/${repo}#${prNumber}) …`));
+    const body = await adoptStackFn(owner, repo, prNumber, cfg);
+    if (typeof body !== "object" || body === null) {
+      throw new CommandError("Unexpected response shape from adopt API");
+    }
+    const data = body as AdoptPayload;
+    if (data.error) {
+      throw new CommandError(data.error);
+    }
+    if (!data.stack) {
+      throw new CommandError("Stack was not registered");
+    }
+    adoptData = data;
+    if (typeof data.stack.id === "string" && data.stack.id) {
+      stackId = data.stack.id;
+    }
+  };
+
+  if (pendingPark.length > 0) {
+    if (opened.length > 0) {
+      await registerPr(opened[0]!.prNumber);
+    }
+    if (!stackId) {
+      throw new CommandError(
+        "Cannot mint a park freeze before the stack is registered. Open layers 1–2 first, then retry.",
+      );
+    }
+    console.log(ansi.dim(`  Ensuring upper-park freeze for stack ${stackId} …`));
+    const park = await ensureUpperParkFn(stackId, cfg);
+    for (const plan of pendingPark) {
+      const { prNumber, created } = openLayerPr(plan.branch, park.freezeBranch);
+      opened.push({ branch: plan.branch, base: park.freezeBranch, prNumber, created });
+    }
+    await registerPr(opened[opened.length - 1]!.prNumber);
+  } else {
+    if (opened.length === 0) {
+      throw new CommandError("No pull requests to register after submit.");
+    }
+    await registerPr(opened[0]!.prNumber);
   }
-  const data = body as { error?: string; stack?: { id?: string; trunkBranch?: string } | null; chain?: unknown[] };
-  if (data.error) {
-    throw new CommandError(data.error);
-  }
-  if (!data.stack) {
-    throw new CommandError("Stack was not registered");
-  }
-  const stackId = data.stack.id;
+
+  const data = adoptData!;
 
   // Drop the submitted local stack so the next create onto trunk starts fresh.
   await saveStackMetaFn(removeActiveStack(meta), cwd);

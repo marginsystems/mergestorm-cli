@@ -114,6 +114,11 @@ export function commitsAheadOf(base: string, head: string, cwd = process.cwd()):
   return n;
 }
 
+/** Fetch one remote branch so submit can count commits ahead of a park freeze. */
+export function fetchRemoteBranch(name: string, cwd = process.cwd()): void {
+  git(["fetch", "origin", name], cwd);
+}
+
 /** Push branch to origin and set upstream. */
 export function pushBranch(branch: string, cwd = process.cwd()): void {
   try {

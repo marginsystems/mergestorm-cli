@@ -78,6 +78,13 @@ const WHATS_NEW: Record<string, string[]> = {
     "npm description points at MIT build-from-source URL",
     "Dashboard links → Settings → API / Work (product URL cleanup)",
   ],
+  "0.3.10": [
+    "README: verify public git SHA + npm integrity (build from mergestorm-cli)",
+  ],
+  "0.3.12": [
+    "review --router off|standard|max|manual (same smart router as Agents)",
+    "review --specialists security,frontend,… to pin or invoke lanes",
+  ],
 };
 
 function formatStatusLines(

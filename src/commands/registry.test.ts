@@ -19,16 +19,20 @@ test("aliases resolve to the same command as the primary name", () => {
   assert.equal(findCommand("CREDITS")?.name, "credits");
 });
 
-test("shellCommandSpecs includes aliases and meta, omits oneshot-only shell", () => {
+test("shellCommandSpecs folds aliases onto primaries and omits oneshot-only shell", () => {
   const specs = shellCommandSpecs();
   const names = specs.map((c) => c.name);
   assert.equal(new Set(names).size, names.length);
   assert.ok(names.includes("help"));
   assert.ok(names.includes("clear"));
   assert.ok(names.includes("exit"));
-  assert.ok(names.includes("usage"));
-  assert.ok(names.includes("chains"));
+  assert.ok(!names.includes("usage"));
+  assert.ok(!names.includes("chains"));
+  assert.ok(!names.includes("quit"));
   assert.ok(!names.includes("shell"));
+  assert.deepEqual(specs.find((c) => c.name === "credits")?.aliases, ["usage"]);
+  assert.deepEqual(specs.find((c) => c.name === "branches")?.aliases, ["chains"]);
+  assert.deepEqual(specs.find((c) => c.name === "exit")?.aliases, ["quit"]);
   for (const c of specs) {
     assert.ok(c.summary.length > 0, `${c.name} needs a summary`);
   }

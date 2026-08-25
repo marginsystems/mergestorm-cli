@@ -8,15 +8,16 @@ import {
 import { ansi } from "./ui/ansi.js";
 import { printBannerHeader, shellPrompt } from "./ui/banner.js";
 import { CTRL_C_EXIT_HINT, CtrlCExitGate } from "./ui/ctrl-c-exit.js";
-import { askLine, PromptClosedError } from "./ui/prompt.js";
+import { askLine, formatSlashLabel, PromptClosedError } from "./ui/prompt.js";
 
-/** Shell autocomplete + `/help` â€” derived from the command registry (STRUCT-01). */
+/** Shell autocomplete + `/help` — derived from the command registry (STRUCT-01). */
 export const COMMANDS = shellCommandSpecs();
 
 function printHelp(): void {
-  const rows = COMMANDS.map((c) => `  ${ansi.green("/" + c.name.padEnd(10))} ${c.summary}`).join(
-    "\n",
-  );
+  const rows = COMMANDS.map((c) => {
+    const label = formatSlashLabel(c).slice(1);
+    return `  ${ansi.green("/" + label.padEnd(20))} ${c.summary}`;
+  }).join("\n");
   console.log(`
   ${ansi.bold("Commands")}
 ${rows}

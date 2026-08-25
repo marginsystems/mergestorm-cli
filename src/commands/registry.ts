@@ -60,7 +60,12 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     name: "review",
     summary: "Review git diff (default origin/HEAD or main or master)",
     usage: [
-      "mergestorm review [base] [head] Review git diff base...head (default: origin/HEAD or main or master)",
+      "mergestorm review [base] [head] Review git diff base...head",
+      "  [--json] [--wait|--no-wait] [--timeout seconds]",
+      "  [--router off|standard|max|manual] [--specialists id,id]",
+      "  [--context text] [--context-file path] [--thread slug]",
+      "  [--idempotency-key k] [--webhook-url https://…]",
+      "  HTTP 429 exits 7 (rate_limited) with retry_after_seconds",
     ],
     async run(args, ctx) {
       if (ctx.mode === "shell") {
@@ -74,28 +79,27 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     name: "status",
     summary: "Show a review job",
     usage: [
-      "mergestorm status <job_id>      Fetch a review job and print JSON (one shot)",
+      "mergestorm status <job_id>      Fetch a review job (same envelope as review --json)",
+      "  [--json] [--wait] [--timeout seconds]",
+      "  HTTP 429 exits 7 (rate_limited) with retry_after_seconds",
     ],
     async run(args, ctx) {
-      if (!args[0]) {
-        throw new CommandError(
-          ctx.mode === "shell"
-            ? "usage: status <job_id>"
-            : "usage: mergestorm status <job_id>",
-        );
-      }
       if (ctx.mode === "shell") {
-        await cmdStatus(args[0], { format: "pretty", signal: ctx.signal });
+        await cmdStatus(args, {
+          defaultFormat: "pretty",
+          signal: ctx.signal,
+          interactive: true,
+        });
         return;
       }
-      await cmdStatus(args[0], { format: "json" });
+      await cmdStatus(args, { defaultFormat: "json" });
     },
   },
   {
     name: "credits",
     aliases: ["usage"],
-    summary: "Credit balance with usage bars",
-    usage: ["mergestorm credits [--json]     Credit balance (usage bars)"],
+    summary: "Usage panel: credit bar and last five jobs",
+    usage: ["mergestorm credits [--json]     Usage panel (bar + last 5 jobs)"],
     async run(args) {
       await cmdCredits(args);
     },
@@ -154,8 +158,8 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     name: "stack",
     summary: "Stacks: create, submit, list, adopt, restack, land",
     usage: [
-      "mergestorm stack create [name]  New local stack layer (CLI-managed authoring state)",
-      "mergestorm stack submit         Push active local stack, open PRs, register stack",
+      "mergestorm stack create [name]  New local stack layer ([--onto] [--trunk] [--extend])",
+      "mergestorm stack submit         Push active local stack, open PRs ([--extend])",
       "mergestorm stack reset --force  Clear this repo's pre-submit authoring state",
       "mergestorm stack list [--json]  List registered stacks",
       "mergestorm stack adopt <owner/repo>#<pr>  Import an existing open PR chain",
@@ -197,20 +201,20 @@ export function findCommand(name: string): RegistryCommand | undefined {
   );
 }
 
-/** Autocomplete / `/help` list for the interactive shell. */
+/** Autocomplete / `/help` list for the interactive shell. Aliases fold onto the primary name. */
 export function shellCommandSpecs(): CommandSpec[] {
   const specs: CommandSpec[] = [{ name: "help", summary: SHELL_META[0]!.summary }];
   for (const c of COMMAND_REGISTRY) {
     if (SHELL_OMIT.has(c.name)) continue;
-    specs.push({ name: c.name, summary: c.summary });
-    for (const alias of c.aliases ?? []) {
-      specs.push({ name: alias, summary: c.summary });
-    }
+    specs.push({
+      name: c.name,
+      summary: c.summary,
+      ...(c.aliases?.length ? { aliases: c.aliases } : {}),
+    });
   }
   specs.push(
     { name: "clear", summary: SHELL_META[1]!.summary },
-    { name: "exit", summary: SHELL_META[2]!.summary },
-    { name: "quit", summary: SHELL_META[3]!.summary },
+    { name: "exit", summary: SHELL_META[2]!.summary, aliases: ["quit"] },
   );
   return specs;
 }

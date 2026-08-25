@@ -1,5 +1,18 @@
 import { apiBase, loadConfig, resolveApiKey, type Config } from "./config.js";
-import { CommandError } from "./errors.js";
+import { CommandError, REVIEW_EXIT, rateLimitedMessage } from "./errors.js";
+import type { StackDto } from "./stack-dto.js";
+
+export type {
+  StackBranchState,
+  StackCiStatus,
+  StackDto,
+  StackLayerChecks,
+  StackLayerDto,
+  StackReviewStatus,
+  StackTempestStatus,
+  StackUnitDto,
+  StackUnitMemberDto,
+} from "./stack-dto.js";
 
 /** Default per-request timeout so a hung API cannot stall the shell/CI forever. */
 export const DEFAULT_API_TIMEOUT_MS = 30_000;
@@ -12,6 +25,47 @@ export type ApiFetchInit = RequestInit & {
   /** Override {@link DEFAULT_API_TIMEOUT_MS}. */
   timeoutMs?: number;
 };
+
+export type ApiFetchResult = {
+  status: number;
+  body: unknown;
+  retryAfterSeconds?: number;
+};
+
+function asPositiveSeconds(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return value;
+  }
+  if (typeof value === "string" && /^\d+(\.\d+)?$/.test(value.trim())) {
+    return Number(value.trim());
+  }
+  return undefined;
+}
+
+function parseRetryAfterHeader(header: string | null | undefined): number | undefined {
+  if (!header) return undefined;
+  const trimmed = header.trim();
+  const asNumber = asPositiveSeconds(trimmed);
+  if (asNumber !== undefined) return asNumber;
+  const when = Date.parse(trimmed);
+  if (!Number.isFinite(when)) return undefined;
+  return Math.max(0, (when - Date.now()) / 1000);
+}
+
+/** Prefer the larger of `Retry-After` and JSON `retry_after_seconds`. */
+export function parseRetryAfterSeconds(input: {
+  header?: string | null;
+  body?: unknown;
+}): number | undefined {
+  const fromBody =
+    input.body && typeof input.body === "object"
+      ? asPositiveSeconds((input.body as { retry_after_seconds?: unknown }).retry_after_seconds)
+      : undefined;
+  const fromHeader = parseRetryAfterHeader(input.header);
+  if (fromBody === undefined) return fromHeader;
+  if (fromHeader === undefined) return fromBody;
+  return Math.max(fromBody, fromHeader);
+}
 
 function isAbortLike(err: unknown): err is Error {
   return (
@@ -68,7 +122,7 @@ export async function apiFetch(
   cfg: Config,
   route: string,
   init: ApiFetchInit = {},
-): Promise<{ status: number; body: unknown }> {
+): Promise<ApiFetchResult> {
   const key = resolveApiKey(cfg);
   if (!key) {
     throw new CommandError(
@@ -111,7 +165,15 @@ export async function apiFetch(
       "auth_invalid",
     );
   }
-  return { status: res.status, body: parsed };
+  const retryAfterSeconds = parseRetryAfterSeconds({
+    header: res.headers.get("retry-after"),
+    body: parsed,
+  });
+  return {
+    status: res.status,
+    body: parsed,
+    ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+  };
 }
 
 export async function devicePost(
@@ -150,11 +212,10 @@ export type MeResponse = {
   key: { prefix: string; name: string; created_at: string; last_used_at: string | null };
   plan_key: string;
   plan_label_key?: string;
-  /** Start of next UTC month (usage meters reset). Older APIs omit this. */
+  /** When the current credit window ends (signup anniversary or Stripe period). Older APIs omit this. */
   resets_at?: string;
   usage: {
     standard: { used: number; limit: number | null; remaining: number | null };
-    premium: { used: number; limit: number | null; remaining: number | null };
   };
 };
 
@@ -168,7 +229,7 @@ export type JobListItem = {
   head_label: string | null;
   created_at: string;
   finished_at: string | null;
-  credits: number;
+  credits: { standard: number } | null;
 };
 
 export type ThreadListItem = {
@@ -244,40 +305,48 @@ export async function listJobs(limit = 10, cfg?: Config): Promise<JobListItem[]>
   return Array.isArray(items) ? items : [];
 }
 
-export type StackLayerDto = {
-  branch: string;
-  parentBranch: string | null;
-  prNumber: number;
-  position: number;
-  state: string;
-  title: string | null;
-  htmlUrl: string | null;
-  ciStatus: string;
-  reviewStatus: string;
-  checks: {
-    total: number;
-    success: number;
-    pending: number;
-    failure: number;
-    failingName: string | null;
-  } | null;
-  conflictDetail: string | null;
-  lastRestackedSha: string | null;
-};
-
-export type StackDto = {
-  id: string;
-  owner: string;
-  repo: string;
-  trunkBranch: string;
-  autoPromoteWhenGreen: boolean;
-  layers: StackLayerDto[];
-};
+/** Fetch one review job (Bearer GET /api/v1/reviews/:id). */
+export async function getReview(
+  jobId: string,
+  cfg?: Config,
+  opts?: { signal?: AbortSignal },
+): Promise<unknown> {
+  const resolved = cfg ?? (await loadConfig());
+  const id = jobId.trim();
+  if (!id) {
+    throw new CommandError("job_id is required", 2, "usage");
+  }
+  const { status, body, retryAfterSeconds } = await apiFetch(
+    resolved,
+    `/api/v1/reviews/${encodeURIComponent(id)}`,
+    { signal: opts?.signal },
+  );
+  if (status === 404) {
+    throw new CommandError(`Review not found: ${id}`);
+  }
+  if (status === 429) {
+    throw new CommandError(
+      rateLimitedMessage(retryAfterSeconds),
+      REVIEW_EXIT.rate_limited,
+      "rate_limited",
+      { retryAfterSeconds },
+    );
+  }
+  if (status !== 200) {
+    throw new CommandError(`Failed to get review (HTTP ${status}): ${JSON.stringify(body)}`);
+  }
+  return body;
+}
 
 /** List stacks (Bearer GET /api/v1/stacks). */
-export async function listStacks(cfg?: Config): Promise<StackDto[]> {
+export async function listStacks(
+  cfg?: Config,
+  opts?: { timeoutMs?: number },
+): Promise<StackDto[]> {
   const resolved = cfg ?? (await loadConfig());
-  const { status, body } = await apiFetch(resolved, "/api/v1/stacks");
+  const { status, body } = await apiFetch(resolved, "/api/v1/stacks", {
+    timeoutMs: opts?.timeoutMs,
+  });
   if (status === 404) {
     throw new CommandError(
       "Stacks API is not available on this server yet. Deploy the API update or use the dashboard.",
@@ -311,6 +380,32 @@ export async function adoptStack(
     throw new CommandError(`Failed to import stack (HTTP ${status}): ${JSON.stringify(body)}`);
   }
   return body;
+}
+
+/** Mint or reuse the PR3+ park freeze (Bearer POST /api/v1/stacks/:id/ensure-upper-park). */
+export async function ensureUpperPark(
+  stackId: string,
+  cfg?: Config,
+): Promise<{ freezeBranch: string; created: boolean }> {
+  const body = await stackMutation(
+    stackId,
+    "/ensure-upper-park",
+    "POST",
+    {},
+    "Failed to ensure upper-park freeze",
+    cfg,
+  );
+  if (typeof body !== "object" || body === null) {
+    throw new CommandError("Unexpected response shape from ensure-upper-park");
+  }
+  const freezeBranch = (body as { freezeBranch?: unknown }).freezeBranch;
+  if (typeof freezeBranch !== "string" || !freezeBranch.trim()) {
+    throw new CommandError("ensure-upper-park did not return a freezeBranch");
+  }
+  return {
+    freezeBranch: freezeBranch.trim(),
+    created: (body as { created?: unknown }).created === true,
+  };
 }
 
 async function stackMutation(
