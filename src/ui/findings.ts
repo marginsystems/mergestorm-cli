@@ -28,23 +28,34 @@ export type RenderFindingsOptions = {
   emptyMessage?: boolean;
 };
 
-/** Print inline + off-diff findings the same way for `review` and `status --pretty`. */
-export function renderFindings(
+export function formatFindingsLines(
   findings: ReviewFindings | null | undefined,
   opts: RenderFindingsOptions = {},
-): void {
+): string[] {
+  const lines: string[] = [];
   const inline = findings?.inline ?? [];
   const off = findings?.off_diff ?? findings?.offDiff ?? [];
   for (const c of inline) {
     const lane = c.specialist ? `[${c.specialist}]` : "";
-    console.log(`\n[${c.severity}]${lane} ${c.path}:${c.line}${c.title ? ` — ${c.title}` : ""}`);
-    console.log(c.body);
+    lines.push(
+      `[${c.severity}]${lane} ${c.path}:${c.line}${c.title ? ` — ${c.title}` : ""}`,
+    );
+    lines.push(c.body);
   }
   for (const c of off) {
-    console.log(`\n[${c.severity}] off-diff ${c.path ?? ""}`);
-    console.log(c.body);
+    lines.push(`[${c.severity}] off-diff ${c.path ?? ""}`);
+    lines.push(c.body);
   }
   if (opts.emptyMessage && inline.length === 0 && off.length === 0) {
-    console.log("\nNo findings.");
+    lines.push("No findings.");
   }
+  return lines;
+}
+
+/** Print inline + off-diff findings the same way for oneshot `review` / `status --pretty`. */
+export function renderFindings(
+  findings: ReviewFindings | null | undefined,
+  opts: RenderFindingsOptions = {},
+): void {
+  for (const line of formatFindingsLines(findings, opts)) console.log(line);
 }

@@ -1,5 +1,7 @@
 import { getReview } from "../api.js";
 import { loadConfig } from "../config.js";
+import { showLinePanel } from "../ui/line-tabs.js";
+import { canBrowse, formatJobDetailLines } from "./browse.js";
 import {
   CommandError,
   DetachedError,
@@ -34,6 +36,8 @@ export type StatusOptions = {
   interactive?: boolean;
   /** Test seam; production uses the two-second poll interval. */
   pollIntervalMs?: number;
+  /** Shell: route --json through the hold-to-read panel instead of console.log. */
+  mode?: "oneshot" | "shell";
 };
 
 const STATUS_USAGE =
@@ -110,6 +114,14 @@ function printPretty(row: ReviewJobRow): void {
   });
 }
 
+async function showPretty(row: ReviewJobRow): Promise<void> {
+  if (canBrowse()) {
+    await showLinePanel("Job", formatJobDetailLines(row));
+    return;
+  }
+  printPretty(row);
+}
+
 export async function cmdStatus(
   args: string[],
   opts: StatusOptions = {},
@@ -121,8 +133,20 @@ export async function cmdStatus(
   const interactive = Boolean(opts.interactive && !json);
   const fallback: ReviewEnvelopeFallbacks = { jobId: parsed.jobId };
   let jsonPrinted = false;
-  const printJson = (row: ReviewJobRow | null, extra: ReviewEnvelopeFallbacks = {}) => {
-    console.log(JSON.stringify(toReviewJobEnvelope(row, { ...fallback, ...extra })));
+  const printJson = async (
+    row: ReviewJobRow | null,
+    extra: ReviewEnvelopeFallbacks = {},
+  ): Promise<void> => {
+    const text = JSON.stringify(
+      toReviewJobEnvelope(row, { ...fallback, ...extra }),
+      null,
+      opts.mode === "shell" ? 2 : undefined,
+    );
+    if (opts.mode === "shell") {
+      await showLinePanel("Job", text.split("\n"));
+    } else {
+      console.log(text);
+    }
     jsonPrinted = true;
   };
 
@@ -141,12 +165,12 @@ export async function cmdStatus(
         }
         if (err instanceof Error && err.name === "AbortError") throw err;
         if (isCommandErrorCode(err, "api_timeout")) {
-          if (json) printJson(null, { status: "in_progress", error: err.message });
+          if (json) await printJson(null, { status: "in_progress", error: err.message });
           throw new CommandError(err.message, REVIEW_EXIT.timeout, "review_timeout");
         }
         if (isCommandErrorCode(err, "rate_limited")) {
           if (json) {
-            printJson(null, {
+            await printJson(null, {
               status: "rate_limited",
               error: err.message,
               retryAfterSeconds: err.retryAfterSeconds,
@@ -168,16 +192,16 @@ export async function cmdStatus(
           ? { ...(body as ReviewJobRow), job_id: parsed.jobId }
           : { job_id: parsed.jobId, status: "failed", error: "Invalid review response" };
       if (row.status === "failed" || row.status === "quota_exceeded") {
-        if (json) printJson(row);
-        else printPretty(row);
+        if (json) await printJson(row);
+        else await showPretty(row);
         throw new CommandError(
           `Review ${row.status}: ${row.error ?? ""}`,
           row.status === "quota_exceeded" ? REVIEW_EXIT.quota : REVIEW_EXIT.failed,
           row.status === "quota_exceeded" ? "review_quota" : "review_failed",
         );
       }
-      if (json) printJson(row);
-      else printPretty(row);
+      if (json) await printJson(row);
+      else await showPretty(row);
       return;
     }
 
@@ -210,7 +234,7 @@ export async function cmdStatus(
       if (err instanceof ReviewPollTimeoutError) {
         const message = `Timed out waiting for review ${parsed.jobId}`;
         if (json) {
-          printJson(err.lastRow, {
+          await printJson(err.lastRow, {
             jobId: parsed.jobId,
             status: err.lastRow.status ?? "in_progress",
             error: "Timed out waiting for review.",
@@ -220,7 +244,7 @@ export async function cmdStatus(
       }
       if (isCommandErrorCode(err, "rate_limited")) {
         if (json) {
-          printJson(null, {
+          await printJson(null, {
             status: "rate_limited",
             error: err.message,
             retryAfterSeconds: err.retryAfterSeconds,
@@ -237,8 +261,8 @@ export async function cmdStatus(
     if (!json) console.log("");
     if (row.status === "failed" || row.status === "quota_exceeded") {
       const message = `Review ${row.status}: ${row.error ?? ""}`;
-      if (json) printJson(row);
-      else printPretty(row);
+      if (json) await printJson(row);
+      else await showPretty(row);
       throw new CommandError(
         message,
         row.status === "quota_exceeded" ? REVIEW_EXIT.quota : REVIEW_EXIT.failed,
@@ -246,8 +270,8 @@ export async function cmdStatus(
       );
     }
 
-    if (json) printJson(row);
-    else printPretty(row);
+    if (json) await printJson(row);
+    else await showPretty(row);
   } catch (err) {
     if (err instanceof DetachedError) throw err;
     if (
@@ -256,7 +280,7 @@ export async function cmdStatus(
       !(err instanceof Error && err.name === "AbortError")
     ) {
       const message = err instanceof Error ? err.message : String(err);
-      printJson(null, { status: "failed", error: message });
+      await printJson(null, { status: "failed", error: message });
     }
     if (
       err instanceof CommandError &&

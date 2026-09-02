@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "./width.js";
 import {
+  formatDaysLeft,
   formatResetLabel,
   formatUsagePanel,
   nextUtcMonthStart,
@@ -37,6 +38,15 @@ test("usageBar shows unlimited when limit is null", () => {
 test("nextUtcMonthStart is the first of next UTC month", () => {
   const iso = nextUtcMonthStart(new Date("2026-07-20T15:00:00Z"));
   assert.equal(iso, "2026-08-01T00:00:00.000Z");
+});
+
+test("formatDaysLeft counts whole days until resets_at", () => {
+  const now = new Date("2026-08-25T03:00:00.000Z");
+  assert.equal(formatDaysLeft("2026-09-05T10:53:00.000Z", now), "11 days left");
+  assert.equal(formatDaysLeft("2026-08-26T03:00:00.000Z", now), "1 day left");
+  assert.equal(formatDaysLeft("2026-08-25T08:00:00.000Z", now), "5h left");
+  assert.equal(formatDaysLeft("2026-08-24T03:00:00.000Z", now), "reset due");
+  assert.equal(formatDaysLeft(undefined, now), "");
 });
 
 test("formatResetLabel matches Resets … (UTC) wording", () => {

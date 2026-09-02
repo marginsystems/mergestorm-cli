@@ -9,7 +9,8 @@ import {
 } from "../errors.js";
 import { discoverTrunk } from "../git-stack.js";
 import { ansi } from "../ui/ansi.js";
-import { renderFindings, type ReviewFindings } from "../ui/findings.js";
+import { formatFindingsLines, type ReviewFindings } from "../ui/findings.js";
+import { present } from "../ui/present.js";
 import {
   toReviewJobEnvelope,
   type ReviewEnvelopeFallbacks,
@@ -39,6 +40,12 @@ export {
 export const VORTEX_ROUTER_MODES = ["off", "standard", "max", "manual"] as const;
 /** Standard/Max fleet caps; Manual is capped at Max. */
 export const VORTEX_ROUTER_CAPS = { standard: 3, max: 5 } as const;
+/**
+ * Pinnable L0 lanes only. Keep this list byte-identical to
+ * `pinnableVortexSpecialistIds(VORTEX_SPECIALIST_IDS)` in review-findings
+ * (`cli-lockstep.test.ts`). Do not add `governance` (round-gated) or `seam`
+ * (phase-gated). Those L1 lanes are not local pins.
+ */
 export const VORTEX_SPECIALIST_IDS = [
   "security",
   "performance",
@@ -478,13 +485,17 @@ export async function cmdReview(args: string[], opts: ReviewOptions = {}): Promi
       return;
     }
 
-    console.log(`\nVerdict: ${ansi.bold(row.verdict ?? "comment")}`);
     const ran = row.specialists_run ?? row.findings?.specialists_run ?? [];
-    if (ran.length > 0) console.log(ansi.dim(`Specialists: ${ran.join(", ")}`));
-    console.log(row.summary ?? "");
-    renderFindings(row.findings as ReviewFindings | null | undefined, {
-      emptyMessage: true,
-    });
+    const result: string[] = [
+      `Verdict: ${ansi.bold(row.verdict ?? "comment")}`,
+    ];
+    if (ran.length > 0) result.push(ansi.dim(`Specialists: ${ran.join(", ")}`));
+    if (row.summary) result.push(row.summary);
+    result.push(
+      ...formatFindingsLines(row.findings as ReviewFindings | null | undefined, {
+        emptyMessage: true,
+      }),
+    );
     if (interactive && meBefore) {
       const meAfter = await getMe(cfg);
       if (meAfter) {
@@ -492,14 +503,15 @@ export async function cmdReview(args: string[], opts: ReviewOptions = {}): Promi
         const afterLeft = meAfter.usage.standard.remaining ?? 0;
         const used = Math.max(0, beforeLeft - afterLeft);
         if (used > 0) {
-          console.log(
+          result.push(
             ansi.dim(
-              `\n${used} credit${used === 1 ? "" : "s"} used · ${afterLeft} remaining`,
+              `${used} credit${used === 1 ? "" : "s"} used · ${afterLeft} remaining`,
             ),
           );
         }
       }
     }
+    await present("Review", result);
   } catch (err) {
     if (err instanceof DetachedError) throw err;
     if (

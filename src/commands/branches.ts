@@ -4,8 +4,10 @@ import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
 import { git } from "../git.js";
 import { ansi } from "../ui/ansi.js";
+import { present } from "../ui/present.js";
 import { selectFromList } from "../ui/select.js";
-import { cmdThread, relativeWhen } from "./jobs.js";
+import { buildChainHelpLines, cmdThread, relativeWhen } from "./jobs.js";
+import { showLinePanel } from "../ui/line-tabs.js";
 
 /** One-line label for a branch/thread row (also used by tests). */
 export function formatBranchRow(item: ThreadListItem): string {
@@ -21,7 +23,7 @@ export function formatBranchRow(item: ThreadListItem): string {
   return `${name.padEnd(36)}  ${jobs.padEnd(8)}  ${verdict.padEnd(12)}  ${when}${pr}${closed}`;
 }
 
-function printBranchTable(items: ThreadListItem[]): void {
+function formatBranchTableLines(items: ThreadListItem[]): string[] {
   const header = ["BRANCH / SLUG", "JOBS", "VERDICT", "WHEN", "PR"];
   const rows = items.map((t) => [
     (t.branch?.trim() || t.slug).slice(0, 36),
@@ -35,13 +37,18 @@ function printBranchTable(items: ThreadListItem[]): void {
   );
   const fmt = (cols: string[]) =>
     "  " + cols.map((c, i) => c.padEnd(widths[i]!)).join("  ");
-  console.log(ansi.dim(fmt(header)));
-  for (const r of rows) console.log(fmt(r));
-  console.log(ansi.dim("  open a chain:  chain <slug>   ·   or re-run on a TTY to pick"));
+  return [
+    ansi.dim(fmt(header)),
+    ...rows.map((r) => fmt(r)),
+    ansi.dim("  open a chain:  chain <slug>   ·   or re-run on a TTY to pick"),
+  ];
 }
 
 /** Interactive list of recently reviewed branches → open chain on select. */
-export async function cmdBranches(args: string[] = []): Promise<void> {
+export async function cmdBranches(
+  args: string[] = [],
+  opts: { mode?: "oneshot" | "shell" } = {},
+): Promise<void> {
   const asJson = args.includes("--json");
   const nArg = args.find((a) => /^\d+$/.test(a));
   const limit = nArg ? Number.parseInt(nArg, 10) : 20;
@@ -49,16 +56,25 @@ export async function cmdBranches(args: string[] = []): Promise<void> {
   const items = await listThreads(limit, cfg);
 
   if (asJson) {
-    console.log(JSON.stringify({ items }, null, 2));
+    const text = JSON.stringify({ items }, null, 2);
+    if (opts.mode === "shell") {
+      await present("Branches", text.split("\n"));
+      return;
+    }
+    console.log(text);
     return;
   }
   if (items.length === 0) {
-    console.log(ansi.dim("  No reviewed branches yet. Run `review` on a branch first."));
+    await present("Branches", [
+      `  ${ansi.bold("No reviewed branches yet")}`,
+      "",
+      `  ${ansi.brightGreen("review")}  submit a diff on this branch`,
+    ]);
     return;
   }
 
   if (!input.isTTY || !output.isTTY) {
-    printBranchTable(items);
+    await present("Branches", formatBranchTableLines(items));
     return;
   }
 
@@ -68,7 +84,6 @@ export async function cmdBranches(args: string[] = []): Promise<void> {
     render: (item) => formatBranchRow(item),
   });
   if (!picked) {
-    console.log(ansi.dim("  cancelled"));
     return;
   }
   await cmdThread(picked.slug, []);
@@ -78,7 +93,10 @@ export async function cmdBranches(args: string[] = []): Promise<void> {
  * Show the review-chain timeline for a branch/thread.
  * Defaults to `local/<current-git-branch>` when no slug is given.
  */
-export async function cmdChain(args: string[] = []): Promise<void> {
+export async function cmdChain(
+  args: string[] = [],
+  opts: { mode?: "oneshot" | "shell" } = {},
+): Promise<void> {
   const asJson = args.includes("--json");
   const positional = args.filter((a) => a !== "--json");
   let slug = positional[0]?.trim() ?? "";
@@ -88,11 +106,15 @@ export async function cmdChain(args: string[] = []): Promise<void> {
       const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).trim() || "local";
       slug = `local/${branch}`.replace(/[^a-zA-Z0-9._/-]/g, "-").slice(0, 120);
     } catch {
-      throw new CommandError(
-        "usage: chain <slug>   (or run inside a git repo to use the current branch)",
-      );
+      if (asJson || !process.stdin.isTTY || !process.stdout.isTTY) {
+        throw new CommandError(
+          "usage: chain <slug>   (or run inside a git repo to use the current branch)",
+        );
+      }
+      await showLinePanel("Chain", buildChainHelpLines({ reason: "no-repo" }));
+      return;
     }
   }
 
-  await cmdThread(slug, asJson ? ["--json"] : []);
+  await cmdThread(slug, asJson ? ["--json"] : [], opts);
 }

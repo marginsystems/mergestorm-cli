@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.13`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.15`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -44,18 +44,16 @@ Development without a build step: `npm run dev`.
 
 ## Interactive shell
 
-On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a **full-width** welcome panel (logo + status on the left, tips / what's new on the right) and a **full-width** bordered input box with a live `/` slash-command dropdown. Non-TTY (CI/pipes) prints usage instead — no hanging prompt.
+On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a compact **full-width** welcome panel (mark, version, status, usage bar) and a **full-width** bordered input box with a live `/` slash-command dropdown. The welcome panel reflows on terminal resize instead of wrapping or smearing. Non-TTY (CI/pipes) prints usage instead — no hanging prompt.
 
 ```
-╭─ mergestorm v0.3.13 ─────────────────────────────────────────────────────────╮
-│      ▟██████████▛       Tips for getting started                             │
-│       ▜████████▛          review      review origin/HEAD or main             │
-│        ▝▜████▛▘           stack       create → submit → restack → land       │
-│          ▜██▛             /help       list all commands                      │
-│           ██                                                                 │
-│           ▝▘            What's new in v0.3.13                                │
-│  ● msk…  ·  maelstrom     • MIT license + public source (mergestorm-cli)       │
-│  [████░░░░░░░░░░] 12% used                                                   │
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ▟██▛  mergestorm v0.3.15                                                     │
+│  ▜▙   ● msk_live_…  · maelstrom                                              │
+│       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used · Resets Sep 5, 10:53am (UTC)│
+│                                                                              │
+│       review a diff · usage for tabs · /help for all commands                │
+│       New in v0.3.15: PR wait + settings + both skills in the npm tarball    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -63,7 +61,7 @@ mergestorm
 ╰──────────────────────────────────────────────────────────────────────────────╯
   /review       Review git diff (default origin/HEAD or main or master)
 
-mergestorm> credits
+mergestorm> usage
 mergestorm> branches
 mergestorm> chain
 mergestorm> exit
@@ -71,7 +69,7 @@ mergestorm> exit
 
 Bare command names still work exactly as before (`review`, `help`, `exit`, …) — typing `/` at the start of a line opens a compact autocomplete overlay (aliases folded onto the primary name, Up/Down scroll a viewport, Esc dismisses, Tab completes, Enter accepts a prefix or submits an exact name as typed, Left/Right move the cursor). Arrow-key history, Ctrl+A/E, Ctrl+U/K work as in a regular shell. At the idle prompt, **Ctrl+C twice** (within ~1.5s) exits the shell; a single Ctrl+C clears the line and shows a confirm hint. While `review` / `status` is waiting, Ctrl+C detaches or aborts that wait (job may keep running) — it does not exit the shell. Ctrl+D on an empty line, or `exit` / `quit`, also leave the shell. On a dumb terminal, without color, or when piped, the box falls back to plain ASCII borders (or no shell at all for non-TTY input).
 
-`credits` / `usage` print one static panel: key · plan, a credit bar sized to the terminal, `Resets … (UTC)`, then the last five jobs. `--json` adds `recent_jobs`. `branches` (alias `chains`) lists recently reviewed branches; on a TTY you arrow-select one to open its review-chain timeline. `chain [slug]` shows that timeline directly (defaults to `local/<current-git-branch>`).
+`credits` / `usage` on a TTY open a tabbed **Status / Usage / Jobs** browser (Usage selected): Left/Right switch tabs, Up/Down scroll or select, Enter on a job opens its `status` detail in place, Esc backs out, `q` closes. `status` with no job id opens the same browser on the Status tab. Piped / non-TTY output keeps the static panel: key · plan, a credit bar sized to the terminal, `Resets … (UTC)`, then the last five jobs; `--json` adds `recent_jobs` and is unchanged. `branches` (alias `chains`) lists recently reviewed branches; on a TTY you arrow-select one to open its review-chain timeline. `chain [slug]` shows that timeline directly (defaults to `local/<current-git-branch>`).
 
 ## Commands
 
@@ -85,11 +83,13 @@ mergestorm login --key          Paste an existing API key instead (headless/CI)
 mergestorm logout               Remove the stored API key
 mergestorm review [base] [head] Review git diff base...head (default: origin/HEAD or main or master)
 mergestorm status <job_id>      Fetch a review job (envelope; --json --wait --timeout)
-mergestorm credits [--json]     Usage panel (bar + last 5 jobs)
+mergestorm status               Tabbed Status / Usage / Jobs browser (TTY)
+mergestorm credits [--json]     Usage panel (bar + last 5 jobs); tabbed browser on a TTY
 mergestorm jobs [n] [--json]    Recent review jobs (default 10, max 50)
 mergestorm branches [n]         Recently reviewed branches (arrow-pick on TTY)
 mergestorm chain [slug]         Branch review-chain timeline (default: current branch)
 mergestorm whoami [--json]      Key prefix, plan, API base, config path
+mergestorm skill install --claude|--cursor  Copy the mergestorm-review and mergestorm-pr-loop skills into this repo
 mergestorm thread <slug>        Jobs in a review thread
 mergestorm stack create [name]  New local stack layer (optional `--onto` / `--trunk` / `--extend`)
 mergestorm stack submit         Push layers, open PRs (`gh`), register via adopt (optional `--extend`)
@@ -97,11 +97,10 @@ mergestorm stack list [--json]  List registered stacks
 mergestorm stack adopt <owner/repo>#<pr>  Import an existing open PR chain
 mergestorm stack restack <stack-id>  Restack descendants
 mergestorm stack land <stack-id>     Land / promote (into review unit when present)
-mergestorm stack auto-promote on|off <stack-id>  Toggle auto-promote when green
 mergestorm stack reset --force  Clear local authoring state (not branches/PRs)
 ```
 
-`mg` is a short alias for `mergestorm` (same binary), e.g. `mg stack create`. Happy path: **create → commit → submit → restack → land**. On review-unit stacks, `stack land` **promotes** the tip into the unit (same gates as the dashboard); otherwise it lands the bottom open PR. `stack auto-promote` turns on land-when-green for a registered stack (`auto-land` remains a deprecated alias). `stack adopt` is for importing a chain that already exists on GitHub (legacy / Graphite). Restack/land use the same login key (`/api/v1/stacks`).
+`mg` is a short alias for `mergestorm` (same binary), e.g. `mg stack create`. Happy path: **create → commit → submit → restack → land**. On review-unit stacks, `stack land` **promotes** the tip into the unit (same gates as the dashboard); otherwise it lands the bottom open PR. `stack adopt` is for importing a chain that already exists on GitHub (legacy / Graphite). Restack/land use the same login key (`/api/v1/stacks`). Unattended landing is `mg queue add`.
 
 `stack create` checks out a new branch from the current tip (or `--onto <branch>`), discovers trunk (`main` / `master` / `origin/HEAD`, overridable with `--trunk`), and records `{ branch, parentBranch }` in CLI-managed state under **`~/.mergestorm/stacks/<repo-id>/stack.json`**. The CLI updates this automatically; never edit it. Linked worktrees share state, while independent clones remain isolated. Creating onto trunk with a non-empty active stack starts a new one. `--trunk` only sets trunk metadata — it does **not** change the parent; use `--onto main` (etc.) for a fresh stack from trunk.
 

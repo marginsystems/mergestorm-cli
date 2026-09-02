@@ -11,6 +11,13 @@ function layer(partial: Partial<StackLayerDto> & Pick<StackLayerDto, "branch" | 
   return {
     parentBranch: null,
     prNumber: partial.position,
+    openedAt: null,
+    mergedAt: null,
+    closedAt: null,
+    additions: null,
+    deletions: null,
+    openAdditions: null,
+    openDeletions: null,
     state: "clean",
     title: partial.branch,
     htmlUrl: null,
@@ -35,7 +42,6 @@ function stack(layers: StackLayerDto[]): StackDto {
     repo: "widgets",
     trunkBranch: "mg-stack-1",
     landTarget: "main",
-    autoPromoteWhenGreen: false,
     archivedAt: null,
     layers,
   };

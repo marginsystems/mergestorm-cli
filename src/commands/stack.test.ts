@@ -4,6 +4,7 @@ import { CommandError } from "../errors.js";
 import type { StackMeta } from "../stack-meta.js";
 import {
   assertMayParentOntoRegistered,
+  buildStackListLines,
   cmdStackSubmit,
   findRegisteredParent,
   parseAdoptTarget,
@@ -171,13 +172,19 @@ const REGISTERED: StackDto[] = [
     repo: "widgets",
     trunkBranch: "mg-stack-1",
     landTarget: "main",
-    autoPromoteWhenGreen: false,
     archivedAt: null,
     layers: [
       {
         branch: "fix/existing-tip",
         parentBranch: "mg-stack-1",
         prNumber: 99,
+        openedAt: null,
+        mergedAt: null,
+        closedAt: null,
+        additions: null,
+        deletions: null,
+        openAdditions: null,
+        openDeletions: null,
         position: 1,
         state: "clean",
         title: "existing",
@@ -530,4 +537,21 @@ test("cmdStackSubmit --extend onto a parked tip reuses the freeze without mintin
   assert.deepEqual(h.createPrBases, ["mg-park-1-g1"]);
   assert.equal(h.ensureParkCalls, 0);
   assert.equal(h.adoptCalls, 1);
+});
+
+const STRIP = /\u001b\[[0-9;]*m/g;
+const strip = (s: string): string => s.replace(STRIP, "");
+
+test("buildStackListLines empty state tells you how to start", () => {
+  const text = strip(buildStackListLines([]).join("\n"));
+  assert.match(text, /None yet/);
+  assert.match(text, /stack create/);
+  assert.match(text, /stack adopt/);
+});
+
+test("buildStackListLines lists a registered stack", () => {
+  const text = strip(buildStackListLines(REGISTERED).join("\n"));
+  assert.match(text, /acme\/widgets/);
+  assert.match(text, /#99/);
+  assert.doesNotMatch(text, /None yet/);
 });

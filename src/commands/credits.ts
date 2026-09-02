@@ -2,21 +2,19 @@ import { getMe, listJobs, type JobListItem } from "../api.js";
 import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
-import { formatUsagePanel, type UsagePanelJob } from "../ui/usage.js";
-import { relativeWhen } from "./jobs.js";
-
-function toPanelJob(job: JobListItem): UsagePanelJob {
-  return {
-    job: job.job_id.slice(0, 8),
-    verdict: job.verdict ?? job.status ?? "-",
-    thread: job.thread_slug ?? "-",
-    credits: job.credits ? String(job.credits.standard) : "-",
-    when: relativeWhen(job.created_at),
-  };
-}
+import { formatUsagePanel } from "../ui/usage.js";
+import { canBrowse, openTabsBrowser, toPanelJob } from "./browse.js";
 
 export async function cmdCredits(args: string[]): Promise<void> {
   const asJson = args.includes("--json");
+
+  // TTY: the tabbed Status / Usage / Jobs browser, opened on Usage.
+  // `--json` and pipes keep the machine/static output exactly as before.
+  if (!asJson && canBrowse()) {
+    await openTabsBrowser("usage");
+    return;
+  }
+
   const cfg = await loadConfig();
   const me = await getMe(cfg);
   if (!me) {

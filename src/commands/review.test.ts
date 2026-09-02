@@ -84,6 +84,8 @@ test("parseReviewArgs reads router and specialists (#1078)", () => {
   });
   assert.throws(() => parseReviewArgs(["--router", "turbo"]), /--router/);
   assert.throws(() => parseReviewArgs(["--specialists", "nope"]), /Unknown specialist/);
+  assert.throws(() => parseReviewArgs(["--specialists", "governance"]), /Unknown specialist/);
+  assert.throws(() => parseReviewArgs(["--specialists", "seam"]), /Unknown specialist/);
   assert.throws(() => parseReviewArgs(["--specialists", ","]), /--specialists/);
   assert.throws(() => parseReviewArgs(["--router", "manual"]), /--router manual/);
   assert.throws(() => parseReviewArgs(["--router", "off", "--specialists", "security"]), /--router off/);

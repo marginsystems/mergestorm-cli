@@ -2,6 +2,8 @@ import { apiFetch, listJobs, type ThreadDetail } from "../api.js";
 import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
+import { present } from "../ui/present.js";
+import { showLinePanel } from "../ui/line-tabs.js";
 
 export function relativeWhen(iso: string): string {
   const t = new Date(iso).getTime();
@@ -16,7 +18,10 @@ export function relativeWhen(iso: string): string {
   return `${days}d ago`;
 }
 
-export async function cmdJobs(args: string[]): Promise<void> {
+export async function cmdJobs(
+  args: string[],
+  opts: { mode?: "oneshot" | "shell" } = {},
+): Promise<void> {
   const asJson = args.includes("--json");
   const nArg = args.find((a) => /^\d+$/.test(a));
   const limit = nArg ? Number.parseInt(nArg, 10) : 10;
@@ -24,11 +29,21 @@ export async function cmdJobs(args: string[]): Promise<void> {
   const items = await listJobs(limit, cfg);
 
   if (asJson) {
-    console.log(JSON.stringify({ items }, null, 2));
+    const text = JSON.stringify({ items }, null, 2);
+    if (opts.mode === "shell") {
+      await present("Jobs", text.split("\n"));
+      return;
+    }
+    console.log(text);
     return;
   }
   if (items.length === 0) {
-    console.log(ansi.dim("  No review jobs yet. Run `review` to submit one."));
+    await present("Jobs", [
+      `  ${ansi.bold("No review jobs yet")}`,
+      "",
+      `  ${ansi.brightGreen("review")}  submit a diff`,
+      `  ${ansi.brightGreen("usage")}   Status / Usage / Jobs tabs`,
+    ]);
     return;
   }
 
@@ -45,9 +60,11 @@ export async function cmdJobs(args: string[]): Promise<void> {
   );
   const fmt = (cols: string[]) =>
     "  " + cols.map((c, i) => c.padEnd(widths[i]!)).join("  ");
-  console.log(ansi.dim(fmt(header)));
-  for (const r of rows) console.log(fmt(r));
-  console.log(ansi.dim("  branches: `branches` · full history: https://mergestorm.ai/settings#api"));
+  await present("Jobs", [
+    ansi.dim(fmt(header)),
+    ...rows.map((r) => fmt(r)),
+    ansi.dim("  branches: `branches` · full history: https://mergestorm.ai/settings#api"),
+  ]);
 }
 
 /** Numbered chain timeline for a thread (branch/PR meta when present). */
@@ -73,7 +90,8 @@ export function formatThreadTimeline(data: ThreadDetail): string[] {
   });
 
   if (jobs.length === 0) {
-    lines.push(ansi.dim("  (no jobs in this chain yet)"));
+    lines.push("");
+    lines.push(...buildChainHelpLines({ slug: data.slug, reason: "empty" }));
     return lines;
   }
 
@@ -86,22 +104,67 @@ export function formatThreadTimeline(data: ThreadDetail): string[] {
   return lines;
 }
 
-export async function cmdThread(slug: string, args: string[] = []): Promise<void> {
+const chainCmd = (name: string, blurb: string): string =>
+  `  ${ansi.brightGreen(name.padEnd(22))}${blurb}`;
+
+/** Empty / missing chain — shown in the TTY panel instead of a wiped error. */
+export function buildChainHelpLines(opts: {
+  slug?: string;
+  reason: "missing" | "empty" | "no-repo";
+}): string[] {
+  const title =
+    opts.reason === "empty"
+      ? "No reviews on this chain yet"
+      : opts.reason === "no-repo"
+        ? "No git repo here"
+        : "No chain for this branch";
+  const lines = [`  ${ansi.bold(title)}`];
+  if (opts.slug) lines.push(ansi.dim(`  Looked for  ${opts.slug}`));
+  lines.push("");
+  lines.push(`  ${ansi.bold("What this is")}`);
+  lines.push("  A chain is the review timeline for one branch.");
+  lines.push("");
+  lines.push(`  ${ansi.bold("Do this")}`);
+  if (opts.reason === "no-repo") {
+    lines.push(chainCmd("cd <repo>", "then run chain again"));
+    lines.push(chainCmd("chain <slug>", "open a known thread"));
+  } else {
+    lines.push(chainCmd("review", "submit a diff on this branch"));
+    lines.push(chainCmd("branches", "pick a branch that already has reviews"));
+    lines.push(chainCmd("chain <slug>", "open a known thread slug"));
+  }
+  return lines;
+}
+
+export async function cmdThread(
+  slug: string,
+  args: string[] = [],
+  opts: { mode?: "oneshot" | "shell" } = {},
+): Promise<void> {
   const asJson = args.includes("--json");
   const cfg = await loadConfig();
   const { status, body } = await apiFetch(cfg, `/api/v1/threads/${encodeURIComponent(slug)}`);
   if (status === 404) {
-    throw new CommandError(`Thread not found: ${slug}`);
+    if (asJson || !process.stdin.isTTY || !process.stdout.isTTY) {
+      throw new CommandError(`Thread not found: ${slug}`);
+    }
+    await showLinePanel("Chain", buildChainHelpLines({ slug, reason: "missing" }));
+    return;
   }
   if (status !== 200) {
     throw new CommandError(`Failed to load thread (HTTP ${status}): ${JSON.stringify(body)}`);
   }
   if (asJson) {
-    console.log(JSON.stringify(body, null, 2));
+    const text = JSON.stringify(body, null, 2);
+    if (opts.mode === "shell") {
+      await present("Thread", text.split("\n"));
+      return;
+    }
+    console.log(text);
     return;
   }
   const data = body as ThreadDetail;
-  for (const line of formatThreadTimeline({
+  const lines = formatThreadTimeline({
     ...data,
     branch: data.branch ?? null,
     owner: data.owner ?? null,
@@ -110,7 +173,6 @@ export async function cmdThread(slug: string, args: string[] = []): Promise<void
     status: data.status ?? "active",
     pr_linked_at: data.pr_linked_at ?? null,
     jobs: data.jobs ?? [],
-  })) {
-    console.log(line);
-  }
+  });
+  await showLinePanel("Chain", lines);
 }

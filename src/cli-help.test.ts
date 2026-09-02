@@ -46,6 +46,7 @@ describe("CLI help exits", { skip: !nodeBin }, () => {
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Usage:/);
     assert.match(r.stdout, /--router/);
+    assert.match(r.stdout, /mergestorm queue add/);
     assert.equal(r.stderr.trim(), "");
   });
 
@@ -58,15 +59,43 @@ describe("CLI help exits", { skip: !nodeBin }, () => {
   it("mergestorm stack --help exits 0", () => {
     const r = runCli(["stack", "--help"]);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /auto-promote/);
+    assert.match(r.stdout, /stack land/);
     assert.doesNotMatch(r.stdout, /unknown stack subcommand/);
   });
 
   it("mergestorm stack help exits 0", () => {
     const r = runCli(["stack", "help"]);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /auto-promote/);
+    assert.match(r.stdout, /stack land/);
     assert.doesNotMatch(r.stdout, /unknown stack subcommand/);
+  });
+
+  it("mergestorm queue --help exits 0", () => {
+    const r = runCli(["queue", "--help"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /queue add <stack-id>/);
+    assert.match(r.stdout, /queue rm <entry-id\|stack-id>/);
+    assert.doesNotMatch(r.stdout, /unknown queue subcommand/);
+  });
+
+  it("mergestorm queue help exits 0", () => {
+    const r = runCli(["queue", "help"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /live merge-queue entries/);
+  });
+
+  it("mergestorm skill --help exits 0", () => {
+    const r = runCli(["skill", "--help"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /--claude/);
+    assert.match(r.stdout, /--cursor/);
+    assert.doesNotMatch(r.stdout, /unknown skill subcommand/);
+  });
+
+  it("mergestorm skill help exits 0", () => {
+    const r = runCli(["skill", "help"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /--claude/);
   });
 
   it("unknown command still exits non-zero", () => {

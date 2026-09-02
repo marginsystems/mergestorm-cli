@@ -4,7 +4,6 @@ import {
   landNextStack,
   listStacks,
   restackStack,
-  setStackAutoPromote,
   type StackDto,
 } from "../api.js";
 import { loadConfig } from "../config.js";
@@ -39,6 +38,10 @@ import {
 } from "../stack-meta.js";
 import { isMgParkBranch, planSubmitLayerBases } from "../submit-pr-base.js";
 import { ansi } from "../ui/ansi.js";
+import { runLineTabsBrowser } from "../ui/line-tabs.js";
+import { present } from "../ui/present.js";
+import { canBrowse } from "./browse.js";
+import { openHelpBrowser } from "./help.js";
 
 const STACK_USAGE = `usage:
   mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend] [--json]
@@ -48,7 +51,6 @@ const STACK_USAGE = `usage:
   mergestorm stack adopt <owner/repo>#<pr>
   mergestorm stack restack <stack-id> [--json]
   mergestorm stack land <stack-id> [--json]
-  mergestorm stack auto-promote on|off <stack-id> [--json]
 
   stack submit opens PRs with a body generated from each layer tip commit.
   Layers 1–2 use the git parent as GitHub base. Layer 3+ opens onto the
@@ -158,11 +160,39 @@ export function parseAdoptTarget(args: string[]): { owner: string; repo: string;
   throw new CommandError(`usage: mergestorm stack adopt <owner/repo>#<pr>`);
 }
 
+const stackCmd = (name: string, blurb: string): string =>
+  `  ${ansi.brightGreen(name.padEnd(26))}${blurb}`;
+
+/** Empty + populated bodies for the TTY `stack list` panel. */
+export function buildStackListLines(stacks: StackDto[]): string[] {
+  if (stacks.length === 0) {
+    return [
+      `  ${ansi.bold("None yet")}`,
+      "  No registered stacks for this key.",
+      "",
+      `  ${ansi.bold("Author one")}`,
+      stackCmd("stack create", "new layer on this branch"),
+      "  commit, then  stack submit",
+      "",
+      `  ${ansi.bold("Or import")}`,
+      stackCmd("stack adopt org/repo#12", "open GitHub chain"),
+      "",
+      ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"),
+    ];
+  }
+  const lines: string[] = [];
+  for (const s of stacks) {
+    lines.push(...formatStackHuman(s));
+    lines.push("");
+  }
+  lines.push(ansi.dim("  create · submit · land <id> · q to close"));
+  return lines;
+}
+
 function formatStackHuman(s: StackDto): string[] {
   const lines: string[] = [];
-  const auto = s.autoPromoteWhenGreen ? " · auto-promote" : "";
   lines.push(
-    `  ${ansi.bold(`${s.owner}/${s.repo}`)}  trunk=${s.trunkBranch}${auto}`,
+    `  ${ansi.bold(`${s.owner}/${s.repo}`)}  trunk=${s.trunkBranch}`,
   );
   lines.push(`  ${ansi.dim(s.id)}`);
   if (s.layers.length === 0) {
@@ -419,21 +449,24 @@ async function cmdStackCreate(
     );
     return;
   }
-  console.log(ansi.green(`  Created ${branch} (onto ${parentBranch})`));
+  const created: string[] = [
+    ansi.brightGreen(`  Created ${branch} (onto ${parentBranch})`),
+  ];
   if (registeredHit) {
-    console.log(
+    created.push(
       ansi.dim(
         `  extending registered stack ${registeredHit.stackId}` +
           (registeredHit.prNumber > 0 ? ` (from #${registeredHit.prNumber})` : ""),
       ),
     );
   }
-  console.log(
+  created.push(
     ansi.dim(
       `  trunk: ${meta.trunk} · local stacks: ${meta.stacks.length} · active layers: ${layers.length}`,
     ),
   );
-  console.log(ansi.dim("  authoring state: managed automatically outside the repository"));
+  created.push(ansi.dim("  authoring state: managed automatically outside the repository"));
+  await present("Stack", created);
 }
 
 /** Injectable seams for unit tests (STRUCT-04). Production callers omit deps. */
@@ -695,30 +728,32 @@ export async function cmdStackSubmit(
     return;
   }
 
+  const summary: string[] = [];
   for (const row of opened) {
     const verb = row.created ? "opened" : "exists";
-    console.log(
-      ansi.green(
+    summary.push(
+      ansi.brightGreen(
         `  #${row.prNumber}  ${row.branch} → ${row.base}  (${verb})`,
       ),
     );
   }
   if (stackId) {
-    console.log(ansi.green(`  Registered stack ${stackId}`));
+    summary.push(ansi.brightGreen(`  Registered stack ${stackId}`));
   } else {
-    console.log(ansi.dim("  Stack registration returned no stack ID"));
+    summary.push(ansi.dim("  Stack registration returned no stack ID"));
   }
-  console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
+  summary.push(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
+  await present("Stack", summary);
 }
 
 async function cmdStackReset(args: string[]): Promise<void> {
   parseStackResetArgs(args);
   await resetStackMeta(process.cwd());
-  console.log(
-    ansi.green(
+  await present("Stack", [
+    ansi.brightGreen(
       "  Cleared CLI-managed pre-submit stack state. Branches, PRs, and registered stacks were not changed.",
     ),
-  );
+  ]);
 }
 
 async function cmdStackList(args: string[]): Promise<void> {
@@ -729,21 +764,26 @@ async function cmdStackList(args: string[]): Promise<void> {
     console.log(JSON.stringify({ stacks }, null, 2));
     return;
   }
-  if (stacks.length === 0) {
-    console.log(
-      ansi.dim("  No stacks yet. Author with `stack create` → commit → `stack submit`."),
-    );
-    console.log(
-      ansi.dim("  Import an existing chain only: `stack adopt owner/repo#pr`"),
-    );
-    console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
+  if (canBrowse()) {
+    await runLineTabsBrowser({
+      tabs: [{ id: "yours", label: "Stacks", lines: buildStackListLines(stacks) }],
+    });
     return;
   }
-  for (const s of stacks) {
-    for (const line of formatStackHuman(s)) console.log(line);
-    console.log("");
+  if (stacks.length === 0) {
+    await present("Stacks", [
+      ansi.dim("  No stacks yet. Author with `stack create` → commit → `stack submit`."),
+      ansi.dim("  Import an existing chain only: `stack adopt owner/repo#pr`"),
+      ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"),
+    ]);
+    return;
   }
-  console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
+  const listed: string[] = [];
+  for (const s of stacks) {
+    listed.push(...formatStackHuman(s), "");
+  }
+  listed.push(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
+  await present("Stacks", listed);
 }
 
 async function cmdStackAdopt(args: string[]): Promise<void> {
@@ -765,17 +805,18 @@ async function cmdStackAdopt(args: string[]): Promise<void> {
   const data = body as { stack?: { id?: string; trunkBranch?: string }; chain?: unknown[] };
   const stack = data.stack;
   const chain = data.chain;
-  console.log(
-    ansi.green(
+  const imported: string[] = [
+    ansi.brightGreen(
       `  Imported ${owner}/${repo}#${prNumber}` +
         (stack?.id ? ` → ${stack.id}` : "") +
         (Array.isArray(chain) ? ` (${chain.length} layer(s))` : ""),
     ),
-  );
+  ];
   if (stack?.trunkBranch) {
-    console.log(ansi.dim(`  trunk: ${stack.trunkBranch}`));
+    imported.push(ansi.dim(`  trunk: ${stack.trunkBranch}`));
   }
-  console.log(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
+  imported.push(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
+  await present("Stack", imported);
 }
 
 async function cmdStackRestack(args: string[]): Promise<void> {
@@ -791,9 +832,9 @@ async function cmdStackRestack(args: string[]): Promise<void> {
     return;
   }
   const fromBranch = (body as { fromBranch?: string }).fromBranch;
-  console.log(
-    ansi.green(`  Restack started` + (fromBranch ? ` from ${fromBranch}` : "") + ` (${id})`),
-  );
+  await present("Stack", [
+    ansi.brightGreen(`  Restack started` + (fromBranch ? ` from ${fromBranch}` : "") + ` (${id})`),
+  ]);
 }
 
 async function cmdStackLand(args: string[]): Promise<void> {
@@ -813,45 +854,25 @@ async function cmdStackLand(args: string[]): Promise<void> {
   const branch = (body as { mergedBranch?: string }).mergedBranch;
   const uNumber = (body as { uNumber?: number }).uNumber;
   if (typeof uNumber === "number" && uNumber > 0) {
-    console.log(
-      ansi.green(
+    await present("Stack", [
+      ansi.brightGreen(
         `  Promoted` +
           (pr != null ? ` #${pr}` : "") +
           ` into U${uNumber}` +
           (branch ? ` (${branch})` : "") +
           ` on ${id}`,
       ),
-    );
+    ]);
     return;
   }
-  console.log(
-    ansi.green(
+  await present("Stack", [
+    ansi.brightGreen(
       `  Landed` +
         (pr != null ? ` #${pr}` : "") +
         (branch ? ` (${branch})` : "") +
         ` on ${id}`,
     ),
-  );
-}
-
-async function cmdStackAutoLand(args: string[]): Promise<void> {
-  const asJson = args.includes("--json");
-  const filtered = args.filter((a) => a !== "--json");
-  const mode = filtered[0]?.toLowerCase();
-  const id = requireStackId(
-    filtered[1],
-    "usage: mergestorm stack auto-promote on|off <stack-id>",
-  );
-  if (mode !== "on" && mode !== "off") {
-    throw new CommandError("usage: mergestorm stack auto-promote on|off <stack-id>");
-  }
-  const cfg = await loadConfig();
-  const body = await setStackAutoPromote(id, mode === "on", cfg);
-  if (asJson) {
-    console.log(JSON.stringify(body, null, 2));
-    return;
-  }
-  console.log(ansi.green(`  Auto-promote ${mode} for ${id}`));
+  ]);
 }
 
 export async function cmdStack(args: string[]): Promise<void> {
@@ -859,6 +880,10 @@ export async function cmdStack(args: string[]): Promise<void> {
   const rest = args.slice(1);
   // Help must exit 0 — print usage, do not throw CommandError.
   if (!sub || sub === "-h" || sub === "--help" || sub === "help") {
+    if (canBrowse()) {
+      await openHelpBrowser("stacks");
+      return;
+    }
     console.log(STACK_USAGE);
     return;
   }
@@ -869,13 +894,5 @@ export async function cmdStack(args: string[]): Promise<void> {
   if (sub === "adopt") return cmdStackAdopt(rest);
   if (sub === "restack") return cmdStackRestack(rest);
   if (sub === "land" || sub === "land-next") return cmdStackLand(rest);
-  if (
-    sub === "auto-promote" ||
-    sub === "autopromote" ||
-    sub === "auto-land" ||
-    sub === "autoland"
-  ) {
-    return cmdStackAutoLand(rest);
-  }
   throw new CommandError(`${STACK_USAGE}\nunknown stack subcommand: ${sub}`);
 }

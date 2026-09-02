@@ -2,11 +2,16 @@ import { DEFAULT_API } from "../config.js";
 import { CommandError } from "../errors.js";
 import type { CommandSpec } from "../ui/prompt.js";
 import { cmdBranches, cmdChain } from "./branches.js";
+import { canBrowse, openTabsBrowser } from "./browse.js";
 import { cmdCredits } from "./credits.js";
 import { cmdJobs, cmdThread } from "./jobs.js";
 import { cmdLogin } from "./login.js";
 import { cmdLogout } from "./logout.js";
+import { cmdQueue } from "./queue.js";
+import { cmdPr } from "./pr.js";
 import { cmdReview } from "./review.js";
+import { cmdSettings } from "./settings.js";
+import { cmdSkill } from "./skill.js";
 import { cmdStack } from "./stack.js";
 import { cmdStatus } from "./status.js";
 import { cmdWhoami } from "./whoami.js";
@@ -76,19 +81,41 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     },
   },
   {
+    name: "pr",
+    summary: "Latest Vortex review for a GitHub PR",
+    usage: [
+      "mergestorm pr <owner/repo>#<n>  Fetch the latest Vortex PR review",
+      "  [--json] [--wait] [--after-sha <sha>] [--timeout <s>]",
+      "  Also accepts: mergestorm pr <owner/repo> <n>",
+    ],
+    async run(args, ctx) {
+      await cmdPr(args, {
+        defaultFormat: ctx.mode === "shell" ? "pretty" : "json",
+        signal: ctx.signal,
+        mode: ctx.mode,
+      });
+    },
+  },
+  {
     name: "status",
-    summary: "Show a review job",
+    summary: "Job panel (id) or Status / Usage / Jobs tabs",
     usage: [
       "mergestorm status <job_id>      Fetch a review job (same envelope as review --json)",
       "  [--json] [--wait] [--timeout seconds]",
       "  HTTP 429 exits 7 (rate_limited) with retry_after_seconds",
+      "  With no job id on a TTY: tabbed Status / Usage / Jobs / Config browser",
     ],
     async run(args, ctx) {
+      if (args.length === 0 && canBrowse()) {
+        await openTabsBrowser("status");
+        return;
+      }
       if (ctx.mode === "shell") {
         await cmdStatus(args, {
           defaultFormat: "pretty",
           signal: ctx.signal,
           interactive: true,
+          mode: "shell",
         });
         return;
       }
@@ -98,8 +125,11 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
   {
     name: "credits",
     aliases: ["usage"],
-    summary: "Usage panel: credit bar and last five jobs",
-    usage: ["mergestorm credits [--json]     Usage panel (bar + last 5 jobs)"],
+    summary: "Usage: tabbed browser (TTY) or static panel",
+    usage: [
+      "mergestorm credits [--json]     Usage panel (bar + last 5 jobs)",
+      "  On a TTY: tabbed Status / Usage / Jobs / Config browser (Usage selected)",
+    ],
     async run(args) {
       await cmdCredits(args);
     },
@@ -108,8 +138,16 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     name: "jobs",
     summary: "Recent review jobs (default 10)",
     usage: ["mergestorm jobs [n] [--json]    Recent review jobs"],
-    async run(args) {
-      await cmdJobs(args);
+    async run(args, ctx) {
+      if (
+        args.every((a) => a !== "--json") &&
+        !args.some((a) => /^\d+$/.test(a)) &&
+        canBrowse()
+      ) {
+        await openTabsBrowser("jobs");
+        return;
+      }
+      await cmdJobs(args, { mode: ctx.mode });
     },
   },
   {
@@ -117,26 +155,51 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     aliases: ["chains"],
     summary: "Pick a recently reviewed branch",
     usage: ["mergestorm branches [n]         Recently reviewed branches (pick on TTY)"],
-    async run(args) {
-      await cmdBranches(args);
+    async run(args, ctx) {
+      await cmdBranches(args, { mode: ctx.mode });
     },
   },
   {
     name: "chain",
-    summary: "Show a branch review-chain timeline",
+    summary: "Branch review-chain timeline (holds until q)",
     usage: [
       "mergestorm chain [slug]         Branch review-chain timeline (default: current)",
     ],
-    async run(args) {
-      await cmdChain(args);
+    async run(args, ctx) {
+      await cmdChain(args, { mode: ctx.mode });
     },
   },
   {
     name: "whoami",
-    summary: "Key + plan + API base",
+    summary: "Key + plan (Status tab on a TTY)",
     usage: ["mergestorm whoami [--json]      Key + plan + API base"],
+    async run(args, ctx) {
+      await cmdWhoami(args, { mode: ctx.mode });
+    },
+  },
+  {
+    name: "settings",
+    summary: "Automation toggles (Config tab on a TTY)",
+    usage: [
+      "mergestorm settings [--json]    Read the automation toggles (Config tab on a TTY)",
+      "  [--auto-review on|off] [--auto-patch on|off] [--vortex-thinking on|off]",
+      "  [--repo-overview on|off] [--review-unit-land on|off]",
+      "  [--cyclone-review-unit-land on|off] [--vortex-seam on|off]",
+      "  With flags: PATCH those settings and print the stored result",
+    ],
+    async run(args, ctx) {
+      await cmdSettings(args, { mode: ctx.mode });
+    },
+  },
+  {
+    name: "skill",
+    summary: "Install mergestorm-review and mergestorm-pr-loop for Claude or Cursor",
+    usage: [
+      "mergestorm skill install --claude|--cursor  Copy the mergestorm-review and mergestorm-pr-loop skills into this repo",
+      "  [--json]",
+    ],
     async run(args) {
-      await cmdWhoami(args);
+      await cmdSkill(args);
     },
   },
   {
@@ -151,12 +214,24 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
             : "usage: mergestorm thread <slug>",
         );
       }
-      await cmdThread(args[0], args.slice(1));
+      await cmdThread(args[0], args.slice(1), { mode: ctx.mode });
+    },
+  },
+  {
+    name: "queue",
+    summary: "Merge queue: list, add a stack, or remove an entry",
+    usage: [
+      "mergestorm queue [list] [--json]  List live merge-queue entries",
+      "mergestorm queue add <stack-id> [--json]  Queue a stack for verified landing",
+      "mergestorm queue rm <entry-id|stack-id> [--json]  Remove a live queue entry",
+    ],
+    async run(args) {
+      await cmdQueue(args);
     },
   },
   {
     name: "stack",
-    summary: "Stacks: create, submit, list, adopt, restack, land",
+    summary: "Stacks: /stack how-to, list yours, create → submit",
     usage: [
       "mergestorm stack create [name]  New local stack layer ([--onto] [--trunk] [--extend])",
       "mergestorm stack submit         Push active local stack, open PRs ([--extend])",
@@ -165,7 +240,6 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "mergestorm stack adopt <owner/repo>#<pr>  Import an existing open PR chain",
       "mergestorm stack restack <stack-id>   Restack stack descendants",
       "mergestorm stack land <stack-id>      Land bottom PR (or promote into unit)",
-      "mergestorm stack auto-promote on|off <stack-id>  Toggle auto-promote when green",
     ],
     async run(args) {
       await cmdStack(args);
@@ -185,7 +259,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
 
 /** Shell meta commands (not dispatched via {@link COMMAND_REGISTRY}). */
 const SHELL_META: CommandSpec[] = [
-  { name: "help", summary: "Show available commands" },
+  { name: "help", summary: "Tabbed help (Start / Commands / Stacks)" },
   { name: "clear", summary: "Clear screen and reprint banner" },
   { name: "exit", summary: "Leave the shell" },
   { name: "quit", summary: "Leave the shell" },
@@ -203,7 +277,10 @@ export function findCommand(name: string): RegistryCommand | undefined {
 
 /** Autocomplete / `/help` list for the interactive shell. Aliases fold onto the primary name. */
 export function shellCommandSpecs(): CommandSpec[] {
-  const specs: CommandSpec[] = [{ name: "help", summary: SHELL_META[0]!.summary }];
+  const specs: CommandSpec[] = [
+    { name: "help", summary: SHELL_META[0]!.summary },
+    { name: "exit", summary: SHELL_META[2]!.summary, aliases: ["quit"] },
+  ];
   for (const c of COMMAND_REGISTRY) {
     if (SHELL_OMIT.has(c.name)) continue;
     specs.push({
@@ -212,10 +289,7 @@ export function shellCommandSpecs(): CommandSpec[] {
       ...(c.aliases?.length ? { aliases: c.aliases } : {}),
     });
   }
-  specs.push(
-    { name: "clear", summary: SHELL_META[1]!.summary },
-    { name: "exit", summary: SHELL_META[2]!.summary, aliases: ["quit"] },
-  );
+  specs.push({ name: "clear", summary: SHELL_META[1]!.summary });
   return specs;
 }
 

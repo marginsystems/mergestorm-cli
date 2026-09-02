@@ -1,8 +1,14 @@
 import { apiBase, loadConfig, resolveApiKey, type Config } from "./config.js";
 import { CommandError, REVIEW_EXIT, rateLimitedMessage } from "./errors.js";
-import type { StackDto } from "./stack-dto.js";
+import type { MergeQueueEntryDto, StackDto } from "./stack-dto.js";
 
 export type {
+  MergeQueueBounceDetail,
+  MergeQueueBounceKind,
+  MergeQueueEnqueuedBy,
+  MergeQueueEnqueuedVia,
+  MergeQueueEntryDto,
+  MergeQueueEntryState,
   StackBranchState,
   StackCiStatus,
   StackDto,
@@ -267,6 +273,134 @@ export type ThreadDetail = {
   }[];
 };
 
+export type PrReviewFinding = {
+  path?: string;
+  line?: number;
+  severity: string;
+  body: string;
+  title?: string;
+  specialist?: string;
+};
+
+export type PrReviewFindings = {
+  specialists_run?: string[];
+  inline?: PrReviewFinding[];
+  off_diff?: PrReviewFinding[];
+  offDiff?: PrReviewFinding[];
+  patchPolicy?: unknown;
+};
+
+export type PrVortexReview = {
+  schema: "mergestorm.pr_review/v1";
+  id: string;
+  owner: string;
+  repo: string;
+  pr_number: number;
+  status: string;
+  raw_status?: string;
+  phase: string | null;
+  verdict: string | null;
+  summary?: string | null;
+  head_sha: string | null;
+  review_count: number;
+  skip_reason: string | null;
+  reviewed_at: string | null;
+  finding_count: number;
+  findings: PrReviewFindings | null;
+  patch_policy: unknown | null;
+};
+
+/**
+ * Bearer-writable settings keys, mirroring the `/api/v1/settings` allowlist.
+ * The connected flags are read-only there and deliberately absent here.
+ */
+export const SETTINGS_WRITABLE_KEYS = [
+  "auto_review_enabled",
+  "auto_patch_enabled",
+  "vortex_show_thinking_traces",
+  "repo_overview_enabled",
+  "review_unit_land_prs_enabled",
+  "cyclone_review_unit_land_prs_enabled",
+  "vortex_seam_specialist_enabled",
+] as const;
+
+export type SettingsWritableKey = (typeof SETTINGS_WRITABLE_KEYS)[number];
+
+export type SettingsPatch = Partial<Record<SettingsWritableKey, boolean>>;
+
+/** GET and PATCH `/api/v1/settings` both answer with this shape. */
+export type SettingsResponse = Record<SettingsWritableKey, boolean> & {
+  cyclone_connected: boolean;
+  github_connected: boolean;
+};
+
+/**
+ * Fetch Bearer /api/v1/settings; null on 404/network/timeouts so panels can
+ * degrade (same contract as {@link getMe}), while 401 still surfaces.
+ */
+export async function getSettings(
+  cfg?: Config,
+  opts?: { timeoutMs?: number },
+): Promise<SettingsResponse | null> {
+  const resolved = cfg ?? (await loadConfig());
+  try {
+    const { status, body } = await apiFetch(resolved, "/api/v1/settings", {
+      timeoutMs: opts?.timeoutMs,
+    });
+    if (status !== 200) return null;
+    return body as SettingsResponse;
+  } catch (err) {
+    if (err instanceof CommandError) {
+      if (err.code === "api_timeout") return null;
+      throw err;
+    }
+    return null;
+  }
+}
+
+/**
+ * PATCH Bearer /api/v1/settings and return the stored result. Rejections
+ * (unknown key, cyclone_not_connected, …) surface the API's own `message`
+ * so the CLI never invents a reason.
+ */
+export async function patchSettings(
+  patch: SettingsPatch,
+  cfg?: Config,
+  opts?: { timeoutMs?: number },
+): Promise<SettingsResponse> {
+  const resolved = cfg ?? (await loadConfig());
+  if (Object.keys(patch).length === 0) {
+    throw new CommandError("No settings to update.", 2, "usage");
+  }
+  const { status, body, retryAfterSeconds } = await apiFetch(resolved, "/api/v1/settings", {
+    method: "PATCH",
+    json: patch,
+    timeoutMs: opts?.timeoutMs,
+  });
+  if (status === 404) {
+    throw new CommandError(
+      "Settings API is not available on this server yet. Deploy the API update or use the dashboard.",
+    );
+  }
+  if (status === 429) {
+    throw new CommandError(
+      rateLimitedMessage(retryAfterSeconds),
+      REVIEW_EXIT.rate_limited,
+      "rate_limited",
+      { retryAfterSeconds },
+    );
+  }
+  if (status !== 200) {
+    const message = (body as { message?: unknown } | null)?.message;
+    throw new CommandError(
+      typeof message === "string" && message.trim()
+        ? message
+        : `Failed to update settings (HTTP ${status}): ${JSON.stringify(body)}`,
+    );
+  }
+  return body as SettingsResponse;
+}
+
 /** Fetch /api/v1/me; returns null on 404/network so callers can degrade. */
 export async function getMe(
   cfg?: Config,
@@ -291,10 +425,16 @@ export async function getMe(
   }
 }
 
-export async function listJobs(limit = 10, cfg?: Config): Promise<JobListItem[]> {
+export async function listJobs(
+  limit = 10,
+  cfg?: Config,
+  opts?: { timeoutMs?: number },
+): Promise<JobListItem[]> {
   const resolved = cfg ?? (await loadConfig());
   const capped = Math.min(Math.max(limit, 1), 50);
-  const { status, body } = await apiFetch(resolved, `/api/v1/reviews?limit=${capped}`);
+  const { status, body } = await apiFetch(resolved, `/api/v1/reviews?limit=${capped}`, {
+    timeoutMs: opts?.timeoutMs,
+  });
   if (status === 404) {
     throw new CommandError("Job list is not available on this server yet. Update the API or use the dashboard.");
   }
@@ -309,7 +449,7 @@ export async function listJobs(limit = 10, cfg?: Config): Promise<JobListItem[]>
 export async function getReview(
   jobId: string,
   cfg?: Config,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<unknown> {
   const resolved = cfg ?? (await loadConfig());
   const id = jobId.trim();
@@ -319,7 +459,7 @@ export async function getReview(
   const { status, body, retryAfterSeconds } = await apiFetch(
     resolved,
     `/api/v1/reviews/${encodeURIComponent(id)}`,
-    { signal: opts?.signal },
+    { signal: opts?.signal, timeoutMs: opts?.timeoutMs },
   );
   if (status === 404) {
     throw new CommandError(`Review not found: ${id}`);
@@ -338,13 +478,62 @@ export async function getReview(
   return body;
 }
 
+/** Fetch the latest Vortex pass for one GitHub PR. */
+export async function getPrVortexReview(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  cfg?: Config,
+  opts?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<PrVortexReview> {
+  const resolved = cfg ?? (await loadConfig());
+  const cleanOwner = owner.trim();
+  const cleanRepo = repo.trim();
+  if (!cleanOwner || !cleanRepo || !Number.isInteger(prNumber) || prNumber <= 0) {
+    throw new CommandError("owner, repo, and a positive pr_number are required", 2, "usage");
+  }
+  const query = new URLSearchParams({
+    owner: cleanOwner,
+    repo: cleanRepo,
+    pr_number: String(prNumber),
+  });
+  const { status, body, retryAfterSeconds } = await apiFetch(
+    resolved,
+    `/api/v1/stacks/pr-review?${query.toString()}`,
+    { signal: opts?.signal, timeoutMs: opts?.timeoutMs },
+  );
+  if (status === 404) {
+    throw new CommandError(
+      `Vortex review not found: ${cleanOwner}/${cleanRepo}#${prNumber}`,
+      REVIEW_EXIT.failed,
+      "not_found",
+    );
+  }
+  if (status === 429) {
+    throw new CommandError(
+      rateLimitedMessage(retryAfterSeconds),
+      REVIEW_EXIT.rate_limited,
+      "rate_limited",
+      { retryAfterSeconds },
+    );
+  }
+  if (status !== 200) {
+    throw new CommandError(
+      `Failed to get PR review (HTTP ${status}): ${JSON.stringify(body)}`,
+      REVIEW_EXIT.failed,
+      "review_failed",
+    );
+  }
+  return body as PrVortexReview;
+}
+
 /** List stacks (Bearer GET /api/v1/stacks). */
 export async function listStacks(
   cfg?: Config,
   opts?: { timeoutMs?: number },
 ): Promise<StackDto[]> {
   const resolved = cfg ?? (await loadConfig());
-  const { status, body } = await apiFetch(resolved, "/api/v1/stacks", {
+  const { status, body, retryAfterSeconds } = await apiFetch(resolved, "/api/v1/stacks", {
     timeoutMs: opts?.timeoutMs,
   });
   if (status === 404) {
@@ -352,11 +541,58 @@ export async function listStacks(
       "Stacks API is not available on this server yet. Deploy the API update or use the dashboard.",
     );
   }
+  if (status === 429) {
+    throw new CommandError(
+      rateLimitedMessage(retryAfterSeconds),
+      REVIEW_EXIT.rate_limited,
+      "rate_limited",
+      { retryAfterSeconds },
+    );
+  }
   if (status !== 200) {
     throw new CommandError(`Failed to list stacks (HTTP ${status}): ${JSON.stringify(body)}`);
   }
   const stacks = (body as { stacks?: StackDto[] }).stacks;
   return Array.isArray(stacks) ? stacks : [];
+}
+
+/** Fetch one owned stack with enriched GitHub checks and agent state. */
+export async function getEnrichedStack(
+  stackId: string,
+  cfg?: Config,
+  opts?: { timeoutMs?: number },
+): Promise<StackDto | null> {
+  const resolved = cfg ?? (await loadConfig());
+  const id = stackId.trim();
+  if (!id) {
+    throw new CommandError("stack_id is required", 2, "usage");
+  }
+  const { status, body, retryAfterSeconds } = await apiFetch(
+    resolved,
+    `/api/v1/stacks/enrich?stackId=${encodeURIComponent(id)}`,
+    { timeoutMs: opts?.timeoutMs },
+  );
+  if (status === 404) {
+    throw new CommandError(
+      "Stack enrichment is not available on this server yet. Deploy the API update or use the dashboard.",
+    );
+  }
+  if (status === 429) {
+    throw new CommandError(
+      rateLimitedMessage(retryAfterSeconds),
+      REVIEW_EXIT.rate_limited,
+      "rate_limited",
+      { retryAfterSeconds },
+    );
+  }
+  if (status !== 200) {
+    throw new CommandError(`Failed to get stack status (HTTP ${status}): ${JSON.stringify(body)}`);
+  }
+  const stacks = (body as { stacks?: StackDto[] }).stacks;
+  if (!Array.isArray(stacks)) {
+    throw new CommandError(`Failed to get stack status (HTTP 200): ${JSON.stringify(body)}`);
+  }
+  return stacks.find((stack) => stack?.id === id) ?? null;
 }
 
 /** Adopt an open PR chain (Bearer POST /api/v1/stacks/adopt). */
@@ -457,18 +693,79 @@ export async function landNextStack(
   return stackMutation(stackId, "/land-next", "POST", json, "Failed to land next", cfg);
 }
 
-/** Toggle auto-promote when green (Bearer PATCH /api/v1/stacks/:id). */
-export async function setStackAutoPromote(
-  stackId: string,
-  autoPromoteWhenGreen: boolean,
+/** List the authenticated user's live merge-queue entries. */
+export async function listMergeQueueEntries(
+  cfg?: Config,
+): Promise<MergeQueueEntryDto[]> {
+  const resolved = cfg ?? (await loadConfig());
+  const { status, body } = await apiFetch(resolved, "/api/v1/stacks/queue");
+  if (status === 404) {
+    throw new CommandError(
+      "Merge queue API is not available on this server yet. Deploy the API update or use the dashboard.",
+    );
+  }
+  if (status !== 200) {
+    throw new CommandError(
+      `Failed to list merge queue (HTTP ${status}): ${JSON.stringify(body)}`,
+    );
+  }
+  const entries = (body as { entries?: MergeQueueEntryDto[] }).entries;
+  if (!Array.isArray(entries)) {
+    throw new CommandError(
+      `Failed to list merge queue (HTTP 200): ${JSON.stringify(body)}`,
+    );
+  }
+  return entries;
+}
+
+async function queueMutation(
+  route: string,
+  failLabel: string,
   cfg?: Config,
 ): Promise<unknown> {
-  return stackMutation(
-    stackId,
-    "",
-    "PATCH",
-    { autoPromoteWhenGreen },
-    "Failed to update auto-promote",
+  const resolved = cfg ?? (await loadConfig());
+  const { status, body } = await apiFetch(resolved, route, {
+    method: "POST",
+    json: {},
+  });
+  if (status === 404) {
+    const error = (body as { error?: unknown } | null)?.error;
+    if (error === "stack_not_found") {
+      throw new CommandError("Stack not found");
+    }
+    if (error === "entry_not_found") {
+      throw new CommandError("Merge queue entry not found");
+    }
+    throw new CommandError(
+      "Merge queue API is not available on this server yet. Deploy the API update or use the dashboard.",
+    );
+  }
+  if (status < 200 || status >= 300) {
+    throw new CommandError(`${failLabel} (HTTP ${status}): ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+/** Enqueue a stack for verified landing. */
+export async function enqueueStack(
+  stackId: string,
+  cfg?: Config,
+): Promise<unknown> {
+  return queueMutation(
+    `/api/v1/stacks/${encodeURIComponent(stackId)}/enqueue`,
+    "Failed to add stack to merge queue",
+    cfg,
+  );
+}
+
+/** Cancel a live merge-queue entry by entry id. */
+export async function cancelMergeQueueEntry(
+  entryId: string,
+  cfg?: Config,
+): Promise<unknown> {
+  return queueMutation(
+    `/api/v1/stacks/queue/${encodeURIComponent(entryId)}/cancel`,
+    "Failed to remove merge queue entry",
     cfg,
   );
 }

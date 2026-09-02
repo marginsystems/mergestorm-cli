@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatThreadTimeline } from "./jobs.js";
+import { buildChainHelpLines, formatThreadTimeline } from "./jobs.js";
 import { formatBranchRow } from "./branches.js";
 import type { ThreadDetail, ThreadListItem } from "../api.js";
 
@@ -80,4 +80,16 @@ test("formatThreadTimeline numbers jobs and shows branch/PR meta", () => {
   const i1 = plain.indexOf("#1");
   const i2 = plain.indexOf("#2");
   assert.ok(i1 >= 0 && i2 > i1);
+});
+
+test("buildChainHelpLines missing chain tells you how to start", () => {
+  const STRIP = /\u001b\[[0-9;]*m/g;
+  const text = buildChainHelpLines({ slug: "local/feat", reason: "missing" })
+    .join("\n")
+    .replace(STRIP, "");
+  assert.match(text, /No chain/);
+  assert.match(text, /local\/feat/);
+  assert.match(text, /review/);
+  assert.match(text, /branches/);
+  assert.match(text, /chain <slug>/);
 });

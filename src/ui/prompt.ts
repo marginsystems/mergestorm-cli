@@ -32,6 +32,13 @@ export interface AskLineOptions {
   /** Streams (defaults: process.stdin / process.stdout). Injectable for tests. */
   input?: NodeJS.ReadStream;
   output?: NodeJS.WriteStream;
+  /**
+   * Welcome-panel rows sitting directly above this prompt, reflowed per
+   * width. Painted on every frame from the pane origin (`ESC[H`) so a
+   * resize cannot desync CUU counts. Pass `true` for compact, `"mini"` /
+   * `"nano"` for a short pane that still shows the mark.
+   */
+  header?: (columns?: number, variant?: boolean | "mini" | "nano") => string[];
 }
 
 /** Thrown when the user asks to close the prompt (Ctrl+D empty, or Ctrl+C twice). */
@@ -64,6 +71,13 @@ export function promptRedrawPrefix(inputRow: number): string {
 export function promptClearOverlay(boxed: boolean): string {
   return `${down(boxed ? 2 : 1)}\r${clearDown}`;
 }
+
+/**
+ * Cursor home + ED 0: clears the whole screen from row 1 and leaves the
+ * cursor there. Used to redraw the welcome panel on resize, where the old
+ * frame's row count is unknowable after the terminal rewraps.
+ */
+export const HEADER_REDRAW_PREFIX = `\u001b[H${clearDown}`;
 
 export const DROPDOWN_MAX_COMMAND_ROWS = 8;
 
@@ -131,15 +145,147 @@ export function dropdownViewport(
 export type OverlayRow = { text: string; selected?: boolean };
 
 /** Overlay rows (no invert). At most `maxRows` commands plus edge markers. */
+/** Prompt label + input chrome + footer hint. */
+export function promptChromeRows(
+  boxed: boolean,
+  hasPrompt: boolean,
+  hasHint = true,
+): number {
+  return (hasPrompt ? 1 : 0) + (boxed ? 3 : 1) + (hasHint ? 1 : 0);
+}
+
+function resolvedRows(terminalRows: number | undefined): number {
+  return typeof terminalRows === "number" && Number.isFinite(terminalRows) && terminalRows >= 1
+    ? terminalRows
+    : 24;
+}
+
+/**
+ * Rows available above the input bar for the slash list. Idle home
+ * passes 0 — do not pad a blank gap between header and prompt.
+ */
+export function overlayReserve(
+  terminalRows: number | undefined,
+  headerRows: number,
+  boxed: boolean,
+  hasPrompt: boolean,
+): number {
+  const available =
+    resolvedRows(terminalRows) - Math.max(0, headerRows) - promptChromeRows(boxed, hasPrompt);
+  return Math.max(0, Math.min(DROPDOWN_MAX_COMMAND_ROWS, available));
+}
+
+/** Pad so the slash list sits just above the input bar (Claude-style). */
+export function padOverlayRows(rows: OverlayRow[], reserve: number): OverlayRow[] {
+  const max = Math.max(0, reserve);
+  if (max === 0) return [];
+  const visible = rows.slice(0, max);
+  const pad = max - visible.length;
+  return [...Array.from({ length: pad }, () => ({ text: " " })), ...visible];
+}
+
+export interface HomeFrameFit {
+  header: string[];
+  reserve: number;
+  boxed: boolean;
+  hasPrompt: boolean;
+  hasHint: boolean;
+}
+
+/**
+ * Pick a header density and input chrome that fit the pane.
+ * Never drops the mark when a mini/nano header is provided — a short
+ * pane unboxes the input instead of painting an overflowing frame.
+ * `dockBottom` uses leftover rows so the prompt sits on the last lines.
+ */
+export function fitHomeFrame(params: {
+  fullHeader: string[];
+  compactHeader: string[];
+  miniHeader?: string[];
+  nanoHeader?: string[];
+  terminalRows: number | undefined;
+  boxed: boolean;
+  hasPrompt: boolean;
+  dropdownCount: number;
+  dockBottom?: boolean;
+}): HomeFrameFit {
+  const rows = resolvedRows(params.terminalRows);
+  const want = params.dropdownCount > 0
+    ? Math.min(DROPDOWN_MAX_COMMAND_ROWS, Math.max(1, params.dropdownCount))
+    : 0;
+
+  const headers = [
+    params.fullHeader,
+    params.compactHeader,
+    params.miniHeader ?? [],
+    params.nanoHeader ?? [],
+  ].filter((h, i, all) => h.length > 0 && all.findIndex((x) => x === h) === i);
+
+  const chromes: Array<{ boxed: boolean; hasPrompt: boolean; hasHint: boolean }> = [];
+  if (params.boxed) chromes.push({ boxed: true, hasPrompt: params.hasPrompt, hasHint: true });
+  chromes.push({ boxed: false, hasPrompt: params.hasPrompt, hasHint: true });
+  chromes.push({ boxed: false, hasPrompt: false, hasHint: true });
+  chromes.push({ boxed: false, hasPrompt: false, hasHint: false });
+
+  const tryFit = (
+    header: string[],
+    chrome: { boxed: boolean; hasPrompt: boolean; hasHint: boolean },
+  ): HomeFrameFit | null => {
+    const chromeRows = promptChromeRows(chrome.boxed, chrome.hasPrompt, chrome.hasHint);
+    const avail = rows - header.length - chromeRows;
+    if (avail < 0) return null;
+    if (params.dockBottom) {
+      return { header, reserve: avail, ...chrome };
+    }
+    if (want === 0) {
+      return { header, reserve: 0, ...chrome };
+    }
+    const maxList = Math.max(0, Math.min(DROPDOWN_MAX_COMMAND_ROWS, avail));
+    if (maxList < 1) return null;
+    return { header, reserve: Math.min(want, maxList), ...chrome };
+  };
+
+  // Prefer keeping the input boxed: try every header density at the
+  // current chrome before unboxing. Otherwise a 12-row pane would pick
+  // the full banner + a plain prompt over compact + boxed.
+  for (const chrome of chromes) {
+    for (const header of headers) {
+      const hit = tryFit(header, chrome);
+      if (hit) return hit;
+    }
+  }
+
+  const fallback = params.nanoHeader?.length
+    ? params.nanoHeader
+    : params.miniHeader?.length
+      ? params.miniHeader
+      : [];
+  return {
+    header: fallback,
+    reserve: params.dockBottom ? Math.max(0, rows - fallback.length - 1) : 0,
+    boxed: false,
+    hasPrompt: false,
+    hasHint: false,
+  };
+}
+
 export function dropdownOverlayRows(
   dropdown: CommandSpec[],
   index: number,
   maxRows: number,
 ): OverlayRow[] {
-  const view = dropdownViewport(dropdown.length, index, maxRows);
+  const max = Math.max(1, maxRows);
+  if (dropdown.length <= max) {
+    return dropdown.map((spec, i) => ({
+      text: `  ${formatSlashLabel(spec).padEnd(22)}${spec.summary}`,
+      selected: i === index,
+    }));
+  }
+  const cmdSlots = Math.max(1, max - 2);
+  const view = dropdownViewport(dropdown.length, index, cmdSlots);
   const rows: OverlayRow[] = [];
   if (view.moreAbove > 0) rows.push({ text: `  \u2191 ${view.moreAbove} more` });
-  const end = Math.min(dropdown.length, view.start + Math.max(1, maxRows));
+  const end = Math.min(dropdown.length, view.start + cmdSlots);
   for (let i = view.start; i < end; i++) {
     const spec = dropdown[i]!;
     rows.push({
@@ -148,7 +294,7 @@ export function dropdownOverlayRows(
     });
   }
   if (view.moreBelow > 0) rows.push({ text: `  \u2193 ${view.moreBelow} more` });
-  return rows;
+  return rows.slice(0, max);
 }
 
 /** Input prefix glyph (U+203A), kept as an escape so editors can't mangle it. */
@@ -195,8 +341,11 @@ export function inputWindow(
 }
 
 /** Cells available to the buffer (after the prefix) on a content row. */
-export function inputCells(columns: number | undefined): { boxed: boolean; cells: number } {
-  const boxed = preferBoxedUi(columns);
+export function inputCells(
+  columns: number | undefined,
+  boxedOverride?: boolean,
+): { boxed: boolean; cells: number } {
+  const boxed = boxedOverride ?? preferBoxedUi(columns);
   const contentCells = boxed
     ? frameWidth(80, columns) - 2 - INPUT_BOX_PADDING * 2
     : terminalColumns(80, columns) - 1;
@@ -212,6 +361,17 @@ export interface PromptFrameInput {
   /** Previous scroll origin, so left/right only move the window at the edges. */
   scrollStart?: number;
   overlay?: OverlayRow[];
+  /**
+   * When set, the overlay is padded to this many rows and drawn **above**
+   * the input bar. Height stays constant so `/` cannot scroll the header.
+   */
+  overlayReserve?: number;
+  /** Trailing footer row (empty or the Ctrl+C hint). */
+  hint?: string;
+  /** Welcome-panel rows painted with this frame (idle home screen). */
+  header?: string[];
+  /** Force boxed / plain input. Default follows {@link preferBoxedUi}. */
+  boxed?: boolean;
 }
 
 export interface PromptFrame {
@@ -230,18 +390,37 @@ export interface PromptFrame {
  * CUU count on the next redraw stays honest.
  */
 export function buildPromptFrame(params: PromptFrameInput): PromptFrame {
-  const { boxed, cells } = inputCells(params.columns);
+  const { boxed, cells } = inputCells(params.columns, params.boxed);
   const cols = terminalColumns(80, params.columns);
   const win = inputWindow(params.buffer, params.cursor, cells, params.scrollStart ?? 0);
-  const inputRow = (params.prompt ? 1 : 0) + (boxed ? 1 : 0);
+  const header = params.header ?? [];
+  const reserve = params.overlayReserve;
+  const overlay = params.overlay ?? [];
+  const fitted = reserve != null ? padOverlayRows(overlay, reserve) : overlay;
+  const inputRow =
+    header.length +
+    (reserve ?? 0) +
+    (params.prompt ? 1 : 0) +
+    (boxed ? 1 : 0);
 
   // Nothing we emit may wrap: a wrapped row is one the CUU count can't see.
   const clip = (text: string): string =>
     visibleWidth(text) > cols - 1 ? sliceVisible(text, 0, cols - 1) : text;
 
+  const paintOverlay = (row: OverlayRow): string => {
+    const text = clip(row.text);
+    return row.selected ? ansi.invert(text) : ansi.gray(text);
+  };
+
   const rows: string[] = [];
-  if (params.prompt) rows.push(ansi.dim(clip(params.prompt)));
-  const inputLine = `${ansi.green(INPUT_PREFIX_GLYPH)} ${win.text}`;
+  if (reserve != null) {
+    for (const line of header) rows.push(clip(line));
+    for (const row of fitted) rows.push(paintOverlay(row));
+  } else {
+    for (const line of header) rows.push(clip(line));
+  }
+  if (params.prompt) rows.push(clip(params.prompt));
+  const inputLine = `${ansi.brightGreen(INPUT_PREFIX_GLYPH)} ${win.text}`;
   if (boxed) {
     // Full terminal width input frame, not content-sized.
     rows.push(
@@ -254,9 +433,11 @@ export function buildPromptFrame(params: PromptFrameInput): PromptFrame {
     // Plain prompt on narrow TTYs (avoids wrapped borders).
     rows.push(inputLine);
   }
-  for (const row of params.overlay ?? []) {
-    const text = clip(row.text);
-    rows.push(row.selected ? ansi.invert(text) : ansi.gray(text));
+  if (reserve == null) {
+    for (const row of overlay) rows.push(paintOverlay(row));
+  }
+  if (params.hint != null) {
+    rows.push(clip(params.hint === "" ? " " : params.hint));
   }
 
   // Boxed: border col + padding; plain: column 1.
@@ -303,9 +484,9 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
     // final overlay clear must use *these*, not a fresh measurement, because
     // the cursor is parked relative to what was actually drawn.
     let drawnInputRow = 0;
-    let drawnBoxed = true;
     let scrollStart = 0;
     let finished = false;
+    let exitHint = false;
     const ctrlCExit = new CtrlCExitGate();
 
     const wasRaw = Boolean(input.isRaw);
@@ -322,47 +503,109 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
       buffer = next;
     }
 
-    function render(): void {
-      if (linesDrawn > 0) {
-        output.write(promptRedrawPrefix(drawnInputRow));
-      }
+    let lastRoom = 24;
 
-      // Re-measured every frame: the terminal may have been resized since
-      // the last draw, flipping boxed/plain or changing the frame width.
+    function paint(): void {
       const columns = opts.columns ?? output.columns;
       const boxedNow = preferBoxedUi(columns);
-      const inputRowNow = (opts.prompt ? 1 : 0) + (boxedNow ? 1 : 0);
+      const rawRoom = opts.rows ?? output.rows;
+      const room =
+        typeof rawRoom === "number" && Number.isFinite(rawRoom) && rawRoom >= 1
+          ? rawRoom
+          : lastRoom;
+      lastRoom = room;
+      const fullHeader = opts.header ? opts.header(columns, false) : [];
+      const compactHeader = opts.header ? opts.header(columns, true) : [];
+      const miniHeader = opts.header ? opts.header(columns, "mini") : [];
+      const nanoHeader = opts.header ? opts.header(columns, "nano") : [];
 
       const dropdown = currentDropdown();
-      let overlay: OverlayRow[] = [];
       if (dropdown.length) {
         if (dropdownIndex >= dropdown.length) dropdownIndex = dropdown.length - 1;
-        const maxRows = dropdownMaxRows(opts.rows ?? output.rows, inputRowNow);
-        overlay = dropdownOverlayRows(dropdown, dropdownIndex, maxRows);
       } else {
         dropdownIndex = 0;
       }
 
+      const roomRows = resolvedRows(room);
+      const fit = opts.header
+        ? fitHomeFrame({
+            fullHeader,
+            compactHeader,
+            miniHeader,
+            nanoHeader,
+            terminalRows: room,
+            boxed: boxedNow,
+            hasPrompt: Boolean(opts.prompt),
+            dropdownCount: dropdown.length,
+            dockBottom: true,
+          })
+        : {
+            header: [] as string[],
+            reserve: overlayReserve(room, 0, boxedNow, Boolean(opts.prompt)),
+            boxed: boxedNow,
+            hasPrompt: Boolean(opts.prompt),
+            hasHint: true,
+          };
+
+      const overlay = dropdown.length
+        ? dropdownOverlayRows(
+            dropdown,
+            dropdownIndex,
+            Math.max(1, Math.min(DROPDOWN_MAX_COMMAND_ROWS, fit.reserve)),
+          )
+        : [];
+
       const frame = buildPromptFrame({
-        prompt: opts.prompt,
+        prompt: fit.hasPrompt ? opts.prompt : undefined,
         buffer,
         cursor,
         columns,
         scrollStart,
         overlay,
+        overlayReserve: opts.header || dropdown.length ? fit.reserve : undefined,
+        header: fit.header,
+        hint: fit.hasHint ? (exitHint ? ansi.dim(CTRL_C_EXIT_HINT) : " ") : undefined,
+        boxed: fit.boxed,
       });
 
-      output.write(frame.rows.join("\r\n") + "\r\n");
+      // Never write more rows than the pane — that scrolls the welcome
+      // tail (tips / what's new) into view and looks like a broken frame.
+      if (frame.rows.length > roomRows) {
+        const keep = frame.rows.slice(frame.rows.length - roomRows);
+        const shift = frame.rows.length - keep.length;
+        frame.rows = keep;
+        frame.inputRow = Math.max(0, frame.inputRow - shift);
+      }
+
+      // Home screen owns the pane: always origin + ED 0. Relative CUU after
+      // a split-drag is what tore the previous layout (cursor home vs
+      // includeHeader flipping mid-resize).
+      if (opts.header) {
+        output.write(HEADER_REDRAW_PREFIX);
+      } else if (linesDrawn > 0) {
+        output.write(promptRedrawPrefix(drawnInputRow));
+      }
+
+      // A full-pane write plus a trailing newline scrolls row 1 into
+      // scrollback — that was the missing top border. Stop on the last
+      // cell of the last row and CUU from there.
+      const fillsPane = Boolean(opts.header) && frame.rows.length >= roomRows;
+      output.write(frame.rows.join("\r\n") + (fillsPane ? "" : "\r\n"));
       linesDrawn = frame.rows.length;
       drawnInputRow = frame.inputRow;
-      drawnBoxed = frame.boxed;
       scrollStart = frame.scrollStart;
 
-      output.write(`${up(linesDrawn - frame.inputRow)}${col(frame.targetCol)}`);
+      const fromRow = fillsPane ? linesDrawn - 1 : linesDrawn;
+      output.write(`${up(Math.max(0, fromRow - frame.inputRow))}${col(frame.targetCol)}`);
+    }
+
+    function render(): void {
+      paint();
     }
 
     function onResize(): void {
-      if (!finished) render();
+      if (finished) return;
+      paint();
     }
 
     function cleanup(): void {
@@ -379,8 +622,18 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
       finished = true;
       cleanup();
 
-      if (linesDrawn > 0) output.write(promptClearOverlay(drawnBoxed));
-      output.write("\n");
+      // Home chrome already fills the pane. down() + newline scrolls that
+      // frame (cursor to the bottom, input jumps up) before /usage paints.
+      // Leave the idle screen in place; the next TUI / askLine homes over it.
+      // Bare prompts still need the newline so oneshot output starts below.
+      // Leaving the shell: one newline so the OS prompt is not on the box.
+      if (!opts.header || err instanceof PromptClosedError) {
+        if (linesDrawn > 0) {
+          const below = linesDrawn - drawnInputRow - 1;
+          if (below > 0) output.write(down(below));
+        }
+        output.write("\n");
+      }
 
       if (err) reject(err);
       else resolve(value ?? "");
@@ -395,7 +648,10 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
     function onKeypress(str: string, key: readline.Key): void {
       try {
         if (finished || !key) return;
-        if (!(key.ctrl && key.name === "c")) ctrlCExit.reset();
+        if (!(key.ctrl && key.name === "c")) {
+          ctrlCExit.reset();
+          exitHint = false;
+        }
         const dropdown = currentDropdown();
 
         if (key.ctrl && key.name === "c") {
@@ -403,14 +659,7 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
             finish(null, new PromptClosedError());
             return;
           }
-          setBuffer("");
-          cursor = 0;
-          scrollStart = 0;
-          historyIndex = history.length;
-          dropdownIndex = 0;
-          if (linesDrawn > 0) output.write(promptClearOverlay(drawnBoxed));
-          output.write(`\n${ansi.dim(CTRL_C_EXIT_HINT)}\n`);
-          linesDrawn = 0;
+          exitHint = true;
           render();
           return;
         }

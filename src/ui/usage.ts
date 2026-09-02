@@ -47,7 +47,7 @@ export function usageBar(
     return `[${filledSeg}${emptySeg}]${suffix}`;
   }
 
-  let fillColor = ansi.green;
+  let fillColor = ansi.brightGreen;
   if (ratio >= 0.9) fillColor = ansi.red;
   else if (ratio >= 0.75) fillColor = ansi.yellow;
 
@@ -83,6 +83,21 @@ export function formatResetLabel(iso: string | null | undefined, now = new Date(
   return `Resets ${month} ${day}, ${h}:${mm}${ampm} (UTC)`;
 }
 
+/** How long until `iso` (the API `resets_at`). Empty when the date is unusable. */
+export function formatDaysLeft(iso: string | null | undefined, now = new Date()): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const ms = d.getTime() - now.getTime();
+  if (ms <= 0) return "reset due";
+  const days = Math.floor(ms / 86_400_000);
+  const hours = Math.floor((ms % 86_400_000) / 3_600_000);
+  if (days >= 2) return `${days} days left`;
+  if (days === 1) return "1 day left";
+  if (hours >= 1) return `${hours}h left`;
+  return "resets soon";
+}
+
 /** Alias kept for callers that still import `formatResetDate`. */
 export function formatResetDate(iso: string | null | undefined): string {
   return formatResetLabel(iso);
@@ -108,6 +123,8 @@ export type UsagePanelInput = {
   limit: number | null;
   resetsAt: string | null | undefined;
   jobs: UsagePanelJob[];
+  /** When the jobs fetch failed, show this instead of "No review jobs yet." */
+  jobsError?: string;
   columns: number;
   color?: boolean;
 };
@@ -137,7 +154,7 @@ export function formatUsagePanel(input: UsagePanelInput): string[] {
   ];
 
   if (input.jobs.length === 0) {
-    lines.push("  No review jobs yet.");
+    lines.push(input.jobsError ? `  ${input.jobsError}` : "  No review jobs yet.");
     return lines.map((line) => clipLine(line, columns));
   }
 

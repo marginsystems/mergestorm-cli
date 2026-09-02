@@ -6,25 +6,19 @@ import {
   shellCommandSpecs,
 } from "./commands/registry.js";
 import { ansi } from "./ui/ansi.js";
-import { printBannerHeader, shellPrompt } from "./ui/banner.js";
+import { printBannerHeader, shellPrompt, type BannerHandle } from "./ui/banner.js";
 import { CTRL_C_EXIT_HINT, CtrlCExitGate } from "./ui/ctrl-c-exit.js";
-import { askLine, formatSlashLabel, PromptClosedError } from "./ui/prompt.js";
+import { openHelpBrowser } from "./commands/help.js";
+import { showLinePanel } from "./ui/line-tabs.js";
+import { askLine, PromptClosedError } from "./ui/prompt.js";
 
-/** Shell autocomplete + `/help` ó derived from the command registry (STRUCT-01). */
-export const COMMANDS = shellCommandSpecs();
-
-function printHelp(): void {
-  const rows = COMMANDS.map((c) => {
-    const label = formatSlashLabel(c).slice(1);
-    return `  ${ansi.green("/" + label.padEnd(20))} ${c.summary}`;
-  }).join("\n");
-  console.log(`
-  ${ansi.bold("Commands")}
-${rows}
-
-  Dashboard: https://mergestorm.ai/settings#api
-`);
+async function showShellNotice(title: string, message: string): Promise<void> {
+  const lines = message.split("\n").flatMap((line) => (line ? [`  ${line}`] : [""]));
+  await showLinePanel(title, [...lines, "", `  ${ansi.dim("q to return")}`]);
 }
+
+/** Shell autocomplete + `/help` ù derived from the command registry (STRUCT-01). */
+export const COMMANDS = shellCommandSpecs();
 
 /** Strips an optional leading "/" so both "review" and "/review" work. */
 export function parseLine(line: string): { cmd: string; args: string[] } | null {
@@ -38,7 +32,21 @@ export function parseLine(line: string): { cmd: string; args: string[] } | null 
 }
 
 export async function runShell(): Promise<void> {
-  try { await printBannerHeader(); } catch { /* banner is best-effort */ }
+  // Idle is always the home screen: header + docked prompt. Command TUIs
+  // (usage / credits / status) and printed output become scrollback when
+  // the next askLine homes + ED 0. Do not retire the header after the
+  // first command ù that is what floated a bare prompt at the top.
+  let banner: BannerHandle | null = null;
+  const showBanner = async (): Promise<BannerHandle | null> => {
+    try {
+      banner = await printBannerHeader({ paint: false });
+    } catch {
+      // Keep the previous chrome on a transient refresh failure rather than
+      // blanking the always-on home header.
+    }
+    return banner;
+  };
+  banner = await showBanner();
 
   const history: string[] = [];
 
@@ -75,6 +83,12 @@ export async function runShell(): Promise<void> {
           prompt: shellPrompt(loggedIn),
           history,
           commands: COMMANDS,
+          ...(banner
+            ? {
+                header: (columns?: number, variant?: boolean | "mini" | "nano") =>
+                  banner!.rows(columns, variant),
+              }
+            : {}),
         });
       } catch (err) {
         if (err instanceof PromptClosedError) {
@@ -92,12 +106,12 @@ export async function runShell(): Promise<void> {
 
       if (cmd === "exit" || cmd === "quit") break;
       if (cmd === "help" || cmd === "?") {
-        printHelp();
+        await openHelpBrowser();
         continue;
       }
       if (cmd === "clear") {
         output.write("[2J[H");
-        try { await printBannerHeader(); } catch { /* banner is best-effort */ }
+        await showBanner();
         continue;
       }
 
@@ -107,25 +121,31 @@ export async function runShell(): Promise<void> {
           mode: "shell",
           signal: busyAbort.signal,
           afterAuth: async () => {
-            try { await printBannerHeader(); } catch { /* banner is best-effort */ }
+            await showBanner();
           },
         });
         if (!ok) {
-          console.error(ansi.dim(`unknown command "${cmd}" -- type help`));
+          await showShellNotice("Error", `unknown command "${cmd}"\ntype help for the list`);
         }
       } catch (err) {
         if (err instanceof DetachedError) {
-          console.log(`\n${ansi.yellow(err.message)}`);
+          await showShellNotice("Detached", err.message);
         } else if (err instanceof CommandError) {
-          console.error(ansi.red(err.message));
+          await showShellNotice("Error", err.message);
         } else if (err instanceof Error && err.name === "AbortError") {
-          console.log(ansi.dim("\naborted"));
+          await showShellNotice("Aborted", "aborted");
         } else {
-          console.error(ansi.red(err instanceof Error ? err.message : String(err)));
+          await showShellNotice(
+            "Error",
+            err instanceof Error ? err.message : String(err),
+          );
         }
       } finally {
         busyAbort = null;
       }
+      // Re-capture the home header so usage/credits shown above the prompt
+      // reflect what the command just consumed (e.g. review spending a credit).
+      await showBanner();
     }
   } finally {
     process.off("SIGINT", onSigint);

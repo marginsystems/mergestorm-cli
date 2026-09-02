@@ -4,6 +4,7 @@ import { apiBase, configPath, loadConfig, saveConfig, type Config } from "../con
 import { devicePost, getMe, type MeResponse } from "../api.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
+import { present } from "../ui/present.js";
 import { readSecretLine } from "../ui/secret-input.js";
 
 function openBrowser(url: string): void {
@@ -58,7 +59,7 @@ async function loginWithKey(): Promise<void> {
   const me = await validateApiKey(cfg);
   await saveConfig(cfg);
   const prefix = me.key?.prefix?.trim() || "msk_live_…";
-  console.log(`Verified ${prefix}… · saved to ${configPath()}`);
+  await present("Login", [`  Verified ${prefix}… · saved to ${configPath()}`]);
 }
 
 export async function cmdLogin(args: string[]): Promise<void> {
@@ -122,7 +123,7 @@ export async function cmdLogin(args: string[]): Promise<void> {
 
   const openUrl = verification_uri_complete || verification_uri;
   console.log("To sign in, open this URL and confirm the code:\n");
-  console.log(`  ${ansi.green(openUrl)}`);
+  console.log(`  ${ansi.brightGreen(openUrl)}`);
   console.log(`\n  Code: ${ansi.bold(user_code)}\n`);
   openBrowser(openUrl);
   console.log("Waiting for approval…");
@@ -144,7 +145,7 @@ export async function cmdLogin(args: string[]): Promise<void> {
       const next = await loadConfig();
       next.apiKey = poll.body.api_key as string;
       await saveConfig(next);
-      console.log(`\nLogged in. Key saved to ${configPath()}`);
+      await present("Login", [`  Logged in. Key saved to ${configPath()}`]);
       return;
     }
     const err = poll.body?.error;

@@ -53,7 +53,7 @@ export async function selectFromList<T>(opts: SelectOptions<T>): Promise<T | nul
       if (opts.title) rows.push(ansi.bold(opts.title));
       items.forEach((item, i) => {
         const body = opts.render(item, i);
-        const marker = i === index ? ansi.green("›") : " ";
+        const marker = i === index ? ansi.brightGreen("›") : " ";
         const line = ` ${marker} ${body}`;
         rows.push(i === index ? ansi.invert(line) : line);
       });

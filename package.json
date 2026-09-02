@@ -1,6 +1,6 @@
 {
   "name": "mergestorm",
-  "version": "0.3.13",
+  "version": "0.3.15",
   "description": "Mergestorm CLI (mg) — local reviews & stacked PRs. MIT; build from source: https://github.com/marginsystems/mergestorm-cli",
   "license": "MIT",
   "type": "module",
@@ -32,6 +32,7 @@
   },
   "files": [
     "dist",
+    "skill",
     "LICENSE",
     "README.md"
   ],

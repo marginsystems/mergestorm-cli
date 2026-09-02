@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { visibleWidth } from "./width.js";
+import { CTRL_C_EXIT_HINT } from "./ctrl-c-exit.js";
 import {
+  HEADER_REDRAW_PREFIX,
   askLine,
   buildPromptFrame,
   dropdownMaxRows,
@@ -13,6 +15,9 @@ import {
   inputWindow,
   isExactSlashCommand,
   matchSlashCommands,
+  overlayReserve,
+  fitHomeFrame,
+  promptChromeRows,
   promptClearOverlay,
   promptRedrawPrefix,
   type CommandSpec,
@@ -82,7 +87,7 @@ function fakeTty(columns: number, rows = 24) {
 
 /** Rows of the most recent frame (split from the last `\r\n`-joined write). */
 function lastFrameRows(chunks: string[]): string[] {
-  const frames = chunks.filter((c) => c.endsWith("\r\n"));
+  const frames = chunks.filter((c) => c.includes("\r\n"));
   return frames[frames.length - 1]!.replace(/\r\n$/, "").split("\r\n");
 }
 
@@ -162,16 +167,109 @@ test("dropdownViewport keeps the highlight visible without wrapping", () => {
   assert.deepEqual(dropdownViewport(4, 2, 8), { start: 0, moreAbove: 0, moreBelow: 0 });
 });
 
-test("dropdownOverlayRows at 12 terminal rows is at most 8 commands plus an edge", () => {
-  const maxRows = dropdownMaxRows(12, 2);
+test("dropdownOverlayRows keeps edges inside maxRows", () => {
+  const maxRows = 7;
   const rows = dropdownOverlayRows(SPECS, 0, maxRows);
   const commands = rows.filter((r) => r.selected !== undefined);
   const edges = rows.filter((r) => r.selected === undefined);
-  assert.ok(commands.length <= 8);
-  assert.equal(commands.length, maxRows);
+  assert.ok(rows.length <= maxRows);
+  assert.ok(commands.length <= maxRows - 1);
   assert.equal(edges.length, 1);
   assert.match(edges[0]!.text, /\u2193 \d+ more/);
   assert.equal(rows[0]?.selected, true);
+});
+
+test("overlayReserve stays at most 8 and can be 0 on a short pane", () => {
+  assert.equal(overlayReserve(24, 0, true, true), 8);
+  assert.equal(overlayReserve(12, 0, true, true), 7);
+  assert.equal(overlayReserve(12, 8, true, true), 0);
+});
+
+test("fitHomeFrame docks the prompt on leftover rows when asked", () => {
+  const full = Array.from({ length: 9 }, () => "full");
+  const compact = Array.from({ length: 5 }, () => "compact");
+  const idle = fitHomeFrame({
+    fullHeader: full,
+    compactHeader: compact,
+    terminalRows: 24,
+    boxed: true,
+    hasPrompt: true,
+    dropdownCount: 0,
+  });
+  assert.deepEqual(idle.header, full);
+  assert.equal(idle.reserve, 0);
+
+  const docked = fitHomeFrame({
+    fullHeader: full,
+    compactHeader: compact,
+    terminalRows: 24,
+    boxed: true,
+    hasPrompt: true,
+    dropdownCount: 0,
+    dockBottom: true,
+  });
+  assert.deepEqual(docked.header, full);
+  assert.equal(docked.reserve, 24 - 9 - 5);
+
+  const open = fitHomeFrame({
+    fullHeader: full,
+    compactHeader: compact,
+    terminalRows: 24,
+    boxed: true,
+    hasPrompt: true,
+    dropdownCount: 14,
+    dockBottom: true,
+  });
+  assert.deepEqual(open.header, full);
+  assert.equal(open.reserve, docked.reserve);
+
+  const short = fitHomeFrame({
+    fullHeader: full,
+    compactHeader: compact,
+    terminalRows: 12,
+    boxed: true,
+    hasPrompt: true,
+    dropdownCount: 0,
+    dockBottom: true,
+  });
+  assert.deepEqual(short.header, compact);
+  assert.equal(short.reserve, 12 - 5 - 5);
+  assert.equal(short.boxed, true);
+  assert.equal(promptChromeRows(true, true), 5);
+
+  const mini = ["mark0", "mark1"];
+  const nano = ["mark0 mergestorm"];
+  const tiny = fitHomeFrame({
+    fullHeader: full,
+    compactHeader: compact,
+    miniHeader: mini,
+    nanoHeader: nano,
+    terminalRows: 8,
+    boxed: true,
+    hasPrompt: true,
+    dropdownCount: 0,
+    dockBottom: true,
+  });
+  assert.deepEqual(tiny.header, mini);
+  assert.equal(tiny.boxed, true);
+  assert.ok(tiny.header.length + promptChromeRows(tiny.boxed, tiny.hasPrompt, tiny.hasHint) <= 8);
+
+  const shorter = fitHomeFrame({
+    fullHeader: full,
+    compactHeader: compact,
+    miniHeader: mini,
+    nanoHeader: nano,
+    terminalRows: 6,
+    boxed: true,
+    hasPrompt: true,
+    dropdownCount: 0,
+    dockBottom: true,
+  });
+  assert.ok(shorter.header.length > 0, "short pane keeps the mark");
+  assert.ok(
+    shorter.header.length +
+      promptChromeRows(shorter.boxed, shorter.hasPrompt, shorter.hasHint) <= 6,
+  );
 });
 
 test("inputWindow scrolls so the cursor stays inside the cell", () => {
@@ -274,17 +372,19 @@ test("askLine keeps a 300-char paste on one row at 80 columns", async () => {
   const done = askLine({ input: tty.input, output: tty.output });
   tty.type("x".repeat(300));
   const rows = lastFrameRows(tty.chunks);
-  assert.equal(rows.length, 3);
-  for (const row of rows) assert.equal(visibleWidth(row), 79);
+  assert.equal(rows.length, 3 + 1);
+  for (const row of rows) assert.ok(visibleWidth(row) <= 79);
   const park = tty.chunks[tty.chunks.length - 1]!;
   const m = /\[(\d+)G$/.exec(park);
   assert.ok(m, park);
   assert.ok(Number(m![1]) <= 79);
-  assert.ok(park.startsWith(`${ESC}[2A`));
+  const inputRow = 1;
+  assert.ok(park.startsWith(`${ESC}[${rows.length - inputRow}A`));
 
   tty.press("home");
   assert.ok(/\[5G$/.test(tty.chunks[tty.chunks.length - 1]!));
-  assert.equal(visibleWidth(lastFrameRows(tty.chunks)[1]!), 79);
+  const homeRows = lastFrameRows(tty.chunks);
+  assert.equal(visibleWidth(homeRows[inputRow - 1]!), 79);
 
   tty.press("return");
   assert.equal(await done, "x".repeat(300));
@@ -300,49 +400,273 @@ test("askLine reflows on resize and keeps CR before ED 0 (no smear)", async () =
   });
   tty.type("hello");
   let rows = lastFrameRows(tty.chunks);
-  assert.equal(rows.length, 4);
-  assert.equal(visibleWidth(rows[1]!), 99);
+  assert.equal(rows.length, 1 + 3 + 1);
+  const boxTop = rows.find((row) => /[\u256d+]/.test(stripAnsi(row)));
+  assert.ok(boxTop);
+  assert.equal(visibleWidth(boxTop!), 99);
   assert.equal(tty.raw.listenerCount("resize"), 1);
 
-  // 100 -> 60: still boxed, the frame width follows.
+  // 100 -> 60: still boxed, the frame width follows. No header: relative CUU.
+  const boxedInputRow = 2;
   tty.raw.columns = 60;
   tty.chunks.length = 0;
   tty.raw.emit("resize");
-  assert.equal(tty.chunks[0], promptRedrawPrefix(2));
-  assert.equal(tty.chunks[0], `${ESC}[2A\r${ESC}[0J`);
+  assert.equal(tty.chunks[0], promptRedrawPrefix(boxedInputRow));
+  assert.equal(tty.chunks[0], `${ESC}[${boxedInputRow}A\r${ESC}[0J`);
   rows = lastFrameRows(tty.chunks);
-  assert.equal(rows.length, 4);
-  for (const row of rows.slice(1)) assert.equal(visibleWidth(row), 59);
+  assert.equal(rows.length, 1 + 3 + 1);
+  for (const row of rows) assert.ok(visibleWidth(row) <= 59);
 
-  // 60 -> 40: below MIN_BOXED_COLUMNS, chrome flips to plain and inputRow drops.
+  // 60 -> 40: below MIN_BOXED_COLUMNS, chrome flips to plain.
   tty.raw.columns = 40;
   tty.chunks.length = 0;
   tty.raw.emit("resize");
-  // Redraw is relative to the frame that is on screen (boxed, content row 2).
-  assert.equal(tty.chunks[0], promptRedrawPrefix(2));
+  assert.equal(tty.chunks[0], promptRedrawPrefix(boxedInputRow));
   rows = lastFrameRows(tty.chunks);
-  assert.equal(rows.length, 2);
+  assert.equal(rows.length, 1 + 1 + 1);
   for (const row of rows) assert.ok(visibleWidth(row) <= 39);
 
   // The next keypress redraws with the new plain geometry.
+  const plainInputRow = 1;
   tty.chunks.length = 0;
   tty.type("!");
-  assert.equal(tty.chunks[0], promptRedrawPrefix(1));
+  assert.equal(tty.chunks[0], promptRedrawPrefix(plainInputRow));
   assert.ok(tty.chunks[0]!.includes(`\r${ESC}[0J`));
 
   tty.press("return");
   assert.equal(await done, "hello!");
-  assert.ok(tty.chunks.includes(promptClearOverlay(false)));
   assert.equal(tty.raw.listenerCount("resize"), 0);
   assert.equal((tty.input as unknown as EventEmitter).listenerCount("keypress"), 0);
+});
+
+test("askLine with a header redraws banner + prompt from row 1 on first paint and resize", async () => {
+  const tty = fakeTty(100);
+  const headerCalls: Array<number | undefined> = [];
+  const done = askLine({
+    prompt: "mergestorm",
+    input: tty.input,
+    output: tty.output,
+    header: (columns?: number) => {
+      headerCalls.push(columns);
+      return [`banner at ${columns}`, ""];
+    },
+  });
+  // Home screen owns the pane from the first frame (not only on resize).
+  assert.equal(tty.chunks[0], HEADER_REDRAW_PREFIX);
+  assert.equal(headerCalls.length >= 1, true);
+  assert.equal(
+    headerCalls.every((c) => c === 100),
+    true,
+    "first paint should pass columns=100",
+  );
+  const idle = lastFrameRows(tty.chunks);
+  assert.ok(stripAnsi(idle[0]!).startsWith("banner at 100"));
+  assert.ok(idle.some((row) => stripAnsi(row).includes("mergestorm") || stripAnsi(row).includes("\u203a")));
+  // Home screen fills the pane so the hint sits on the last row.
+  assert.equal(idle.length, 24);
+
+  tty.raw.columns = 60;
+  tty.chunks.length = 0;
+  tty.raw.emit("resize");
+  assert.equal(tty.chunks[0], HEADER_REDRAW_PREFIX);
+  assert.equal(tty.chunks[0], `${ESC}[H${ESC}[0J`);
+  assert.ok(headerCalls.some((c) => c === 60));
+  assert.ok(tty.chunks[1]!.startsWith("banner at 60\r\n"));
+  const rows = lastFrameRows(tty.chunks);
+  for (const row of rows) assert.ok(visibleWidth(row) <= 59);
+
+  tty.raw.columns = 80;
+  tty.chunks.length = 0;
+  tty.raw.emit("resize");
+  assert.equal(tty.chunks[0], HEADER_REDRAW_PREFIX);
+  assert.ok(headerCalls.some((c) => c === 80));
+
+  tty.press("return");
+  assert.equal(await done, "");
+});
+
+test("askLine full-pane home write does not add a newline that would scroll the top border off", async () => {
+  const tty = fakeTty(80, 16);
+  const done = askLine({
+    prompt: "mg",
+    input: tty.input,
+    output: tty.output,
+    header: () => ["╭──╮", "│hi│", "╰──╯"],
+  });
+  assert.equal(tty.chunks[0], HEADER_REDRAW_PREFIX);
+  const body = tty.chunks.find((c) => c.includes("╭──╮"));
+  assert.ok(body);
+  const seps = body!.split("\r\n").length - 1;
+  assert.equal(body!.split("\r\n").length, 16, "exactly the pane height, no extra row");
+  assert.equal(seps, 15, "joins 16 rows with 15 CR/LF, no trailing newline");
+  assert.ok(!body!.endsWith("\r\n"));
+  assert.ok(stripAnsi(body!.split("\r\n")[0]!).startsWith("╭"));
+  tty.press("return");
+  await done;
+});
+
+test("askLine with a tall header uses the compact banner on a short pane and still homes", async () => {
+  const tty = fakeTty(100, 12);
+  const headerCalls: Array<{ columns?: number; compact?: boolean | "mini" | "nano" }> = [];
+  const done = askLine({
+    prompt: "mergestorm",
+    input: tty.input,
+    output: tty.output,
+    header: (columns?: number, compact?: boolean | "mini" | "nano") => {
+      headerCalls.push({ columns, compact });
+      return compact ? ["compact"] : Array.from({ length: 9 }, () => "banner");
+    },
+  });
+  assert.equal(tty.chunks[0], HEADER_REDRAW_PREFIX);
+  const first = lastFrameRows(tty.chunks);
+  assert.ok(first.some((row) => stripAnsi(row).includes("compact")));
+  assert.ok(!first.some((row) => stripAnsi(row) === "banner"));
+
+  tty.raw.columns = 60;
+  tty.chunks.length = 0;
+  tty.raw.emit("resize");
+  assert.equal(tty.chunks[0], HEADER_REDRAW_PREFIX);
+  const rows = lastFrameRows(tty.chunks);
+  assert.ok(rows.some((row) => stripAnsi(row).includes("compact")));
+  for (const row of rows) assert.ok(visibleWidth(row) <= 59);
+  assert.ok(headerCalls.some((c) => Boolean(c.compact)));
+
+  tty.press("return");
+  assert.equal(await done, "");
+});
+
+test("askLine on a short pane keeps the mark and does not overflow the frame", async () => {
+  const tty = fakeTty(80, 8);
+  const done = askLine({
+    prompt: "mg",
+    input: tty.input,
+    output: tty.output,
+    header: (_columns?: number, variant?: boolean | "mini" | "nano") => {
+      if (variant === "nano") return ["n MARK nano"];
+      if (variant === "mini" || variant === true) return ["m MARK mini", "m row2"];
+      return Array.from({ length: 9 }, () => "FULL tips what's new");
+    },
+  });
+  const rows = lastFrameRows(tty.chunks);
+  assert.ok(rows.length <= 8, `wrote ${rows.length} rows into an 8-row pane`);
+  const text = rows.map((r) => stripAnsi(r)).join("\n");
+  assert.match(text, /MARK/);
+  assert.doesNotMatch(text, /FULL tips/);
+  tty.press("return");
+  await done;
+});
+
+test("askLine with a header does not scroll the pane on enter", async () => {
+  const tty = fakeTty(80, 16);
+  const done = askLine({
+    prompt: "mg",
+    input: tty.input,
+    output: tty.output,
+    header: () => ["╭──╮", "│hi│", "╰──╯"],
+  });
+  tty.type("/usage");
+  tty.chunks.length = 0;
+  tty.press("return");
+  assert.equal(await done, "/usage");
+  assert.equal(tty.chunks.join(""), "", "no down() or newline after a home submit");
+});
+
+test("askLine without a header still emits a newline on enter", async () => {
+  const tty = fakeTty(80);
+  const done = askLine({ input: tty.input, output: tty.output });
+  tty.type("hi");
+  tty.chunks.length = 0;
+  tty.press("return");
+  assert.equal(await done, "hi");
+  assert.ok(tty.chunks.some((c) => c === "\n"));
 });
 
 test("askLine honors an injected columns override", async () => {
   const tty = fakeTty(200);
   const done = askLine({ input: tty.input, output: tty.output, columns: 50 });
   const rows = lastFrameRows(tty.chunks);
-  assert.equal(rows.length, 3);
-  for (const row of rows) assert.equal(visibleWidth(row), 49);
+  assert.equal(rows.length, 3 + 1);
+  for (const row of rows) assert.ok(visibleWidth(row) <= 49);
   tty.press("return");
   assert.equal(await done, "");
+});
+
+test("buildPromptFrame with a reserve puts the list above the bar at a fixed height", () => {
+  const overlay = dropdownOverlayRows(SPECS, 0, 4);
+  const closed = buildPromptFrame({
+    prompt: "mergestorm",
+    buffer: "",
+    cursor: 0,
+    columns: 80,
+    overlayReserve: 4,
+    hint: " ",
+  });
+  const open = buildPromptFrame({
+    prompt: "mergestorm",
+    buffer: "/",
+    cursor: 1,
+    columns: 80,
+    overlay,
+    overlayReserve: 4,
+    hint: " ",
+  });
+  assert.equal(closed.rows.length, open.rows.length);
+  assert.equal(closed.inputRow, open.inputRow);
+  assert.ok(
+    open.rows.slice(0, open.inputRow).some((row) => stripAnsi(row).includes("/help")),
+    "list sits in the reserved rows above the bar",
+  );
+  assert.ok(stripAnsi(open.rows[open.inputRow]!).includes("\u203a /"));
+});
+
+test("askLine docks the home prompt and keeps the header on /", async () => {
+  const tty = fakeTty(80);
+  const done = askLine({
+    prompt: "mergestorm",
+    input: tty.input,
+    output: tty.output,
+    commands: SPECS,
+    header: () => ["STORM", "status"],
+  });
+  assert.equal(tty.chunks[0], HEADER_REDRAW_PREFIX);
+  const idle = lastFrameRows(tty.chunks);
+  assert.equal(stripAnsi(idle[0]!), "STORM");
+  assert.equal(idle.length, 24);
+  assert.ok(!idle.some((row) => stripAnsi(row).includes("/help")));
+
+  tty.chunks.length = 0;
+  tty.type("/");
+  assert.equal(tty.chunks[0], HEADER_REDRAW_PREFIX);
+  const open = lastFrameRows(tty.chunks);
+  assert.equal(open.length, idle.length);
+  assert.equal(stripAnsi(open[0]!), "STORM");
+  assert.ok(open.some((row) => stripAnsi(row).includes("/help")));
+  const helpAt = open.findIndex((row) => stripAnsi(row).includes("/help"));
+  const inputAt = open.findIndex((row) => stripAnsi(row).includes("\u203a"));
+  assert.ok(helpAt >= 0 && inputAt > helpAt, "list sits just above the bar");
+  tty.press("c", { ctrl: true });
+  const hinted = lastFrameRows(tty.chunks);
+  assert.equal(hinted.length, 24);
+  assert.ok(stripAnsi(hinted[hinted.length - 1]!).includes(CTRL_C_EXIT_HINT));
+  tty.press("return");
+  await done;
+});
+
+test("askLine first Ctrl+C writes the hint on the footer without a second prompt", async () => {
+  const tty = fakeTty(80);
+  const done = askLine({
+    prompt: "mergestorm",
+    input: tty.input,
+    output: tty.output,
+    commands: SPECS,
+  });
+  tty.type("/");
+  const before = lastFrameRows(tty.chunks);
+  tty.press("c", { ctrl: true });
+  const after = lastFrameRows(tty.chunks);
+  assert.equal(after.length, before.length);
+  assert.ok(stripAnsi(after[after.length - 1]!).includes(CTRL_C_EXIT_HINT));
+  assert.ok(!tty.chunks.join("").includes(`\n${CTRL_C_EXIT_HINT}\n`));
+  tty.press("return");
+  await done;
 });

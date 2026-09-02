@@ -78,6 +78,25 @@ export type StackLayerChecks = {
   pending: number;
   failure: number;
   failingName: string | null;
+  /**
+   * True when the persisted `ci_checks` carries a `namedRuns` seed (enrich
+   * writes it so CI webhook deliveries fold into the snapshot). Pre-seeding
+   * rows are false — the webhook cannot fold into them, so the interval poll
+   * must keep enriching until the first enrich seeds one (#1602). Status-only
+   * layers (empty `namedRuns` over a non-empty rollup) are also false — the
+   * webhook refuses to fold into an empty map, so the poll keeps enriching
+   * them (#1602).
+   */
+  namedRunsSeeded?: boolean;
+  /**
+   * True when the persisted `namedRuns` carries the reserved synthetic
+   * "commit status" run at a pending/failure verdict. Webhook deliveries
+   * re-key by check/context name and can never advance that seed, so the
+   * interval poll must keep enriching until the next enrich re-seeds it green
+   * (or drops it). Absent (false) when the seed is green — folds keep that
+   * layer fresh (#1602).
+   */
+  combinedStatusSeeded?: boolean;
 };
 
 /** Closing / Development-sidebar issue. Cap 3 on the wire. */
@@ -106,6 +125,14 @@ export type StackLayerDto = {
   branch: string;
   parentBranch: string | null;
   prNumber: number;
+  /** Persisted PR timing and diff snapshots from pr_stats. */
+  openedAt: string | null;
+  mergedAt: string | null;
+  closedAt: string | null;
+  additions: number | null;
+  deletions: number | null;
+  openAdditions: number | null;
+  openDeletions: number | null;
   position: number;
   state: StackBranchState;
   title: string | null;
@@ -132,6 +159,12 @@ export type StackLayerDto = {
   mergeable: boolean | null;
   /** GitHub REST mergeable_state; null when unknown. */
   mergeableState: string | null;
+  /** Most recently observed PR head SHA. */
+  headSha?: string | null;
+  /** Head SHA that produced mergeable / mergeableState. */
+  mergeableHeadSha?: string | null;
+  /** GitHub PR draft flag from enrich; the auto-land watcher never enqueues a draft. */
+  draft?: boolean | null;
   /**
    * Vortex-style linked issues (keywords + Development sidebar), cap 3.
    * null until first enrich finds any; kept on merged unit members (unlike CI).
@@ -158,6 +191,14 @@ export type StackLayerDto = {
 
 export type StackUnitMemberDto = {
   prNumber: number;
+  /** Persisted PR timing and diff snapshots from pr_stats. */
+  openedAt: string | null;
+  mergedAt: string | null;
+  closedAt: string | null;
+  additions: number | null;
+  deletions: number | null;
+  openAdditions: number | null;
+  openDeletions: number | null;
   branch: string;
   position: number;
   seamState: string;
@@ -212,13 +253,74 @@ export type StackDto = {
   trunkBranch: string;
   /** Real trunk the review unit eventually lands into. */
   landTarget: string;
-  autoPromoteWhenGreen: boolean;
   /**
    * Dashboard-only archive (#963): set hides the stack from the active Work
    * list; GitHub PRs stay open. Only PATCH /stacks/:id toggles it.
    */
   archivedAt: string | null;
+  /**
+   * Auto land (#1511): enqueue this unit-less single-PR stack when eligible.
+   * Missing on older payloads is off.
+   */
+  autoEnqueueWhenReady?: boolean;
   layers: StackLayerDto[];
   /** Present when a review-unit row exists for this stack. */
   unit?: StackUnitDto;
+};
+
+export type MergeQueueEntryState =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "landed"
+  | "bounced"
+  | "cancelled";
+
+export type MergeQueueEnqueuedBy = "human" | "agent";
+
+export type MergeQueueEnqueuedVia = "dashboard" | "cli" | "chat" | "api" | "mcp";
+
+export type MergeQueueBounceKind =
+  | "ci_failure"
+  | "ci_timeout"
+  | "head_moved"
+  | "tempest_findings"
+  | "seam_findings"
+  | "restack_conflict"
+  | "pr_draft"
+  | "merge_failed"
+  | "gh_error";
+
+/** Structured bounce handoff — enough for the bar chip and the chat quote. */
+export type MergeQueueBounceDetail = {
+  kind: MergeQueueBounceKind;
+  prNumber?: number;
+  headSha?: string;
+  failingCheck?: string;
+  conflictBranch?: string;
+  conflictDetail?: string;
+  message?: string;
+};
+
+export type MergeQueueEntryDto = {
+  id: string;
+  stackId: string;
+  owner: string;
+  repo: string;
+  state: MergeQueueEntryState;
+  /** 1-based FIFO among this user's live entries; `0` on bounced history rows (MQ-7). */
+  position: number;
+  waitReason: string | null;
+  bounceReason: string | null;
+  bounceDetail: MergeQueueBounceDetail | null;
+  enqueuedBy: MergeQueueEnqueuedBy;
+  enqueuedVia: MergeQueueEnqueuedVia;
+  enqueuedAt: string;
+  attempts: number;
+  landedPrNumbers: number[];
+  /** Combined PR head the queue verified. Null until the worker records it. */
+  verifyHeadSha: string | null;
+  /** Target tip included in the verified PR head. Null until recorded. */
+  verifyBaseSha: string | null;
+  finishedAt: string | null;
 };

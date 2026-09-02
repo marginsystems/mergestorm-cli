@@ -6,6 +6,7 @@ export type CommandErrorCode =
   | "auth_invalid"
   | "api_timeout"
   | "not_a_repo"
+  | "not_found"
   | "missing_api_key"
   | "registered_parent"
   | "usage"

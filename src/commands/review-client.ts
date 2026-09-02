@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import { apiFetch } from "../api.js";
+import { apiFetch, type PrVortexReview } from "../api.js";
 import type { Config } from "../config.js";
 import { CommandError, REVIEW_EXIT, isCommandErrorCode, rateLimitedMessage } from "../errors.js";
 import {
@@ -298,6 +298,27 @@ export class ReviewPollTimeoutError extends Error {
   }
 }
 
+export class PrReviewPollTimeoutError extends Error {
+  readonly owner: string;
+  readonly repo: string;
+  readonly prNumber: number;
+  readonly lastEnvelope: PrVortexReview | null;
+
+  constructor(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    lastEnvelope: PrVortexReview | null,
+  ) {
+    super(`Timed out waiting for PR review ${owner}/${repo}#${prNumber}`);
+    this.name = "PrReviewPollTimeoutError";
+    this.owner = owner;
+    this.repo = repo;
+    this.prNumber = prNumber;
+    this.lastEnvelope = lastEnvelope;
+  }
+}
+
 export type PollReviewOptions = {
   timeoutMs?: number;
   intervalMs?: number;
@@ -312,6 +333,144 @@ export type PollReviewOptions = {
   /** Test seam for backoff jitter; production uses `Math.random`. */
   random?: () => number;
 };
+
+export type PollPrVortexReviewOptions = PollReviewOptions & {
+  afterSha?: string;
+};
+
+function shaMatches(actual: string | null | undefined, expected: string): boolean {
+  const left = actual?.trim().toLowerCase() ?? "";
+  const right = expected.trim().toLowerCase();
+  return Boolean(
+    left && right.length >= 7 && (left.startsWith(right) || right.startsWith(left)),
+  );
+}
+
+/** Poll the DB-only PR review endpoint until the requested pass is resting. */
+export async function pollPrVortexReview(
+  cfg: Config,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  opts: PollPrVortexReviewOptions = {},
+): Promise<PrVortexReview> {
+  const timeoutMs = opts.timeoutMs ?? REVIEW_POLL_DEFAULT_TIMEOUT_MS;
+  const intervalMs = opts.intervalMs ?? REVIEW_POLL_INTERVAL_MS;
+  const now = opts.now ?? Date.now;
+  const wait = opts.sleep ?? sleep;
+  const startedAt = now();
+  const deadline = startedAt + timeoutMs;
+  const query = new URLSearchParams({
+    owner,
+    repo,
+    pr_number: String(prNumber),
+  });
+  if (opts.afterSha) query.set("after_sha", opts.afterSha);
+  let transientFailures = 0;
+  let lastEnvelope: PrVortexReview | null = null;
+
+  const sleepBeforeRetry = async (retryAfterSeconds?: number) => {
+    const waitMs = Math.min(
+      transientRetryWaitMs({
+        retryAfterSeconds,
+        failureCount: transientFailures,
+        random: opts.random,
+      }),
+      Math.max(0, deadline - now()),
+    );
+    if (waitMs > 0) await wait(waitMs, opts.signal);
+  };
+
+  const sleepBeforePoll = async () => {
+    const waitMs = Math.min(
+      stretchedPollIntervalMs(now() - startedAt, intervalMs),
+      Math.max(0, deadline - now()),
+    );
+    if (waitMs > 0) await wait(waitMs, opts.signal);
+  };
+
+  while (now() < deadline) {
+    let poll: { status: number; body: unknown; retryAfterSeconds?: number };
+    try {
+      poll = await apiFetch(cfg, `/api/v1/stacks/pr-review?${query.toString()}`, {
+        signal: opts.signal,
+        timeoutMs: Math.max(1, Math.min(30_000, deadline - now())),
+      });
+    } catch (err) {
+      if (
+        isTransientReviewPollError(err) &&
+        transientFailures < REVIEW_POLL_MAX_TRANSIENT_RETRIES
+      ) {
+        transientFailures += 1;
+        opts.onTick?.("retry");
+        await sleepBeforeRetry();
+        continue;
+      }
+      if (isCommandErrorCode(err, "api_timeout")) {
+        if (opts.propagateTimeout) throw err;
+        break;
+      }
+      if (isTransientReviewPollError(err)) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new CommandError(
+          `Poll failed: ${detail}`,
+          REVIEW_EXIT.failed,
+          "review_failed",
+        );
+      }
+      throw err;
+    }
+
+    if (poll.status === 404) {
+      transientFailures = 0;
+      opts.onTick?.("progress");
+      await sleepBeforePoll();
+      continue;
+    }
+    if (poll.status !== 200) {
+      if (
+        isTransientReviewPollStatus(poll.status) &&
+        transientFailures < REVIEW_POLL_MAX_TRANSIENT_RETRIES
+      ) {
+        transientFailures += 1;
+        opts.onTick?.("retry");
+        await sleepBeforeRetry(poll.retryAfterSeconds);
+        continue;
+      }
+      if (poll.status === 429) {
+        throw new CommandError(
+          rateLimitedMessage(poll.retryAfterSeconds),
+          REVIEW_EXIT.rate_limited,
+          "rate_limited",
+          { retryAfterSeconds: poll.retryAfterSeconds },
+        );
+      }
+      throw new CommandError(
+        `Poll failed: ${JSON.stringify(poll.body, null, 2)}`,
+        REVIEW_EXIT.failed,
+        "review_failed",
+      );
+    }
+
+    transientFailures = 0;
+    if (!poll.body || typeof poll.body !== "object") {
+      throw new CommandError(
+        "Poll failed: invalid PR review response",
+        REVIEW_EXIT.failed,
+        "review_failed",
+      );
+    }
+    lastEnvelope = poll.body as PrVortexReview;
+    const resting = (lastEnvelope.raw_status ?? lastEnvelope.status) !== "in_progress";
+    const matches = !opts.afterSha || shaMatches(lastEnvelope.head_sha, opts.afterSha);
+    if (resting && matches) return lastEnvelope;
+
+    opts.onTick?.("progress");
+    await sleepBeforePoll();
+  }
+
+  throw new PrReviewPollTimeoutError(owner, repo, prNumber, lastEnvelope);
+}
 
 export async function pollReview(
   cfg: Config,

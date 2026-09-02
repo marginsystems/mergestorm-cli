@@ -26,6 +26,7 @@ test("shellCommandSpecs folds aliases onto primaries and omits oneshot-only shel
   assert.ok(names.includes("help"));
   assert.ok(names.includes("clear"));
   assert.ok(names.includes("exit"));
+  assert.ok(names.includes("queue"));
   assert.ok(!names.includes("usage"));
   assert.ok(!names.includes("chains"));
   assert.ok(!names.includes("quit"));

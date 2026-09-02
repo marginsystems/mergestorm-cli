@@ -26,4 +26,6 @@ export const ansi = {
   brightGreen: (t: string) => wrap("92", t),
   invert: (t: string) => wrap("7", t),
   boldGreen: (t: string) => (computeEnabled() ? `[1;32m${t}[0m` : t),
+  /** Prompt / mark ink. Never 32 — that reads as sick dark green. */
+  boldBrightGreen: (t: string) => (computeEnabled() ? `[1;92m${t}[0m` : t),
 };
