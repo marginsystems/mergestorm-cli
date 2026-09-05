@@ -35,7 +35,19 @@ export type StackLayerMeta = {
 
 export type LocalStack = {
   layers: StackLayerMeta[];
+  autoEnqueueWhenReady?: boolean;
+  /** Per-open override carried from `stack create` to `stack submit`; absent = account flag. */
+  autoReviewOverride?: boolean;
+  autoPatchOverride?: boolean;
 };
+
+const LOCAL_STACK_FLAGS = [
+  "autoEnqueueWhenReady",
+  "autoReviewOverride",
+  "autoPatchOverride",
+] as const;
+
+type LocalStackFlag = (typeof LOCAL_STACK_FLAGS)[number];
 
 export type StackMeta = {
   version: 2;
@@ -88,13 +100,23 @@ function normalizeMeta(raw: unknown): StackMeta | null {
         !stack ||
         typeof stack !== "object" ||
         !Array.isArray((stack as LocalStack).layers) ||
-        !(stack as LocalStack).layers.every(isLayer)
+        !(stack as LocalStack).layers.every(isLayer) ||
+        LOCAL_STACK_FLAGS.some(
+          (flag) =>
+            (stack as LocalStack)[flag] !== undefined &&
+            typeof (stack as LocalStack)[flag] !== "boolean",
+        )
       ) {
         throw new Error(
           "Stack authoring state has a malformed stack entry; run `mg stack reset --force` to clear it.",
         );
       }
-      stacks.push({ layers: (stack as LocalStack).layers });
+      const entry: LocalStack = { layers: (stack as LocalStack).layers };
+      for (const flag of LOCAL_STACK_FLAGS) {
+        const value = (stack as LocalStack)[flag];
+        if (typeof value === "boolean") entry[flag] = value;
+      }
+      stacks.push(entry);
     }
     const active = obj.active;
     if (
@@ -253,6 +275,40 @@ export function activeLayers(meta: StackMeta): StackLayerMeta[] {
   return activeStack(meta).layers;
 }
 
+export function setActiveAutoEnqueue(
+  meta: StackMeta,
+  enabled: boolean | undefined,
+): StackMeta {
+  return setActiveStackFlag(meta, "autoEnqueueWhenReady", enabled);
+}
+
+/** Per-open automation flags remembered on the active local stack until submit. */
+export type LocalStackPolicy = {
+  autoEnqueueWhenReady?: boolean;
+  autoReviewOverride?: boolean;
+  autoPatchOverride?: boolean;
+};
+
+export function setActivePolicy(meta: StackMeta, policy: LocalStackPolicy): StackMeta {
+  let next = meta;
+  for (const flag of LOCAL_STACK_FLAGS) {
+    next = setActiveStackFlag(next, flag, policy[flag]);
+  }
+  return next;
+}
+
+function setActiveStackFlag(
+  meta: StackMeta,
+  flag: LocalStackFlag,
+  value: boolean | undefined,
+): StackMeta {
+  if (value === undefined) return meta;
+  const stacks = meta.stacks.map((stack, index) =>
+    index === meta.active ? { ...stack, [flag]: value } : stack,
+  );
+  return { ...meta, stacks };
+}
+
 export async function saveStackMeta(
   meta: StackMeta,
   cwd = process.cwd(),
@@ -321,7 +377,7 @@ export function appendLayer(meta: StackMeta, layer: StackLayerMeta): StackMeta {
   }
   const stacks = meta.stacks.map((stack, index) =>
     index === meta.active
-      ? { layers: [...stack.layers, layer] }
+      ? { ...stack, layers: [...stack.layers, layer] }
       : stack,
   );
   return { ...meta, stacks };

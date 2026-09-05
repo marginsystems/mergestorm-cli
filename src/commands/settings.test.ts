@@ -21,6 +21,7 @@ const SETTINGS_BODY = {
   review_unit_land_prs_enabled: true,
   cyclone_review_unit_land_prs_enabled: false,
   vortex_seam_specialist_enabled: true,
+  auto_land_default: false,
 };
 
 // --- parseSettingsArgs --------------------------------------------------------
@@ -28,6 +29,12 @@ const SETTINGS_BODY = {
 test("parseSettingsArgs maps --auto-patch off to auto_patch_enabled: false", () => {
   const parsed = parseSettingsArgs(["--auto-patch", "off"]);
   assert.deepEqual(parsed, { json: false, patch: { auto_patch_enabled: false } });
+});
+
+test("parseSettingsArgs maps --auto-land on to auto_land_default: true", () => {
+  const parsed = parseSettingsArgs(["--auto-land", "on"]);
+  assert.deepEqual(parsed, { json: false, patch: { auto_land_default: true } });
+  assert.deepEqual(parseSettingsArgs(["--auto-land=off"]).patch, { auto_land_default: false });
 });
 
 test("parseSettingsArgs collects every flag with both value forms", () => {
@@ -43,6 +50,8 @@ test("parseSettingsArgs collects every flag with both value forms", () => {
     "--cyclone-review-unit-land",
     "off",
     "--vortex-seam=on",
+    "--auto-land",
+    "on",
     "--json",
   ]);
   assert.equal(parsed.json, true);
@@ -54,6 +63,7 @@ test("parseSettingsArgs collects every flag with both value forms", () => {
     review_unit_land_prs_enabled: true,
     cyclone_review_unit_land_prs_enabled: false,
     vortex_seam_specialist_enabled: true,
+    auto_land_default: true,
   });
 });
 

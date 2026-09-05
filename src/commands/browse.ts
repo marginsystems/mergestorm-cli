@@ -9,8 +9,8 @@ import {
   type MeResponse,
   type SettingsPatch,
   type SettingsResponse,
-  type SettingsWritableKey,
 } from "../api.js";
+import { BEARER_SETTINGS_LABELS } from "../automation-catalog.js";
 import { apiBase, keyDisplay, loadConfig, resolveApiKey } from "../config.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
@@ -149,15 +149,7 @@ export function formatJobDetailLines(row: ReviewJobRow): string[] {
 }
 
 /** Human labels for the Config tab and the static `settings` printout. */
-export const SETTINGS_LABELS: Record<SettingsWritableKey, string> = {
-  auto_review_enabled: "Auto review",
-  auto_patch_enabled: "Auto patch",
-  vortex_show_thinking_traces: "Vortex thinking traces",
-  repo_overview_enabled: "Repo overview",
-  review_unit_land_prs_enabled: "Review Unit land PRs",
-  cyclone_review_unit_land_prs_enabled: "Cyclone Review Unit land PRs",
-  vortex_seam_specialist_enabled: "Vortex seam specialist",
-};
+export const SETTINGS_LABELS = BEARER_SETTINGS_LABELS;
 
 /** Config rows in a stable order: writable toggles, then connected flags. */
 export function buildConfigRows(settings: SettingsResponse): TabsConfigRow[] {

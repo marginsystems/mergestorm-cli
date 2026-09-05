@@ -36,7 +36,7 @@ test("repo identity resolves from nested directories", async () => {
   }
 });
 
-test("linked worktrees share one identity and stack state path", async () => {
+test("linked worktrees have distinct identities and stack state paths", async () => {
   const f = await committedRepo("mg-repo-id-worktree-");
   try {
     const worktree = path.join(f.root, "linked");
@@ -45,8 +45,8 @@ test("linked worktrees share one identity and stack state path", async () => {
     });
     const stateRoot = path.join(f.root, "state");
     assert.equal(gitCommonDir(worktree), gitCommonDir(f.repo));
-    assert.equal(stableRepoId(worktree), stableRepoId(f.repo));
-    assert.equal(
+    assert.notEqual(stableRepoId(worktree), stableRepoId(f.repo));
+    assert.notEqual(
       stackMetaPath(worktree, stateRoot),
       stackMetaPath(f.repo, stateRoot),
     );

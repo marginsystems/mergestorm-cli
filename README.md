@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.15`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.16`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│ ▟██▛  mergestorm v0.3.15                                                     │
+│ ▟██▛  mergestorm v0.3.16                                                     │
 │  ▜▙   ● msk_live_…  · maelstrom                                              │
 │       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used · Resets Sep 5, 10:53am (UTC)│
 │                                                                              │
 │       review a diff · usage for tabs · /help for all commands                │
-│       New in v0.3.15: PR wait + settings + both skills in the npm tarball    │
+│       New in v0.3.16: verify findings, small diff, public dismiss on skip    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -102,7 +102,7 @@ mergestorm stack reset --force  Clear local authoring state (not branches/PRs)
 
 `mg` is a short alias for `mergestorm` (same binary), e.g. `mg stack create`. Happy path: **create → commit → submit → restack → land**. On review-unit stacks, `stack land` **promotes** the tip into the unit (same gates as the dashboard); otherwise it lands the bottom open PR. `stack adopt` is for importing a chain that already exists on GitHub (legacy / Graphite). Restack/land use the same login key (`/api/v1/stacks`). Unattended landing is `mg queue add`.
 
-`stack create` checks out a new branch from the current tip (or `--onto <branch>`), discovers trunk (`main` / `master` / `origin/HEAD`, overridable with `--trunk`), and records `{ branch, parentBranch }` in CLI-managed state under **`~/.mergestorm/stacks/<repo-id>/stack.json`**. The CLI updates this automatically; never edit it. Linked worktrees share state, while independent clones remain isolated. Creating onto trunk with a non-empty active stack starts a new one. `--trunk` only sets trunk metadata — it does **not** change the parent; use `--onto main` (etc.) for a fresh stack from trunk.
+`stack create` checks out a new branch from the current tip (or `--onto <branch>`), discovers trunk (`main` / `master` / `origin/HEAD`, overridable with `--trunk`), and records `{ branch, parentBranch }` in CLI-managed state under **`~/.mergestorm/stacks/<repo-id>/stack.json`**. The CLI updates this automatically; never edit it. Each worktree has its own authoring state; independent clones stay isolated too. Creating onto trunk with a non-empty active stack starts a new one. `--trunk` only sets trunk metadata — it does **not** change the parent; use `--onto main` (etc.) for a fresh stack from trunk.
 
 If the parent branch is already a layer of a **registered** (submitted) stack, `create` and `submit` refuse unless you pass **`--extend`**. That blocks accidentally gluing an unrelated PR onto an open unit. Growing a registered stack on purpose: `mg stack create --onto <tip> --extend` → commit → `mg stack submit --extend`.
 
@@ -122,7 +122,7 @@ Removes `~/.mergestorm/config.json` so the stored key is no longer used.
 
 ### `review [base] [head]`
 
-Collects `git diff base...head` (default: discovered trunk — `origin/HEAD`, `main`, or `master`), attaches the changed file contents (up to 40 files, skipping files > 400 KB), submits the job, and polls until it finishes (~8 min max — Core plus a Max fleet can exceed 3 minutes). The thread slug defaults to the current branch (`local/<branch>`); pass `--thread` to override so follow-ups chain on a chosen slug. The CLI does not scan `.mergestorm/context/`.
+Collects `git diff base...head` (default: discovered trunk — `origin/HEAD`, `main`, or `master`), attaches the changed file contents (up to 40 files, skipping files > 400 KB), submits the job, and polls until it finishes (~8 min max — Core plus a Max fleet can exceed 3 minutes). The thread slug defaults to the current branch (`local/<branch>`); pass `--thread` to override so follow-ups chain on a chosen slug. The CLI still does not scan a repo folder for review context. GitHub Vortex will read house-rule files in a later PR (`AGENTS.md`, `CLAUDE.md`, alwaysApply Cursor rules). That ingest is not shipping yet.
 
 ```bash
 mergestorm review              # discovered trunk (origin/HEAD, main, or master)...HEAD

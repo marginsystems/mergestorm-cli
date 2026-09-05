@@ -47,11 +47,21 @@ export function gitCommonDir(cwd = process.cwd()): string {
 }
 
 /**
- * A physical clone and all its linked worktrees share one authoring state.
+ * Each worktree has its own authoring state.
  * Independent clones remain isolated even when they point at the same remote.
  */
 export function stableRepoId(cwd = process.cwd()): string {
-  return createHash("sha256").update(gitCommonDir(cwd)).digest("hex").slice(0, 20);
+  let raw: string;
+  try {
+    raw = git(["rev-parse", "--git-dir"], cwd).trim();
+  } catch (err) {
+    rethrowIfNotARepo(err);
+  }
+  const absolute = path.isAbsolute(raw) ? raw : path.resolve(cwd, raw);
+  return createHash("sha256")
+    .update(realpathSync(absolute))
+    .digest("hex")
+    .slice(0, 20);
 }
 
 export function cliStacksRoot(): string {

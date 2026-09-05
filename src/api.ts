@@ -1,4 +1,8 @@
 import { apiBase, loadConfig, resolveApiKey, type Config } from "./config.js";
+import {
+  BEARER_SETTINGS_KEYS as SETTINGS_WRITABLE_KEYS,
+  type BearerSettingsKey as SettingsWritableKey,
+} from "./automation-catalog.js";
 import { CommandError, REVIEW_EXIT, rateLimitedMessage } from "./errors.js";
 import type { MergeQueueEntryDto, StackDto } from "./stack-dto.js";
 
@@ -314,17 +318,8 @@ export type PrVortexReview = {
  * Bearer-writable settings keys, mirroring the `/api/v1/settings` allowlist.
  * The connected flags are read-only there and deliberately absent here.
  */
-export const SETTINGS_WRITABLE_KEYS = [
-  "auto_review_enabled",
-  "auto_patch_enabled",
-  "vortex_show_thinking_traces",
-  "repo_overview_enabled",
-  "review_unit_land_prs_enabled",
-  "cyclone_review_unit_land_prs_enabled",
-  "vortex_seam_specialist_enabled",
-] as const;
-
-export type SettingsWritableKey = (typeof SETTINGS_WRITABLE_KEYS)[number];
+export { SETTINGS_WRITABLE_KEYS };
+export type { SettingsWritableKey };
 
 export type SettingsPatch = Partial<Record<SettingsWritableKey, boolean>>;
 
@@ -595,17 +590,49 @@ export async function getEnrichedStack(
   return stacks.find((stack) => stack?.id === id) ?? null;
 }
 
+/**
+ * Per-stack automation policy. Auto land is a boolean; the review / patch
+ * overrides are tri-state (`null` clears back to the account flag). Absent
+ * keys are left untouched.
+ */
+export type StackPolicyPatch = {
+  autoEnqueueWhenReady?: boolean;
+  autoReviewOverride?: boolean | null;
+  autoPatchOverride?: boolean | null;
+};
+
+/** Drop undefined keys so the wire body only carries what was requested. */
+export function stackPolicyBody(policy: StackPolicyPatch | undefined): StackPolicyPatch {
+  const body: StackPolicyPatch = {};
+  if (typeof policy?.autoEnqueueWhenReady === "boolean") {
+    body.autoEnqueueWhenReady = policy.autoEnqueueWhenReady;
+  }
+  if (policy?.autoReviewOverride !== undefined) {
+    body.autoReviewOverride = policy.autoReviewOverride;
+  }
+  if (policy?.autoPatchOverride !== undefined) {
+    body.autoPatchOverride = policy.autoPatchOverride;
+  }
+  return body;
+}
+
 /** Adopt an open PR chain (Bearer POST /api/v1/stacks/adopt). */
 export async function adoptStack(
   owner: string,
   repo: string,
   prNumber: number,
   cfg?: Config,
+  policy?: StackPolicyPatch,
 ): Promise<unknown> {
   const resolved = cfg ?? (await loadConfig());
   const { status, body } = await apiFetch(resolved, "/api/v1/stacks/adopt", {
     method: "POST",
-    json: { owner, repo, prNumber },
+    json: {
+      owner,
+      repo,
+      prNumber,
+      ...stackPolicyBody(policy),
+    },
   });
   if (status === 404) {
     throw new CommandError(
@@ -673,6 +700,31 @@ async function stackMutation(
     throw new CommandError(`${failLabel} (HTTP ${status}): ${JSON.stringify(body)}`);
   }
   return body;
+}
+
+/** Arm or disarm Auto land on one owned stack. */
+export async function setStackAutoLand(
+  stackId: string,
+  enabled: boolean,
+  cfg?: Config,
+): Promise<unknown> {
+  return setStackPolicy(stackId, { autoEnqueueWhenReady: enabled }, cfg);
+}
+
+/**
+ * Patch any subset of one owned stack's automation policy
+ * (Bearer PATCH /api/v1/stacks/:id). `null` clears an override.
+ */
+export async function setStackPolicy(
+  stackId: string,
+  policy: StackPolicyPatch,
+  cfg?: Config,
+): Promise<unknown> {
+  const json = stackPolicyBody(policy);
+  if (Object.keys(json).length === 0) {
+    throw new CommandError("setStackPolicy needs at least one policy key");
+  }
+  return stackMutation(stackId, "", "PATCH", json, "Failed to set stack policy", cfg);
 }
 
 /** Restack descendants (Bearer POST /api/v1/stacks/:id/restack). */

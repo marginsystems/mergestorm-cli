@@ -5,14 +5,22 @@ import type { StackMeta } from "../stack-meta.js";
 import {
   assertMayParentOntoRegistered,
   buildStackListLines,
+  cmdStackCreate,
+  cmdStackSet,
   cmdStackSubmit,
   findRegisteredParent,
+  openPolicyPatch,
   parseAdoptTarget,
+  parseStackAdoptArgs,
   parseStackCreateArgs,
   parseStackResetArgs,
+  parseStackSetArgs,
   parseStackSubmitArgs,
   requireStackId,
+  stackPolicyLabels,
+  stackSetSummary,
   type StackSubmitDeps,
+  type StackCreateDeps,
 } from "./stack.js";
 import type { StackDto } from "../api.js";
 
@@ -40,6 +48,7 @@ type SubmitHarness = {
   adoptCalls: number;
   /** PR numbers passed to adoptStack, in call order. */
   adoptPrs: number[];
+  adoptPolicies: Array<{ autoEnqueueWhenReady?: boolean } | undefined>;
   /** Stack ids returned by adoptStack, in call order. */
   adoptStackIds: string[];
   ensureParkCalls: number;
@@ -51,6 +60,7 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
   const pushCalls: string[] = [];
   const createPrBases: string[] = [];
   const adoptPrs: number[] = [];
+  const adoptPolicies: Array<{ autoEnqueueWhenReady?: boolean } | undefined> = [];
   const adoptStackIds: string[] = [];
   let createPrCalls = 0;
   let adoptCalls = 0;
@@ -89,11 +99,12 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
     },
     loadConfig: async () => ({ apiKey: "msk_live_test", apiBase: "https://api.example.test" }),
     listStacks: async () => [],
-    adoptStack: async (owner, repo, prNumber) => {
+    adoptStack: async (owner, repo, prNumber, cfg, policy) => {
       adoptCalls += 1;
       adoptPrs.push(prNumber);
+      adoptPolicies.push(policy);
       const result = adoptStackOverride
-        ? await adoptStackOverride(owner, repo, prNumber)
+        ? await adoptStackOverride(owner, repo, prNumber, cfg, policy)
         : {
             stack: { id: "11111111-1111-4111-8111-111111111111", trunkBranch: "main" },
             chain: [],
@@ -124,6 +135,7 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
       return adoptCalls;
     },
     adoptPrs,
+    adoptPolicies,
     adoptStackIds,
     get ensureParkCalls() {
       return ensureParkCalls;
@@ -138,6 +150,9 @@ test("parseStackCreateArgs parses name, onto, trunk, extend, json", () => {
     onto: "main",
     trunk: undefined,
     extend: false,
+    autoLand: undefined,
+    autoReview: undefined,
+    autoPatch: undefined,
     asJson: true,
   });
   assert.deepEqual(parseStackCreateArgs(["--onto=ms/a", "--trunk", "master", "--extend"]), {
@@ -145,24 +160,223 @@ test("parseStackCreateArgs parses name, onto, trunk, extend, json", () => {
     onto: "ms/a",
     trunk: "master",
     extend: true,
+    autoLand: undefined,
+    autoReview: undefined,
+    autoPatch: undefined,
     asJson: false,
   });
+  assert.equal(parseStackCreateArgs(["--auto-land", "on"]).autoLand, true);
+  assert.equal(parseStackCreateArgs(["--auto-land=off"]).autoLand, false);
+});
+
+test("parseStackCreateArgs reads --auto-review / --auto-patch as on|off only", () => {
+  const parsed = parseStackCreateArgs(["--auto-review", "off", "--auto-patch=on"]);
+  assert.equal(parsed.autoReview, false);
+  assert.equal(parsed.autoPatch, true);
+  assert.equal(parsed.autoLand, undefined);
+  // Absent means "follow the account flag"; there is no `default` at open.
+  assert.equal(parseStackCreateArgs([]).autoReview, undefined);
+  assert.throws(() => parseStackCreateArgs(["--auto-patch", "default"]), /--auto-patch on\|off/);
+});
+
+test("cmdStackCreate persists --auto-review / --auto-patch in the saved stack metadata", async () => {
+  const saved: StackMeta[] = [];
+  const deps: StackCreateDeps = {
+    cwd: "/tmp/fake-repo",
+    gitTopLevel: () => "/tmp/fake-repo",
+    worktreeDirty: () => false,
+    currentBranch: () => "main",
+    branchExists: (branch) => branch === "main",
+    defaultLayerBranchName: () => "feat/new",
+    createBranchFromHead: () => {},
+    deleteBranch: () => {},
+    discoverTrunk: () => "main",
+    loadStackMeta: async () => null,
+    saveStackMeta: async (meta) => {
+      saved.push(structuredClone(meta));
+    },
+    parseGithubOriginRepo: () => null,
+  };
+
+  await cmdStackCreate(["--auto-patch", "off", "--json"], deps);
+
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]!.stacks[0]!.autoPatchOverride, false);
+  assert.equal(saved[0]!.stacks[0]!.autoReviewOverride, undefined);
+  assert.equal(saved[0]!.stacks[0]!.autoEnqueueWhenReady, undefined);
 });
 
 test("parseStackCreateArgs rejects unknown flags", () => {
   assert.throws(() => parseStackCreateArgs(["--nope"]), CommandError);
 });
 
+test("cmdStackCreate persists --auto-land in the saved stack metadata", async () => {
+  const saved: StackMeta[] = [];
+  const deps: StackCreateDeps = {
+    cwd: "/tmp/fake-repo",
+    gitTopLevel: () => "/tmp/fake-repo",
+    worktreeDirty: () => false,
+    currentBranch: () => "main",
+    branchExists: (branch) => branch === "main",
+    defaultLayerBranchName: () => "feat/new",
+    createBranchFromHead: () => {},
+    deleteBranch: () => {},
+    discoverTrunk: () => "main",
+    loadStackMeta: async () => null,
+    saveStackMeta: async (meta) => {
+      saved.push(structuredClone(meta));
+    },
+    parseGithubOriginRepo: () => null,
+  };
+
+  await cmdStackCreate(["--auto-land", "on", "--json"], deps);
+
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]!.stacks[0]!.autoEnqueueWhenReady, true);
+  assert.deepEqual(saved[0]!.stacks[0]!.layers, [
+    { branch: "feat/new", parentBranch: "main" },
+  ]);
+});
+
 test("parseStackSubmitArgs accepts --extend and --json", () => {
   assert.deepEqual(parseStackSubmitArgs(["--extend", "--json"]), {
     extend: true,
+    autoLand: undefined,
+    autoReview: undefined,
+    autoPatch: undefined,
     asJson: true,
   });
-  assert.deepEqual(parseStackSubmitArgs([]), { extend: false, asJson: false });
+  assert.deepEqual(parseStackSubmitArgs([]), {
+    extend: false,
+    autoLand: undefined,
+    autoReview: undefined,
+    autoPatch: undefined,
+    asJson: false,
+  });
+  assert.equal(parseStackSubmitArgs(["--auto-land", "on"]).autoLand, true);
+  assert.equal(parseStackSubmitArgs(["--auto-land=off"]).autoLand, false);
+  assert.equal(parseStackSubmitArgs(["--auto-review", "on"]).autoReview, true);
+  assert.equal(parseStackSubmitArgs(["--auto-patch=off"]).autoPatch, false);
+  assert.throws(() => parseStackSubmitArgs(["--auto-review", "default"]), /--auto-review on\|off/);
 });
 
 test("parseStackSubmitArgs rejects unknown flags", () => {
   assert.throws(() => parseStackSubmitArgs(["--force"]), /stack submit/);
+});
+
+test("parseStackSetArgs requires a stack id and at least one policy flag", () => {
+  const stackId = "11111111-1111-4111-8111-111111111111";
+  assert.deepEqual(parseStackSetArgs([stackId, "--auto-land", "on", "--json"]), {
+    stackId,
+    autoLand: true,
+    asJson: true,
+  });
+  assert.equal(
+    parseStackSetArgs(["--auto-land=off", stackId]).autoLand,
+    false,
+  );
+  assert.throws(() => parseStackSetArgs([stackId]), /stack set/);
+});
+
+test("parseStackSetArgs reads tri-state overrides where default writes null", () => {
+  const stackId = "11111111-1111-4111-8111-111111111111";
+  assert.deepEqual(
+    parseStackSetArgs([stackId, "--auto-review", "off", "--auto-patch=default"]),
+    { stackId, autoReview: false, autoPatch: null, asJson: false },
+  );
+  assert.deepEqual(parseStackSetArgs([stackId, "--auto-patch", "on"]), {
+    stackId,
+    autoPatch: true,
+    asJson: false,
+  });
+  // Auto land stays boolean-only: no `default` on the account-seeded flag.
+  assert.throws(() => parseStackSetArgs([stackId, "--auto-land", "default"]), /on\|off/);
+  assert.throws(() => parseStackSetArgs([stackId, "--auto-review", "maybe"]), /on\|off\|default/);
+});
+
+test("cmdStackSet writes Auto land and prints the API JSON response", async () => {
+  const stackId = "11111111-1111-4111-8111-111111111111";
+  let call: { stackId: string; policy: unknown } | undefined;
+  const output: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+  try {
+    await cmdStackSet([stackId, "--auto-land", "on", "--json"], {
+      loadConfig: async () => ({
+        apiKey: "msk_live_test",
+        apiBase: "https://api.example.test",
+      }),
+      setStackPolicy: async (seenId, policy) => {
+        call = { stackId: seenId, policy };
+        return { autoEnqueueWhenReady: policy.autoEnqueueWhenReady };
+      },
+    });
+  } finally {
+    console.log = originalLog;
+  }
+  assert.deepEqual(call, { stackId, policy: { autoEnqueueWhenReady: true } });
+  assert.deepEqual(JSON.parse(output.join("\n")), {
+    autoEnqueueWhenReady: true,
+  });
+});
+
+test("cmdStackSet sends only the override keys given, with default as null", async () => {
+  const stackId = "11111111-1111-4111-8111-111111111111";
+  let call: { stackId: string; policy: unknown } | undefined;
+  const output: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+  try {
+    await cmdStackSet([stackId, "--auto-patch", "off", "--auto-review", "default", "--json"], {
+      loadConfig: async () => ({
+        apiKey: "msk_live_test",
+        apiBase: "https://api.example.test",
+      }),
+      setStackPolicy: async (seenId, policy) => {
+        call = { stackId: seenId, policy };
+        return { autoReviewOverride: null, autoPatchOverride: false };
+      },
+    });
+  } finally {
+    console.log = originalLog;
+  }
+  assert.deepEqual(call, {
+    stackId,
+    policy: { autoReviewOverride: null, autoPatchOverride: false },
+  });
+  assert.deepEqual(JSON.parse(output.join("\n")), {
+    autoReviewOverride: null,
+    autoPatchOverride: false,
+  });
+});
+
+test("stackSetSummary names each flag written", () => {
+  assert.deepEqual(
+    stackSetSummary({
+      stackId: "x",
+      autoLand: true,
+      autoReview: null,
+      autoPatch: false,
+      asJson: false,
+    }),
+    ["Auto land on", "Auto-review default (account setting)", "Auto-patch off"],
+  );
+});
+
+test("stackPolicyLabels prints only pinned overrides next to Auto land", () => {
+  assert.deepEqual(stackPolicyLabels({ autoEnqueueWhenReady: false }), []);
+  assert.deepEqual(
+    stackPolicyLabels({
+      autoEnqueueWhenReady: true,
+      autoReviewOverride: false,
+      autoPatchOverride: null,
+    }),
+    ["auto-land on", "auto-review off"],
+  );
+  assert.deepEqual(
+    stackPolicyLabels({ autoPatchOverride: true }),
+    ["auto-patch on"],
+  );
 });
 
 const REGISTERED: StackDto[] = [
@@ -269,6 +483,54 @@ test("parseAdoptTarget rejects junk", () => {
   assert.throws(() => parseAdoptTarget(["acme/widgets"]), CommandError);
 });
 
+test("parseStackAdoptArgs parses Auto land without consuming the target", () => {
+  assert.deepEqual(
+    parseStackAdoptArgs(["acme/widgets#12", "--auto-land", "on", "--json"]),
+    {
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 12,
+      autoLand: true,
+      autoReview: undefined,
+      autoPatch: undefined,
+      asJson: true,
+    },
+  );
+  assert.equal(
+    parseStackAdoptArgs(["--auto-land=off", "acme/widgets", "12"]).autoLand,
+    false,
+  );
+  assert.throws(
+    () => parseStackAdoptArgs(["acme/widgets#12", "--auto-land", "default"]),
+    /on\|off/,
+  );
+  assert.deepEqual(
+    parseStackAdoptArgs(["acme/widgets#12", "--auto-review=off", "--auto-patch", "on"]),
+    {
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 12,
+      autoLand: undefined,
+      autoReview: false,
+      autoPatch: true,
+      asJson: false,
+    },
+  );
+  assert.throws(
+    () => parseStackAdoptArgs(["acme/widgets#12", "--auto-patch", "default"]),
+    /--auto-patch on\|off/,
+  );
+});
+
+test("openPolicyPatch maps on|off flags to the wire policy and drops absent keys", () => {
+  assert.equal(openPolicyPatch({}), undefined);
+  assert.deepEqual(openPolicyPatch({ autoLand: true }), { autoEnqueueWhenReady: true });
+  assert.deepEqual(
+    openPolicyPatch({ autoReview: false, autoPatch: true }),
+    { autoReviewOverride: false, autoPatchOverride: true },
+  );
+});
+
 test("requireStackId accepts a UUID", () => {
   const id = "11111111-1111-4111-8111-111111111111";
   assert.equal(requireStackId(id, "usage"), id);
@@ -285,9 +547,44 @@ test("cmdStackSubmit happy path pushes, creates PR, adopts, clears local state",
   assert.deepEqual(h.pushCalls, ["feat/layer-1"]);
   assert.equal(h.createPrCalls, 1);
   assert.equal(h.adoptCalls, 1);
+  assert.deepEqual(h.adoptPolicies, [undefined]);
   assert.equal(h.saved.length, 1);
   // Active stack cleared — no layers left to submit.
   assert.equal(h.saved[0]!.stacks[0]!.layers.length, 0);
+});
+
+test("cmdStackSubmit carries create-time Auto land metadata into a new stack", async () => {
+  const meta: StackMeta = {
+    ...structuredClone(SAMPLE_META),
+    stacks: [
+      {
+        ...structuredClone(SAMPLE_META.stacks[0]!),
+        autoEnqueueWhenReady: true,
+      },
+    ],
+  };
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => structuredClone(meta),
+  });
+  await cmdStackSubmit([], h.deps);
+  assert.deepEqual(h.adoptPolicies, [{ autoEnqueueWhenReady: true }]);
+});
+
+test("cmdStackSubmit explicit Auto land flag beats metadata", async () => {
+  const meta: StackMeta = {
+    ...structuredClone(SAMPLE_META),
+    stacks: [
+      {
+        ...structuredClone(SAMPLE_META.stacks[0]!),
+        autoEnqueueWhenReady: true,
+      },
+    ],
+  };
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => structuredClone(meta),
+  });
+  await cmdStackSubmit(["--auto-land", "off"], h.deps);
+  assert.deepEqual(h.adoptPolicies, [{ autoEnqueueWhenReady: false }]);
 });
 
 test("cmdStackSubmit keeps local state when adopt fails", async () => {
@@ -368,6 +665,7 @@ test("cmdStackSubmit allows registered tip parent with --extend", async () => {
     trunk: "main",
     stacks: [
       {
+        autoEnqueueWhenReady: true,
         layers: [
           {
             branch: "feat/extra",
@@ -385,6 +683,7 @@ test("cmdStackSubmit allows registered tip parent with --extend", async () => {
   await cmdStackSubmit(["--extend"], h.deps);
   assert.equal(h.createPrCalls, 1);
   assert.equal(h.adoptCalls, 1);
+  assert.deepEqual(h.adoptPolicies, [undefined]);
 });
 
 test("cmdStackSubmit refuses a mid-stack layer that parents onto a registered tip", async () => {
@@ -473,7 +772,7 @@ test("cmdStackSubmit opens a 3-layer stack onto the park freeze for PR3", async 
       chain: prNumber === 43 ? [{ branch: "feat/c", parentBranch: "mg-park-1-g1", prNumber: 43, position: 3 }] : [],
     }),
   });
-  await cmdStackSubmit(["--json"], h.deps);
+  await cmdStackSubmit(["--json", "--auto-land", "on"], h.deps);
   assert.deepEqual(h.pushCalls, ["feat/a", "feat/b", "feat/c"]);
   assert.deepEqual(h.createPrBases, ["main", "feat/a", "mg-park-1-g1"]);
   assert.equal(h.ensureParkCalls, 1);
@@ -482,6 +781,10 @@ test("cmdStackSubmit opens a 3-layer stack onto the park freeze for PR3", async 
   // First adopt registers PR1/PR2; the second adopts the park-based PR3 and
   // must land it in the same stack that owns PR1/PR2 — not an orphan stack.
   assert.deepEqual(h.adoptPrs, [41, 43]);
+  assert.deepEqual(h.adoptPolicies, [
+    { autoEnqueueWhenReady: true },
+    { autoEnqueueWhenReady: true },
+  ]);
   assert.deepEqual(h.adoptStackIds, [STACK_A, STACK_A]);
 });
 
@@ -550,8 +853,13 @@ test("buildStackListLines empty state tells you how to start", () => {
 });
 
 test("buildStackListLines lists a registered stack", () => {
-  const text = strip(buildStackListLines(REGISTERED).join("\n"));
+  const text = strip(
+    buildStackListLines([
+      { ...REGISTERED[0]!, autoEnqueueWhenReady: true },
+    ]).join("\n"),
+  );
   assert.match(text, /acme\/widgets/);
   assert.match(text, /#99/);
+  assert.match(text, /auto-land on/);
   assert.doesNotMatch(text, /None yet/);
 });

@@ -93,6 +93,9 @@ const WHATS_NEW: Record<string, string[]> = {
     "mg pr --wait --after-sha, mg settings, mergestorm-pr-loop skill on npm",
     "mg skill install copies review + pr-loop from the packed tarball",
   ],
+  "0.3.16": [
+    "PR loop: verify each finding, prefer a small diff, post mergestorm-loop: dismiss on skip",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

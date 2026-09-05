@@ -3,8 +3,8 @@ import {
   patchSettings,
   type SettingsPatch,
   type SettingsResponse,
-  type SettingsWritableKey,
 } from "../api.js";
+import { BEARER_SETTINGS_FLAGS } from "../automation-catalog.js";
 import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
 import { present } from "../ui/present.js";
@@ -14,15 +14,7 @@ import { buildConfigRows, canBrowse, openTabsBrowser } from "./browse.js";
  * CLI flag → Bearer settings key. on|off only. The connected flags are
  * read-only on the API and deliberately have no flag here.
  */
-export const SETTINGS_FLAGS: Record<string, SettingsWritableKey> = {
-  "--auto-review": "auto_review_enabled",
-  "--auto-patch": "auto_patch_enabled",
-  "--vortex-thinking": "vortex_show_thinking_traces",
-  "--repo-overview": "repo_overview_enabled",
-  "--review-unit-land": "review_unit_land_prs_enabled",
-  "--cyclone-review-unit-land": "cyclone_review_unit_land_prs_enabled",
-  "--vortex-seam": "vortex_seam_specialist_enabled",
-};
+export const SETTINGS_FLAGS = BEARER_SETTINGS_FLAGS;
 
 export type SettingsArgs = { json: boolean; patch: SettingsPatch };
 

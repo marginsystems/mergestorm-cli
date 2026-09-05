@@ -263,6 +263,16 @@ export type StackDto = {
    * Missing on older payloads is off.
    */
   autoEnqueueWhenReady?: boolean;
+  /**
+   * Per-stack Vortex auto-review override. `null` (or missing) follows the
+   * account `auto_review_enabled` flag; a boolean wins in both directions.
+   */
+  autoReviewOverride?: boolean | null;
+  /**
+   * Per-stack Cyclone auto-patch override. `null` (or missing) follows the
+   * account `auto_patch_enabled` flag; a boolean wins in both directions.
+   */
+  autoPatchOverride?: boolean | null;
   layers: StackLayerDto[];
   /** Present when a review-unit row exists for this stack. */
   unit?: StackUnitDto;

@@ -12,6 +12,14 @@ export {
 } from "../config.js";
 
 export {
+  BEARER_SETTINGS,
+  BEARER_SETTINGS_FLAGS,
+  BEARER_SETTINGS_KEYS,
+  BEARER_SETTINGS_LABELS,
+  type BearerSettingsKey,
+} from "../automation-catalog.js";
+
+export {
   API_TIMEOUT_PREFIX,
   DEFAULT_API_TIMEOUT_MS,
   SETTINGS_WRITABLE_KEYS,
@@ -34,6 +42,9 @@ export {
   parseRetryAfterSeconds,
   patchSettings,
   restackStack,
+  setStackAutoLand,
+  setStackPolicy,
+  stackPolicyBody,
   type ApiFetchInit,
   type ApiFetchResult,
   type JobListItem,
@@ -51,6 +62,7 @@ export {
   type SettingsResponse,
   type SettingsWritableKey,
   type StackDto,
+  type StackPolicyPatch,
   type ThreadDetail,
   type ThreadListItem,
 } from "../api.js";

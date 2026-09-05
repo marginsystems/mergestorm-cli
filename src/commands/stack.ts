@@ -4,7 +4,9 @@ import {
   landNextStack,
   listStacks,
   restackStack,
+  setStackPolicy,
   type StackDto,
+  type StackPolicyPatch,
 } from "../api.js";
 import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
@@ -35,6 +37,7 @@ import {
   resetStackMeta,
   saveStackMeta,
   selectStackForCreate,
+  setActivePolicy,
 } from "../stack-meta.js";
 import { isMgParkBranch, planSubmitLayerBases } from "../submit-pr-base.js";
 import { ansi } from "../ui/ansi.js";
@@ -44,14 +47,18 @@ import { canBrowse } from "./browse.js";
 import { openHelpBrowser } from "./help.js";
 
 const STACK_USAGE = `usage:
-  mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend] [--json]
-  mergestorm stack submit [--extend] [--json]
+  mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
+  mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
   mergestorm stack reset --force
   mergestorm stack list [--json]
-  mergestorm stack adopt <owner/repo>#<pr>
+  mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]
+  mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
   mergestorm stack restack <stack-id> [--json]
   mergestorm stack land <stack-id> [--json]
 
+  --auto-review / --auto-patch pin Vortex auto-review / Cyclone auto-patch for
+  one stack in either direction. Absent, or \`default\` on stack set, follows
+  the account setting.
   stack submit opens PRs with a body generated from each layer tip commit.
   Layers 1–2 use the git parent as GitHub base. Layer 3+ opens onto the
   review-unit park freeze (mg-park-*) so adopt does not retarget after open.
@@ -189,10 +196,28 @@ export function buildStackListLines(stacks: StackDto[]): string[] {
   return lines;
 }
 
+/** Short per-stack policy suffixes: Auto land when on, overrides when pinned. */
+export function stackPolicyLabels(
+  s: Pick<StackDto, "autoEnqueueWhenReady" | "autoReviewOverride" | "autoPatchOverride">,
+): string[] {
+  const labels: string[] = [];
+  if (s.autoEnqueueWhenReady) labels.push("auto-land on");
+  if (typeof s.autoReviewOverride === "boolean") {
+    labels.push(`auto-review ${s.autoReviewOverride ? "on" : "off"}`);
+  }
+  if (typeof s.autoPatchOverride === "boolean") {
+    labels.push(`auto-patch ${s.autoPatchOverride ? "on" : "off"}`);
+  }
+  return labels;
+}
+
 function formatStackHuman(s: StackDto): string[] {
   const lines: string[] = [];
   lines.push(
-    `  ${ansi.bold(`${s.owner}/${s.repo}`)}  trunk=${s.trunkBranch}`,
+    `  ${ansi.bold(`${s.owner}/${s.repo}`)}  trunk=${s.trunkBranch}` +
+      stackPolicyLabels(s)
+        .map((label) => `  ${label}`)
+        .join(""),
   );
   lines.push(`  ${ansi.dim(s.id)}`);
   if (s.layers.length === 0) {
@@ -209,18 +234,72 @@ function formatStackHuman(s: StackDto): string[] {
   return lines;
 }
 
+/** Per-open policy flags shared by create, submit, and adopt (`on|off` only). */
+export type StackOpenPolicyFlags = {
+  autoLand?: boolean;
+  autoReview?: boolean;
+  autoPatch?: boolean;
+};
+
+const OPEN_POLICY_FLAGS: ReadonlyArray<{
+  flag: string;
+  key: keyof StackOpenPolicyFlags;
+}> = [
+  { flag: "--auto-land", key: "autoLand" },
+  { flag: "--auto-review", key: "autoReview" },
+  { flag: "--auto-patch", key: "autoPatch" },
+];
+
+/**
+ * Consume one `--auto-* on|off` flag at `args[i]` (space or `=` form). Returns
+ * the next index to scan, or null when `args[i]` is not a policy flag.
+ */
+function takeOpenPolicyFlag(
+  args: string[],
+  i: number,
+  into: StackOpenPolicyFlags,
+  verb: string,
+): number | null {
+  const a = args[i]!;
+  for (const { flag, key } of OPEN_POLICY_FLAGS) {
+    if (a === flag) {
+      into[key] = parseOnOff(args[i + 1], flag, verb);
+      return i + 2;
+    }
+    if (a.startsWith(`${flag}=`)) {
+      into[key] = parseOnOff(a.slice(flag.length + 1), flag, verb);
+      return i + 1;
+    }
+  }
+  return null;
+}
+
+/** Wire policy for adopt from the parsed `on|off` flags; absent keys stay off the body. */
+export function openPolicyPatch(flags: StackOpenPolicyFlags): StackPolicyPatch | undefined {
+  const patch: StackPolicyPatch = {
+    ...(typeof flags.autoLand === "boolean" ? { autoEnqueueWhenReady: flags.autoLand } : {}),
+    ...(typeof flags.autoReview === "boolean" ? { autoReviewOverride: flags.autoReview } : {}),
+    ...(typeof flags.autoPatch === "boolean" ? { autoPatchOverride: flags.autoPatch } : {}),
+  };
+  return Object.keys(patch).length > 0 ? patch : undefined;
+}
+
 /** Parse `stack create` argv into options. Exported for tests. */
 export function parseStackCreateArgs(args: string[]): {
   name?: string;
   onto?: string;
   trunk?: string;
   extend: boolean;
+  autoLand?: boolean;
+  autoReview?: boolean;
+  autoPatch?: boolean;
   asJson: boolean;
 } {
   let name: string | undefined;
   let onto: string | undefined;
   let trunk: string | undefined;
   let extend = false;
+  const policy: StackOpenPolicyFlags = {};
   let asJson = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -230,6 +309,11 @@ export function parseStackCreateArgs(args: string[]): {
     }
     if (a === "--extend") {
       extend = true;
+      continue;
+    }
+    const next = takeOpenPolicyFlag(args, i, policy, "stack create");
+    if (next !== null) {
+      i = next - 1;
       continue;
     }
     if (a === "--onto") {
@@ -270,17 +354,31 @@ export function parseStackCreateArgs(args: string[]): {
     }
     name = a;
   }
-  return { name, onto, trunk, extend, asJson };
+  return {
+    name,
+    onto,
+    trunk,
+    extend,
+    autoLand: policy.autoLand,
+    autoReview: policy.autoReview,
+    autoPatch: policy.autoPatch,
+    asJson,
+  };
 }
 
 /** Parse `stack submit` argv. Exported for tests. */
 export function parseStackSubmitArgs(args: string[]): {
   extend: boolean;
+  autoLand?: boolean;
+  autoReview?: boolean;
+  autoPatch?: boolean;
   asJson: boolean;
 } {
   let extend = false;
+  const policy: StackOpenPolicyFlags = {};
   let asJson = false;
-  for (const a of args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
     if (a === "--json") {
       asJson = true;
       continue;
@@ -289,9 +387,130 @@ export function parseStackSubmitArgs(args: string[]): {
       extend = true;
       continue;
     }
-    throw new CommandError("usage: mergestorm stack submit [--extend] [--json]");
+    const next = takeOpenPolicyFlag(args, i, policy, "stack submit");
+    if (next !== null) {
+      i = next - 1;
+      continue;
+    }
+    throw new CommandError(
+      "usage: mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]",
+    );
   }
-  return { extend, asJson };
+  return {
+    extend,
+    autoLand: policy.autoLand,
+    autoReview: policy.autoReview,
+    autoPatch: policy.autoPatch,
+    asJson,
+  };
+}
+
+function parseOnOff(raw: string | undefined, flag: string, verb: string): boolean {
+  if (raw === "on") return true;
+  if (raw === "off") return false;
+  throw new CommandError(`usage: mergestorm ${verb} [${flag} on|off]`);
+}
+
+/** `stack set` overrides are tri-state: `default` writes null (follow the account flag). */
+function parseOnOffDefault(
+  raw: string | undefined,
+  flag: string,
+  verb: string,
+): boolean | null {
+  if (raw === "on") return true;
+  if (raw === "off") return false;
+  if (raw === "default") return null;
+  throw new CommandError(`usage: mergestorm ${verb} [${flag} on|off|default]`);
+}
+
+export function parseStackAdoptArgs(args: string[]): {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  autoLand?: boolean;
+  autoReview?: boolean;
+  autoPatch?: boolean;
+  asJson: boolean;
+} {
+  const targetArgs: string[] = [];
+  const policy: StackOpenPolicyFlags = {};
+  let asJson = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--json") {
+      asJson = true;
+      continue;
+    }
+    const next = takeOpenPolicyFlag(args, i, policy, "stack adopt <owner/repo>#<pr>");
+    if (next !== null) {
+      i = next - 1;
+      continue;
+    }
+    if (a.startsWith("-")) {
+      throw new CommandError(`${STACK_USAGE}\nunknown flag: ${a}`);
+    }
+    targetArgs.push(a);
+  }
+  const target = parseAdoptTarget(targetArgs);
+  return {
+    ...target,
+    autoLand: policy.autoLand,
+    autoReview: policy.autoReview,
+    autoPatch: policy.autoPatch,
+    asJson,
+  };
+}
+
+export type StackSetArgs = {
+  stackId: string;
+  /** At least one of these is present. */
+  autoLand?: boolean;
+  autoReview?: boolean | null;
+  autoPatch?: boolean | null;
+  asJson: boolean;
+};
+
+export function parseStackSetArgs(args: string[]): StackSetArgs {
+  const usage =
+    "usage: mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]";
+  const verb = "stack set <stack-id>";
+  let stackId: string | undefined;
+  let autoLand: boolean | undefined;
+  let autoReview: boolean | null | undefined;
+  let autoPatch: boolean | null | undefined;
+  let asJson = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--json") {
+      asJson = true;
+    } else if (arg === "--auto-land") {
+      autoLand = parseOnOff(args[++i], "--auto-land", verb);
+    } else if (arg.startsWith("--auto-land=")) {
+      autoLand = parseOnOff(arg.slice("--auto-land=".length), "--auto-land", verb);
+    } else if (arg === "--auto-review") {
+      autoReview = parseOnOffDefault(args[++i], "--auto-review", verb);
+    } else if (arg.startsWith("--auto-review=")) {
+      autoReview = parseOnOffDefault(arg.slice("--auto-review=".length), "--auto-review", verb);
+    } else if (arg === "--auto-patch") {
+      autoPatch = parseOnOffDefault(args[++i], "--auto-patch", verb);
+    } else if (arg.startsWith("--auto-patch=")) {
+      autoPatch = parseOnOffDefault(arg.slice("--auto-patch=".length), "--auto-patch", verb);
+    } else if (arg.startsWith("-") || stackId !== undefined) {
+      throw new CommandError(usage);
+    } else {
+      stackId = arg;
+    }
+  }
+  if (autoLand === undefined && autoReview === undefined && autoPatch === undefined) {
+    throw new CommandError(usage);
+  }
+  return {
+    stackId: requireStackId(stackId, usage),
+    ...(autoLand !== undefined ? { autoLand } : {}),
+    ...(autoReview !== undefined ? { autoReview } : {}),
+    ...(autoPatch !== undefined ? { autoPatch } : {}),
+    asJson,
+  };
 }
 
 export function parseStackResetArgs(args: string[]): void {
@@ -305,51 +524,80 @@ export function parseStackResetArgs(args: string[]): void {
 /** Injectable seams for unit tests. Production callers omit deps. */
 export type StackCreateDeps = {
   cwd?: string;
+  gitTopLevel?: typeof gitTopLevel;
+  worktreeDirty?: typeof worktreeDirty;
+  currentBranch?: typeof currentBranch;
+  branchExists?: typeof branchExists;
+  createBranchFromHead?: typeof createBranchFromHead;
+  deleteBranch?: typeof deleteBranch;
+  discoverTrunk?: typeof discoverTrunk;
+  defaultLayerBranchName?: typeof defaultLayerBranchName;
+  loadStackMeta?: typeof loadStackMeta;
+  saveStackMeta?: typeof saveStackMeta;
   listStacks?: typeof listStacks;
   loadConfig?: typeof loadConfig;
   parseGithubOriginRepo?: typeof parseGithubOriginRepo;
 };
 
-async function cmdStackCreate(
+export async function cmdStackCreate(
   args: string[],
   deps: StackCreateDeps = {},
 ): Promise<void> {
-  const { name, onto, trunk: trunkFlag, extend, asJson } = parseStackCreateArgs(args);
+  const {
+    name,
+    onto,
+    trunk: trunkFlag,
+    extend,
+    autoLand,
+    autoReview,
+    autoPatch,
+    asJson,
+  } = parseStackCreateArgs(args);
   const cwd = deps.cwd ?? process.cwd();
+  const gitTopLevelFn = deps.gitTopLevel ?? gitTopLevel;
+  const worktreeDirtyFn = deps.worktreeDirty ?? worktreeDirty;
+  const currentBranchFn = deps.currentBranch ?? currentBranch;
+  const branchExistsFn = deps.branchExists ?? branchExists;
+  const createBranchFromHeadFn = deps.createBranchFromHead ?? createBranchFromHead;
+  const deleteBranchFn = deps.deleteBranch ?? deleteBranch;
+  const discoverTrunkFn = deps.discoverTrunk ?? discoverTrunk;
+  const defaultLayerBranchNameFn = deps.defaultLayerBranchName ?? defaultLayerBranchName;
+  const loadStackMetaFn = deps.loadStackMeta ?? loadStackMeta;
+  const saveStackMetaFn = deps.saveStackMeta ?? saveStackMeta;
   const listStacksFn = deps.listStacks ?? listStacks;
   const loadConfigFn = deps.loadConfig ?? loadConfig;
   const parseOriginFn = deps.parseGithubOriginRepo ?? parseGithubOriginRepo;
   try {
-    gitTopLevel(cwd);
+    gitTopLevelFn(cwd);
   } catch {
     throw new CommandError(
       "Not in a git repository. Run `mg stack create` from inside the repository whose stack you want to author.",
     );
   }
 
-  if (worktreeDirty(cwd)) {
+  if (worktreeDirtyFn(cwd)) {
     throw new CommandError(
       "Working tree is dirty. Commit or stash changes before `stack create`.",
     );
   }
 
-  const parentBranch = onto?.trim() || currentBranch(cwd);
+  const parentBranch = onto?.trim() || currentBranchFn(cwd);
   if (!parentBranch) {
     throw new CommandError(
       "Detached HEAD. Check out a branch (or pass --onto <branch>) before `stack create`.",
     );
   }
-  if (!branchExists(parentBranch, cwd)) {
+  if (!branchExistsFn(parentBranch, cwd)) {
     throw new CommandError(`Parent branch not found: ${parentBranch}`);
   }
 
-  const branch = defaultLayerBranchName(name);
-  if (branchExists(branch, cwd)) {
+  const branch = defaultLayerBranchNameFn(name);
+  if (branchExistsFn(branch, cwd)) {
     throw new CommandError(`Branch already exists: ${branch}`);
   }
 
-  let meta = await loadStackMeta(cwd);
-  const trunk = trunkFlag?.trim() || meta?.trunk || discoverTrunk(cwd);
+  let meta = await loadStackMetaFn(cwd);
+  const trunk = trunkFlag?.trim() || meta?.trunk || discoverTrunkFn(cwd);
   if (!meta) {
     meta = emptyStackMeta(trunk);
   } else if (trunkFlag?.trim() && meta.trunk !== trunk) {
@@ -411,21 +659,26 @@ async function cmdStackCreate(
 
   try {
     meta = selectStackForCreate(meta, parentBranch);
+    meta = setActivePolicy(meta, {
+      autoEnqueueWhenReady: autoLand,
+      autoReviewOverride: autoReview,
+      autoPatchOverride: autoPatch,
+    });
   } catch (err) {
     throw new CommandError(err instanceof Error ? err.message : String(err));
   }
 
   try {
-    createBranchFromHead(branch, cwd);
+    createBranchFromHeadFn(branch, cwd);
   } catch (err) {
     throw new CommandError(err instanceof Error ? err.message : String(err));
   }
 
   try {
     meta = appendLayer(meta, { branch, parentBranch });
-    await saveStackMeta(meta, cwd);
+    await saveStackMetaFn(meta, cwd);
   } catch (err) {
-    try { deleteBranch(branch, cwd); } catch { /* rollback best-effort */ }
+    try { deleteBranchFn(branch, cwd); } catch { /* rollback best-effort */ }
     throw new CommandError(err instanceof Error ? err.message : String(err));
   }
 
@@ -496,7 +749,7 @@ export async function cmdStackSubmit(
   args: string[],
   deps: StackSubmitDeps = {},
 ): Promise<void> {
-  const { extend, asJson } = parseStackSubmitArgs(args);
+  const { extend, autoLand, autoReview, autoPatch, asJson } = parseStackSubmitArgs(args);
   const cwd = deps.cwd ?? process.cwd();
   const gitTopLevelFn = deps.gitTopLevel ?? gitTopLevel;
   const loadStackMetaFn = deps.loadStackMeta ?? loadStackMeta;
@@ -531,7 +784,6 @@ export async function cmdStackSubmit(
       "No local stack layers. Run `mg stack create` (then commit your code) before `stack submit`.",
     );
   }
-
   const origin = parseOriginFn(cwd);
   if (!origin) {
     throw new CommandError(
@@ -578,6 +830,26 @@ export async function cmdStackSubmit(
     registered,
     owner,
     repo,
+  });
+
+  // Explicit submit flags win; otherwise a fresh (unregistered) stack carries
+  // the choices remembered at `stack create`. Joining a registered stack
+  // never replays stored create-time flags onto it.
+  const stored = meta.stacks[meta.active];
+  const freshStack = plans.every((plan) => plan.stackId === null);
+  const pick = (
+    flag: boolean | undefined,
+    remembered: boolean | undefined,
+  ): boolean | undefined =>
+    typeof flag === "boolean"
+      ? flag
+      : freshStack && typeof remembered === "boolean"
+        ? remembered
+        : undefined;
+  const policy = openPolicyPatch({
+    autoLand: pick(autoLand, stored?.autoEnqueueWhenReady),
+    autoReview: pick(autoReview, stored?.autoReviewOverride),
+    autoPatch: pick(autoPatch, stored?.autoPatchOverride),
   });
 
   for (const layer of layers) {
@@ -665,7 +937,7 @@ export async function cmdStackSubmit(
 
   const registerPr = async (prNumber: number): Promise<void> => {
     console.log(ansi.dim(`  Registering stack via import (${owner}/${repo}#${prNumber}) …`));
-    const body = await adoptStackFn(owner, repo, prNumber, cfg);
+    const body = await adoptStackFn(owner, repo, prNumber, cfg, policy);
     if (typeof body !== "object" || body === null) {
       throw new CommandError("Unexpected response shape from adopt API");
     }
@@ -786,15 +1058,66 @@ async function cmdStackList(args: string[]): Promise<void> {
   await present("Stacks", listed);
 }
 
-async function cmdStackAdopt(args: string[]): Promise<void> {
-  const asJson = args.includes("--json");
-  const targetArgs = args.filter((a) => a !== "--json");
-  if (targetArgs.length === 0) {
-    throw new CommandError(`usage: mergestorm stack adopt <owner/repo>#<pr>`);
+export type StackSetDeps = {
+  loadConfig?: typeof loadConfig;
+  setStackPolicy?: typeof setStackPolicy;
+};
+
+/** Human summary lines for a `stack set` write, one per flag. */
+export function stackSetSummary(parsed: StackSetArgs): string[] {
+  const tri = (value: boolean | null) =>
+    value === null ? "default (account setting)" : value ? "on" : "off";
+  const lines: string[] = [];
+  if (parsed.autoLand !== undefined) {
+    lines.push(`Auto land ${parsed.autoLand ? "on" : "off"}`);
   }
-  const { owner, repo, prNumber } = parseAdoptTarget(targetArgs);
+  if (parsed.autoReview !== undefined) {
+    lines.push(`Auto-review ${tri(parsed.autoReview)}`);
+  }
+  if (parsed.autoPatch !== undefined) {
+    lines.push(`Auto-patch ${tri(parsed.autoPatch)}`);
+  }
+  return lines;
+}
+
+export async function cmdStackSet(
+  args: string[],
+  deps: StackSetDeps = {},
+): Promise<void> {
+  const parsed = parseStackSetArgs(args);
+  const cfg = await (deps.loadConfig ?? loadConfig)();
+  const body = await (deps.setStackPolicy ?? setStackPolicy)(
+    parsed.stackId,
+    {
+      ...(parsed.autoLand !== undefined ? { autoEnqueueWhenReady: parsed.autoLand } : {}),
+      ...(parsed.autoReview !== undefined ? { autoReviewOverride: parsed.autoReview } : {}),
+      ...(parsed.autoPatch !== undefined ? { autoPatchOverride: parsed.autoPatch } : {}),
+    },
+    cfg,
+  );
+  if (parsed.asJson) {
+    console.log(JSON.stringify(body, null, 2));
+    return;
+  }
+  await present(
+    "Stack",
+    stackSetSummary(parsed).map((line) =>
+      ansi.brightGreen(`  ${line} for ${parsed.stackId}`),
+    ),
+  );
+}
+
+async function cmdStackAdopt(args: string[]): Promise<void> {
+  const { owner, repo, prNumber, autoLand, autoReview, autoPatch, asJson } =
+    parseStackAdoptArgs(args);
   const cfg = await loadConfig();
-  const body = await adoptStack(owner, repo, prNumber, cfg);
+  const body = await adoptStack(
+    owner,
+    repo,
+    prNumber,
+    cfg,
+    openPolicyPatch({ autoLand, autoReview, autoPatch }),
+  );
   if (asJson) {
     console.log(JSON.stringify(body, null, 2));
     return;
@@ -891,6 +1214,7 @@ export async function cmdStack(args: string[]): Promise<void> {
   if (sub === "submit") return cmdStackSubmit(rest);
   if (sub === "reset") return cmdStackReset(rest);
   if (sub === "list" || sub === "ls") return cmdStackList(rest);
+  if (sub === "set") return cmdStackSet(rest);
   if (sub === "adopt") return cmdStackAdopt(rest);
   if (sub === "restack") return cmdStackRestack(rest);
   if (sub === "land" || sub === "land-next") return cmdStackLand(rest);

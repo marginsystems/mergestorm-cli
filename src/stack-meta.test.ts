@@ -24,6 +24,7 @@ import {
   resetStackMeta,
   saveStackMeta,
   selectStackForCreate,
+  setActiveAutoEnqueue,
   stackMetaPath,
   type StackMeta,
 } from "./stack-meta.js";
@@ -59,7 +60,12 @@ test("save/load round-trip is global, private, atomic, and leaves repo clean", a
     const meta: StackMeta = {
       version: 2,
       trunk: "main",
-      stacks: [{ layers: [{ branch: "ms/a", parentBranch: "main" }] }],
+      stacks: [
+        {
+          layers: [{ branch: "ms/a", parentBranch: "main" }],
+          autoEnqueueWhenReady: true,
+        },
+      ],
       active: 0,
     };
     await saveStackMeta(meta, f.repo, f.stateRoot);
@@ -388,13 +394,17 @@ test("save corrects permissive existing directory and file modes", async () => {
 });
 
 test("multi-stack selection and cleanup preserve independent stacks", () => {
-  let meta = appendLayer(emptyStackMeta("main"), {
+  let meta = setActiveAutoEnqueue(emptyStackMeta("main"), true);
+  meta = appendLayer(meta, {
     branch: "ms/one",
     parentBranch: "main",
   });
+  assert.equal(meta.stacks[0]!.autoEnqueueWhenReady, true);
   meta = selectStackForCreate(meta, "main");
+  meta = setActiveAutoEnqueue(meta, false);
   meta = appendLayer(meta, { branch: "ms/two", parentBranch: "main" });
   assert.equal(meta.stacks.length, 2);
+  assert.equal(meta.stacks[1]!.autoEnqueueWhenReady, false);
   assert.deepEqual(activeLayers(meta), [
     { branch: "ms/two", parentBranch: "main" },
   ]);

@@ -185,6 +185,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "  [--auto-review on|off] [--auto-patch on|off] [--vortex-thinking on|off]",
       "  [--repo-overview on|off] [--review-unit-land on|off]",
       "  [--cyclone-review-unit-land on|off] [--vortex-seam on|off]",
+      "  [--auto-land on|off]            Auto land default for stacks opened after this",
       "  With flags: PATCH those settings and print the stored result",
     ],
     async run(args, ctx) {
@@ -233,11 +234,12 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     name: "stack",
     summary: "Stacks: /stack how-to, list yours, create → submit",
     usage: [
-      "mergestorm stack create [name]  New local stack layer ([--onto] [--trunk] [--extend])",
-      "mergestorm stack submit         Push active local stack, open PRs ([--extend])",
+      "mergestorm stack create [name]  New local layer ([--onto] [--trunk] [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off])",
+      "mergestorm stack submit         Push/open active stack ([--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off])",
       "mergestorm stack reset --force  Clear this repo's pre-submit authoring state",
       "mergestorm stack list [--json]  List registered stacks",
-      "mergestorm stack adopt <owner/repo>#<pr>  Import an existing open PR chain",
+      "mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]  Per-stack policy",
+      "mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off]  Import an open PR chain",
       "mergestorm stack restack <stack-id>   Restack stack descendants",
       "mergestorm stack land <stack-id>      Land bottom PR (or promote into unit)",
     ],

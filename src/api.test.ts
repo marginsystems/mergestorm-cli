@@ -297,6 +297,7 @@ const SETTINGS_BODY = {
   review_unit_land_prs_enabled: true,
   cyclone_review_unit_land_prs_enabled: false,
   vortex_seam_specialist_enabled: true,
+  auto_land_default: false,
 };
 
 test("getSettings GETs Bearer /api/v1/settings, never the cookie route", async () => {
