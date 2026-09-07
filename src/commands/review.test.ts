@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
@@ -18,9 +18,12 @@ import {
   withReviewJobRecovery,
 } from "./review.js";
 import {
+  collectReviewInput,
+  formatReviewSubmitError,
   loadReviewContext,
   MAX_CONTEXT_FILE_CHARS,
   MAX_CONTEXT_FILES,
+  MAX_REVIEW_DIFF_BYTES,
   REVIEW_POLL_INTERVAL_MS,
   pollReview,
   stretchedPollIntervalMs,
@@ -178,7 +181,8 @@ test("parseReviewArgs reads context, thread, idempotency, and webhook flags", ()
 });
 
 test("loadReviewContext caps files and reads --context - from stdin", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "mg-review-context-"));
+  const fixture = await repoWithTrunk("mg-review-context-", "main");
+  const root = fixture.repo;
   try {
     const adr = path.join(root, "adr.md");
     await writeFile(adr, "prefer fail-closed\n");
@@ -210,7 +214,7 @@ test("loadReviewContext caps files and reads --context - from stdin", async () =
       /per file/,
     );
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
@@ -515,16 +519,6 @@ test("cmdReview interactive detaches on Ctrl+C mid-poll (#1286)", async () => {
       n += 1;
       if (n === 1) {
         return new Response(
-          JSON.stringify({
-            key: { prefix: "msk_live", name: "Test", created_at: "", last_used_at: null },
-            plan_key: "free",
-            usage: { standard: { used: 1, limit: 10, remaining: 9 } },
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      if (n === 2) {
-        return new Response(
           JSON.stringify({ job_id: "job_abort", status: "queued" }),
           { status: 202, headers: { "Content-Type": "application/json" } },
         );
@@ -541,7 +535,7 @@ test("cmdReview interactive detaches on Ctrl+C mid-poll (#1286)", async () => {
         }),
       (err: unknown) => err instanceof DetachedError && err.jobId === "job_abort",
     );
-    assert.equal(n, 3);
+    assert.equal(n, 2);
   });
 });
 
@@ -553,16 +547,6 @@ test("cmdReview interactive detaches when poll requests time out (#1286)", async
     globalThis.fetch = async () => {
       n += 1;
       if (n === 1) {
-        return new Response(
-          JSON.stringify({
-            key: { prefix: "msk_live", name: "Test", created_at: "", last_used_at: null },
-            plan_key: "free",
-            usage: { standard: { used: 1, limit: 10, remaining: 9 } },
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      if (n === 2) {
         return new Response(
           JSON.stringify({ job_id: "job_detach_timeout", status: "queued" }),
           { status: 202, headers: { "Content-Type": "application/json" } },
@@ -583,7 +567,7 @@ test("cmdReview interactive detaches when poll requests time out (#1286)", async
       (err: unknown) =>
         err instanceof DetachedError && err.jobId === "job_detach_timeout",
     );
-    assert.equal(n, 6);
+    assert.equal(n, 5);
   });
 });
 
@@ -1132,4 +1116,178 @@ test("pollReview stretches the default interval toward 5s after 60s", async () =
   });
   assert.equal(sleeps[0], 2_000);
   assert.equal(sleeps[1], 5_000);
+});
+
+test("formatReviewSubmitError explains nginx 413 instead of Failed: {}", () => {
+  const nginx = formatReviewSubmitError(413, {});
+  assert.match(nginx, /HTTP 413/);
+  assert.match(nginx, /no credits were charged/i);
+  assert.equal(MAX_REVIEW_DIFF_BYTES, 1_000_000);
+  assert.match(nginx, /1 MB \/ 1_000_000 bytes/);
+  assert.doesNotMatch(nginx, /Failed: \{\}/);
+  assert.doesNotMatch(nginx, /2 MB once that location is deployed/);
+  const app = formatReviewSubmitError(413, {
+    error: "diff_too_large",
+    message: "Max diff size is 1000000 bytes (1 MB)",
+  });
+  assert.match(app, /Max diff size is 1000000 bytes \(1 MB\)/);
+  assert.match(app, /no credits were charged/i);
+  assert.equal(
+    formatReviewSubmitError(500, { error: "boom" }),
+    "Failed (HTTP 500): boom",
+  );
+  assert.match(formatReviewSubmitError(502, {}), /did not return a JSON error body/);
+});
+
+test("cmdReview maps submit 413 HTML to a charged-nothing message", async () => {
+  const f = await repoWithReviewDiff("mg-review-413-");
+  await runReviewInRepo(f, async () => {
+    mockReviewFetch([{ status: 413, body: "<html>413 Request Entity Too Large</html>" }]);
+    const captured = await captureReviewOutput(() => cmdReview(["main", "--json"]));
+    assert.ok(captured.error instanceof CommandError);
+    assert.equal(captured.error.exitCode, REVIEW_EXIT.failed);
+    assert.match(captured.error.message, /HTTP 413/);
+    assert.match(captured.error.message, /1 MB \/ 1_000_000 bytes/);
+    assert.doesNotMatch(captured.error.message, /Failed: \{\}/);
+    const envelope = JSON.parse(captured.stdout[0]!);
+    assert.equal(envelope.status, "failed");
+  });
+});
+
+
+test("cmdReview interactive attributes credits to this job despite concurrent account spend (#1994)", async () => {
+  const f = await repoWithReviewDiff("mg-review-job-credits-");
+  await runReviewInRepo(f, async () => {
+    originalFetch = globalThis.fetch;
+    let remaining = 10;
+    let meCalls = 0;
+    globalThis.fetch = async (input, init) => {
+      let body: unknown;
+      let status = 200;
+      if (String(input).endsWith("/api/v1/me")) {
+        meCalls += 1;
+        body = { usage: { standard: { used: 10 - remaining, limit: 10, remaining } } };
+      } else if (init?.method === "POST") {
+        body = { job_id: "job_credits", status: "queued" };
+        status = 202;
+      } else {
+        // This review spends 2 credits while another job spends 3.
+        remaining -= 5;
+        body = {
+          status: "completed",
+          verdict: "comment",
+          credits: { standard: 2 },
+        };
+      }
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+    const captured = await captureReviewOutput(() =>
+      cmdReview(["main"], { interactive: true, pollIntervalMs: 1 }),
+    );
+    assert.equal(captured.error, null);
+    assert.equal(meCalls, 1);
+    assert.equal(remaining, 5);
+    const output = captured.stdout.join("\n");
+    assert.match(output, /2 credits used · 5 remaining/);
+    assert.doesNotMatch(output, /5 credits used/);
+  });
+});
+
+test("collectReviewInput keeps symlink cwd pathspecs inside the canonical repository", async () => {
+  const { root, repo } = await repoWithTrunk("review-symlink-", "main");
+  try {
+    execFileSync("git", ["checkout", "-q", "-b", "feature"], { cwd: repo });
+    await writeFile(path.join(repo, "file[1].ts"), "export const changed = true;\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "change"], { cwd: repo });
+    const logicalCwd = path.join(root, "logical");
+    await symlink(repo, logicalCwd, "dir");
+    const physicalCwd = await realpath(logicalCwd);
+    assert.notEqual(logicalCwd, physicalCwd);
+    const physical = await collectReviewInput("main", "HEAD", physicalCwd, physicalCwd);
+    const logical = await collectReviewInput("main", "HEAD", logicalCwd, physicalCwd);
+    assert.ok(logical);
+    assert.deepEqual(logical, physical);
+    assert.match(logical.diff, /diff --git a\/file\[1\]\.ts b\/file\[1\]\.ts/);
+    assert.deepEqual(logical.files.map((file) => file.path), ["file[1].ts"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test("collection does not execute external diff or textconv helpers", async () => {
+  const { root, repo } = await repoWithTrunk("review-read-only-", "main");
+  try {
+    execFileSync("git", ["checkout", "-q", "-b", "feature"], { cwd: repo });
+    await writeFile(path.join(repo, "README.md"), "changed fixture\n");
+    execFileSync("git", ["commit", "-qam", "change"], { cwd: repo });
+    const marker = path.join(repo, "helper-ran");
+    const helper = path.join(repo, "helper.sh");
+    await writeFile(helper, "#!/bin/sh\ntouch helper-ran\nprintf 'helper output\\n'\n", { mode: 0o755 });
+    const configure = (key: string, value: string) =>
+      execFileSync("git", ["config", key, value], { cwd: repo });
+    for (const kind of ["external", "driver", "textconv"]) {
+      if (kind === "external") configure("diff.external", helper);
+      else {
+        if (kind === "driver") {
+          execFileSync("git", ["config", "--unset", "diff.external"], { cwd: repo });
+          await writeFile(path.join(repo, ".gitattributes"), "README.md diff=fixture\n");
+          configure("diff.fixture.command", helper);
+        } else {
+          execFileSync("git", ["config", "--unset", "diff.fixture.command"], { cwd: repo });
+          configure("diff.fixture.textconv", helper);
+        }
+      }
+      const input = await collectReviewInput("main", "HEAD", repo);
+      assert.ok(input);
+      assert.match(input.diff, /[+]changed fixture/);
+      assert.deepEqual(input.files, [{ path: "README.md", content: "changed fixture\n" }]);
+      await assert.rejects(access(marker), { code: "ENOENT" });
+      // Prove the configured helper would run without the collection flags.
+      execFileSync("git", ["diff", "main...HEAD"], { cwd: repo });
+      await access(marker);
+      await rm(marker);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("loadReviewContext bounds CLI paths to the canonical repo and preserves MCP bounds", async () => {
+  const { root, repo } = await repoWithTrunk("review-context-bounds-", "main");
+  try {
+    const nested = path.join(repo, "nested");
+    await mkdir(nested);
+    const outside = path.join(root, "outside.md");
+    await writeFile(outside, "outside\n");
+    await symlink(outside, path.join(repo, "escape.md"));
+    const logical = path.join(root, "logical");
+    await symlink(repo, logical, "dir");
+    for (const cwd of [repo, logical]) {
+      for (const contextPath of [outside, "../outside.md", "escape.md"]) {
+        await assert.rejects(
+          loadReviewContext({ cwd, contextFiles: [contextPath] }),
+          /must be inside the repo root/,
+        );
+      }
+      await assert.rejects(
+        loadReviewContext({ cwd, contextFiles: ["missing.md"] }),
+        /could not read --context-file missing\.md: ENOENT/,
+      );
+      const loaded = await loadReviewContext({
+        cwd: path.join(cwd, "nested"), contextFiles: ["../README.md"],
+      });
+      assert.equal(loaded.contextFiles?.[0]?.content, "fixture\n");
+    }
+    await assert.rejects(
+      loadReviewContext({ cwd: nested, sandboxCwd: nested, contextFiles: ["../README.md"] }),
+      /must be inside the working directory/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -96,6 +96,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.16": [
     "PR loop: verify each finding, prefer a small diff, post mergestorm-loop: dismiss on skip",
   ],
+  "0.3.17": [
+    "nginx 413 names the upload limit instead of Failed: {}",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

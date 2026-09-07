@@ -226,6 +226,8 @@ export type MeResponse = {
   resets_at?: string;
   usage: {
     standard: { used: number; limit: number | null; remaining: number | null };
+    /** Non-expiring credits spent after the monthly standard pool. */
+    bonus?: { remaining: number };
   };
 };
 
@@ -306,6 +308,8 @@ export type PrVortexReview = {
   verdict: string | null;
   summary?: string | null;
   head_sha: string | null;
+  /** Attempt number on this head (#2027). Absent only from servers older than the pass column. */
+  pass?: number;
   review_count: number;
   skip_reason: string | null;
   reviewed_at: string | null;
@@ -313,6 +317,29 @@ export type PrVortexReview = {
   findings: PrReviewFindings | null;
   patch_policy: unknown | null;
 };
+
+/**
+ * Pass selection on the DB-only PR review read (#2027). `pass` names one row;
+ * `afterPass` asks for a later pass (`pass > afterPass`) on the SHA filter.
+ */
+export type PrReviewPassSelector = {
+  pass?: number;
+  afterPass?: number;
+};
+
+export function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+/** Append pass selection and SHA filter to a PR review query. */
+export function applyPrReviewQuery(
+  query: URLSearchParams,
+  opts: PrReviewPassSelector & { afterSha?: string },
+): void {
+  if (opts.afterSha) query.set("after_sha", opts.afterSha);
+  if (opts.pass !== undefined) query.set("pass", String(opts.pass));
+  if (opts.afterPass !== undefined) query.set("after_pass", String(opts.afterPass));
+}
 
 /**
  * Bearer-writable settings keys, mirroring the `/api/v1/settings` allowlist.
@@ -479,7 +506,7 @@ export async function getPrVortexReview(
   repo: string,
   prNumber: number,
   cfg?: Config,
-  opts?: { signal?: AbortSignal; timeoutMs?: number },
+  opts?: { signal?: AbortSignal; timeoutMs?: number; afterSha?: string } & PrReviewPassSelector,
 ): Promise<PrVortexReview> {
   const resolved = cfg ?? (await loadConfig());
   const cleanOwner = owner.trim();
@@ -492,6 +519,7 @@ export async function getPrVortexReview(
     repo: cleanRepo,
     pr_number: String(prNumber),
   });
+  applyPrReviewQuery(query, opts ?? {});
   const { status, body, retryAfterSeconds } = await apiFetch(
     resolved,
     `/api/v1/stacks/pr-review?${query.toString()}`,
@@ -625,7 +653,7 @@ export async function adoptStack(
   policy?: StackPolicyPatch,
 ): Promise<unknown> {
   const resolved = cfg ?? (await loadConfig());
-  const { status, body } = await apiFetch(resolved, "/api/v1/stacks/adopt", {
+  const { status, body, retryAfterSeconds } = await apiFetch(resolved, "/api/v1/stacks/adopt", {
     method: "POST",
     json: {
       owner,
@@ -637,6 +665,14 @@ export async function adoptStack(
   if (status === 404) {
     throw new CommandError(
       "Stacks API is not available on this server yet. Deploy the API update or use the dashboard.",
+    );
+  }
+  if (status === 429) {
+    throw new CommandError(
+      rateLimitedMessage(retryAfterSeconds),
+      REVIEW_EXIT.rate_limited,
+      "rate_limited",
+      { retryAfterSeconds },
     );
   }
   if (status !== 200) {

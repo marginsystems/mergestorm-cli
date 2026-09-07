@@ -144,6 +144,26 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
   };
 }
 
+async function captureStackOutput(
+  fn: () => Promise<void>,
+): Promise<{ stdout: string[]; stderr: string[]; error: unknown }> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...args: unknown[]) => stdout.push(args.map(String).join(" "));
+  console.error = (...args: unknown[]) => stderr.push(args.map(String).join(" "));
+  try {
+    await fn();
+    return { stdout, stderr, error: null };
+  } catch (error) {
+    return { stdout, stderr, error };
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+}
+
 test("parseStackCreateArgs parses name, onto, trunk, extend, json", () => {
   assert.deepEqual(parseStackCreateArgs(["feat/foo", "--onto", "main", "--json"]), {
     name: "feat/foo",
@@ -786,6 +806,48 @@ test("cmdStackSubmit opens a 3-layer stack onto the park freeze for PR3", async 
     { autoEnqueueWhenReady: true },
   ]);
   assert.deepEqual(h.adoptStackIds, [STACK_A, STACK_A]);
+});
+
+test("cmdStackSubmit --json stdout is one JSON value without park/push progress (#2036)", async () => {
+  const meta: StackMeta = {
+    version: 2,
+    trunk: "main",
+    stacks: [
+      {
+        layers: [
+          { branch: "feat/a", parentBranch: "main" },
+          { branch: "feat/b", parentBranch: "feat/a" },
+          { branch: "feat/c", parentBranch: "feat/b" },
+        ],
+      },
+    ],
+    active: 0,
+  };
+  const STACK_A = "11111111-1111-4111-8111-111111111111";
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => structuredClone(meta),
+    ensureUpperPark: async () => ({ freezeBranch: "mg-park-1-g1", created: true }),
+    adoptStack: async (_owner, _repo, prNumber) => ({
+      stack: { id: STACK_A, trunkBranch: "main" },
+      chain: prNumber === 43
+        ? [{ branch: "feat/c", parentBranch: "mg-park-1-g1", prNumber: 43, position: 3 }]
+        : [],
+    }),
+  });
+  const captured = await captureStackOutput(() => cmdStackSubmit(["--json"], h.deps));
+  assert.equal(captured.error, null);
+  const stdout = captured.stdout.join("\n");
+  assert.doesNotMatch(stdout, /Pushing /);
+  assert.doesNotMatch(stdout, /Ensuring upper-park/);
+  assert.doesNotMatch(stdout, /Opening PR /);
+  assert.doesNotMatch(stdout, /Registering stack/);
+  const body = JSON.parse(stdout);
+  assert.equal(body.owner, "acme");
+  assert.equal(body.repo, "widgets");
+  assert.equal(body.stackId, STACK_A);
+  assert.equal(body.trunk, "main");
+  assert.match(captured.stderr.join("\n"), /Pushing /);
+  assert.match(captured.stderr.join("\n"), /Ensuring upper-park/);
 });
 
 test("cmdStackSubmit --extend onto a 2-layer tip mints park then opens onto it", async () => {

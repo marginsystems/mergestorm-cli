@@ -85,7 +85,8 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     summary: "Latest Vortex review for a GitHub PR",
     usage: [
       "mergestorm pr <owner/repo>#<n>  Fetch the latest Vortex PR review",
-      "  [--json] [--wait] [--after-sha <sha>] [--timeout <s>]",
+      "  [--json] [--wait] [--after-sha <sha>] [--pass <n>] [--after-pass <n>] [--timeout <s>]",
+      "  --pass reads one attempt on the head; --after-pass waits for a later one (#2027)",
       "  Also accepts: mergestorm pr <owner/repo> <n>",
     ],
     async run(args, ctx) {

@@ -62,11 +62,11 @@ Default: omit `router` (account setting).
 
 ## Submit
 
-Call `review_submit` on the repo cwd (git collect when `diff` is omitted). Pass one or two sentences of intent in `context`. Pass an ADR or spec as `context_files` when one exists in the repo under review — never from outside it. Do not paste the diff into context.
+Call `review_submit` with `wait: false` (the default) on the repo cwd (git collect when `diff` is omitted). Pass one or two sentences of intent in `context`. Pass an ADR or spec as `context_files` when one exists in the repo under review, never from outside it. Do not paste the diff into context.
 
-Optional: `thread`, `idempotency_key`, `wait`, `timeout_s`. Default wait is 300s; on timeout the tool returns `status: in_progress` and the job id — then call `review_wait`.
+Optional: `thread`, `idempotency_key`, `wait`, `timeout_s`. Submit returns without waiting. Record `job_id` as soon as it returns, then loop `review_wait` with that `job_id` and `timeout_s: 45` until the job finishes. Each call is one 45s slice. On timeout, call `review_wait` again with the same `job_id`. Do not pass 300; hosts drop long MCP calls. Explicit `wait: true` also defaults to one 45s slice.
 
-Use `review_get` or `review_list` to resume a known job.
+Call `review_list` before any resubmit, including when a submit or wait call is interrupted. Resume the existing job with `review_get` or `review_wait`; do not create a second job because a slice died or the submit response was lost.
 
 Status handling:
 

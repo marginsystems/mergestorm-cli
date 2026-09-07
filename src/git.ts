@@ -58,7 +58,7 @@ export async function changedNamesInSandbox(
   // -z disables core.quotePath quoting and NUL-terminates names, so paths with
   // spaces or non-ASCII characters survive the split verbatim.
   const names = git(
-    ["diff", "--name-only", "-z", "--diff-filter=ACMRDT", `${base}...${head}`],
+    ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "--diff-filter=ACMRDT", `${base}...${head}`],
     cwd,
   )
     .split("\0")

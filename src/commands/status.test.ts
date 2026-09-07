@@ -131,6 +131,27 @@ test("cmdStatus pretty prints requested vs run specialists and credits", async (
   assert.doesNotMatch(text, /mergestorm\.review_job\/v1/);
 });
 
+test("cmdStatus sanitizes pretty summaries but preserves raw JSON output", async () => {
+  const rawSummary =
+    'Review completed successfully.\n{"name":"review","arguments":{"base":"main"}}';
+  const row = { ...completedRow, summary: rawSummary };
+  withApiKey();
+  mockStatusFetch([{ status: 200, body: row }]);
+
+  const pretty = await captureStatusOutput(() =>
+    cmdStatus(["job_done", "--pretty"]),
+  );
+  assert.equal(pretty.error, null);
+  assert.match(pretty.stdout.join("\n"), /Review completed successfully\./);
+  assert.doesNotMatch(pretty.stdout.join("\n"), /"arguments"/);
+
+  const json = await captureStatusOutput(() =>
+    cmdStatus(["job_done", "--json"]),
+  );
+  assert.equal(json.error, null);
+  assert.equal(JSON.parse(json.stdout[0]!).summary, rawSummary);
+});
+
 test("cmdStatus --json --wait polls queued then completed", async () => {
   withApiKey();
   const mock = mockStatusFetch([

@@ -10,6 +10,7 @@ import {
 } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
 import { renderFindings, type ReviewFindings } from "../ui/findings.js";
+import { humanSummary } from "../ui/human-summary.js";
 import {
   toReviewJobEnvelope,
   type ReviewEnvelopeFallbacks,
@@ -107,7 +108,8 @@ function printPretty(row: ReviewJobRow): void {
   if (envelope.credits) {
     console.log(`Credits:   ${envelope.credits.standard} standard`);
   }
-  if (envelope.summary) console.log(envelope.summary);
+  const summary = envelope.summary ? humanSummary(envelope.summary) : null;
+  if (summary) console.log(summary);
   if (envelope.error) console.log(ansi.red(`Error: ${envelope.error}`));
   renderFindings(envelope.findings as ReviewFindings | null | undefined, {
     emptyMessage: envelope.status === "completed",

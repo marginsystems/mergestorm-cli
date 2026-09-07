@@ -10,6 +10,7 @@ import {
 import { discoverTrunk } from "../git-stack.js";
 import { ansi } from "../ui/ansi.js";
 import { formatFindingsLines, type ReviewFindings } from "../ui/findings.js";
+import { humanSummary } from "../ui/human-summary.js";
 import { present } from "../ui/present.js";
 import {
   toReviewJobEnvelope,
@@ -27,6 +28,7 @@ import {
   isTransientReviewPollStatus,
   loadReviewContext,
   pollReview,
+  formatReviewSubmitError,
   submitReview,
 } from "./review-client.js";
 
@@ -334,7 +336,6 @@ export async function cmdReview(args: string[], opts: ReviewOptions = {}): Promi
 
   try {
     const cfg = await loadConfig();
-    const meBefore = interactive ? await getMe(cfg) : null;
     progress(`Collecting diff ${base}...${head} …`);
     const input = await collectReviewInput(base, head);
     if (!input) {
@@ -400,7 +401,7 @@ export async function cmdReview(args: string[], opts: ReviewOptions = {}): Promi
       });
     }
     if (submitted.status !== 202 && submitted.status !== 200) {
-      const message = `Failed: ${JSON.stringify(submitted.row, null, 2)}`;
+      const message = formatReviewSubmitError(submitted.status, submitted.row);
       if (json) printJson(submitted.row, { status: "failed", error: message });
       throw new CommandError(message, REVIEW_EXIT.failed, "review_failed");
     }
@@ -490,26 +491,23 @@ export async function cmdReview(args: string[], opts: ReviewOptions = {}): Promi
       `Verdict: ${ansi.bold(row.verdict ?? "comment")}`,
     ];
     if (ran.length > 0) result.push(ansi.dim(`Specialists: ${ran.join(", ")}`));
-    if (row.summary) result.push(row.summary);
+    const summary = row.summary ? humanSummary(row.summary) : null;
+    if (summary) result.push(summary);
     result.push(
       ...formatFindingsLines(row.findings as ReviewFindings | null | undefined, {
         emptyMessage: true,
       }),
     );
-    if (interactive && meBefore) {
-      const meAfter = await getMe(cfg);
-      if (meAfter) {
-        const beforeLeft = meBefore.usage.standard.remaining ?? 0;
-        const afterLeft = meAfter.usage.standard.remaining ?? 0;
-        const used = Math.max(0, beforeLeft - afterLeft);
-        if (used > 0) {
-          result.push(
-            ansi.dim(
-              `${used} credit${used === 1 ? "" : "s"} used · ${afterLeft} remaining`,
-            ),
-          );
-        }
+    if (interactive) {
+      const me = await getMe(cfg);
+      const used = row.credits?.standard;
+      const remaining = me?.usage.standard.remaining;
+      const credits: string[] = [];
+      if (used != null) {
+        credits.push(`${used} credit${used === 1 ? "" : "s"} used`);
       }
+      if (remaining != null) credits.push(`${remaining} remaining`);
+      if (credits.length > 0) result.push(ansi.dim(credits.join(" · ")));
     }
     await present("Review", result);
   } catch (err) {

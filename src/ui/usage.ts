@@ -98,11 +98,6 @@ export function formatDaysLeft(iso: string | null | undefined, now = new Date())
   return "resets soon";
 }
 
-/** Alias kept for callers that still import `formatResetDate`. */
-export function formatResetDate(iso: string | null | undefined): string {
-  return formatResetLabel(iso);
-}
-
 /** Bar cells so `  [bar] 100% used` stays inside the terminal. */
 export function usageBarWidth(columns: number): number {
   return Math.max(8, frameWidth(80, columns) - 13);
@@ -121,6 +116,7 @@ export type UsagePanelInput = {
   plan: string;
   used: number;
   limit: number | null;
+  bonusRemaining?: number;
   resetsAt: string | null | undefined;
   jobs: UsagePanelJob[];
   /** When the jobs fetch failed, show this instead of "No review jobs yet." */
@@ -150,6 +146,9 @@ export function formatUsagePanel(input: UsagePanelInput): string[] {
     `  ${identity}`,
     `  ${bar}`,
     `  ${formatResetLabel(input.resetsAt)}`,
+    ...(input.bonusRemaining == null
+      ? []
+      : [`  Bonus credits: ${input.bonusRemaining} remaining`]),
     "",
   ];
 

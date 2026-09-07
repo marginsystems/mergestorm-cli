@@ -14,6 +14,7 @@ import { BEARER_SETTINGS_LABELS } from "../automation-catalog.js";
 import { apiBase, keyDisplay, loadConfig, resolveApiKey } from "../config.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
+import { humanSummary } from "../ui/human-summary.js";
 import {
   toReviewJobEnvelope,
   type ReviewJobRow,
@@ -123,9 +124,10 @@ export function formatJobDetailLines(row: ReviewJobRow): string[] {
   }
   if (e.credits) lines.push(`  Credits  ${e.credits.standard} standard`);
   if (e.error) lines.push(ansi.red(`  Error    ${e.error}`));
-  if (e.summary) {
+  const summary = e.summary ? humanSummary(e.summary) : null;
+  if (summary) {
     lines.push("");
-    for (const l of e.summary.split("\n")) lines.push(`  ${l}`);
+    for (const l of summary.split("\n")) lines.push(`  ${l}`);
   }
   const inline = e.findings?.inline ?? [];
   const off = e.findings?.off_diff ?? e.findings?.offDiff ?? [];
@@ -249,6 +251,7 @@ export async function openTabsBrowser(initial: TabId): Promise<void> {
           plan: me.plan_label_key ?? me.plan_key,
           used: me.usage.standard.used,
           limit: me.usage.standard.limit,
+          bonusRemaining: me.usage.bonus?.remaining,
           resetsAt: me.resets_at,
           jobs: jobs.slice(0, 5).map(toPanelJob),
           jobsError: jobsError ?? undefined,

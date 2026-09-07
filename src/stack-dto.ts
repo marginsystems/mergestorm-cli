@@ -1,3 +1,12 @@
+export type RestackError = {
+  kind: "rebase_conflict" | "checkout_failed" | "head_unresolved" | "push_failed";
+  detail: string;
+  headSha: string;
+  attemptedAt: string;
+  attempts: number;
+  backupRef: string | null;
+};
+
 /**
  * Wire types returned by the stack list/enrich HTTP endpoints.
  *
@@ -29,14 +38,19 @@ export type StackReviewStatus =
   | "none"
   | "unknown";
 
-/** `failed` is the newest Vortex `pr_reviews` row. Work paints Review failed. */
+/**
+ * `failed` is the newest Vortex `pr_reviews` row. Work paints Review failed.
+ * `incomplete` is a posted verdict whose head still has unreviewed files
+ * (#1947): Work paints Incomplete, never Reviewed or all clear.
+ */
 export type StackVortexStatus =
   | "reviewing"
   | "seam_pending"
   | "all_clear"
   | "findings"
   | "throttled"
-  | "failed";
+  | "failed"
+  | "incomplete";
 
 export type StackCycloneStatus = "patching" | "awaiting_fix";
 
@@ -70,6 +84,12 @@ export type StackAgentRun = {
    * Only on resting Vortex `findings` runs.
    */
   findingCount?: number | null;
+  /**
+   * File coverage at the posted head from `vortex_pr_review_state.file_states`
+   * (#1947): files reviewed at this head over all changed files. Only on
+   * resting Vortex `incomplete` runs, so the chip tooltip can say 21/32.
+   */
+  coverage?: { reviewed: number; total: number } | null;
 };
 
 export type StackLayerChecks = {
@@ -154,6 +174,7 @@ export type StackLayerDto = {
    */
   agentRuns?: StackAgentRun[];
   conflictDetail: string | null;
+  restackError?: RestackError | null;
   lastRestackedSha: string | null;
   /** GitHub PR mergeability from enrich; null when unknown. */
   mergeable: boolean | null;
@@ -246,6 +267,8 @@ export type StackUnitDto = {
   landPr: StackLayerDto | null;
 };
 
+export type CycloneOwnerMatch = "same" | "different" | "none" | "lookup_failed";
+
 export type StackDto = {
   id: string;
   owner: string;
@@ -273,6 +296,26 @@ export type StackDto = {
    * account `auto_patch_enabled` flag; a boolean wins in both directions.
    */
   autoPatchOverride?: boolean | null;
+  /**
+   * Bearer / stack-row user. Cyclone apply follows this user's auto-patch
+   * policy and credits for an adopted stack (HOUSE-1), even when
+   * `cycloneInstallUserId` is a different Mergestorm account on a shared repo
+   * (LOOP-5).
+   */
+  keyUserId?: string;
+  /**
+   * Cyclone GitHub App install user for this owner/repo, when resolved. Its
+   * installation clones and pushes; it does not decide auto-patch for another
+   * user's stack.
+   */
+  cycloneInstallUserId?: string | null;
+  /**
+   * `same`: the only Cyclone install user is the key user.
+   * `different`: a Cyclone install user is not the key user (or more than one).
+   * `none`: no Cyclone install monitors this repo.
+   * `lookup_failed`: the comparison could not be loaded. Fail closed.
+   */
+  cycloneOwnerMatch?: CycloneOwnerMatch;
   layers: StackLayerDto[];
   /** Present when a review-unit row exists for this stack. */
   unit?: StackUnitDto;

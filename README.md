@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.16`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.17`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│ ▟██▛  mergestorm v0.3.16                                                     │
+│ ▟██▛  mergestorm v0.3.17                                                     │
 │  ▜▙   ● msk_live_…  · maelstrom                                              │
 │       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used · Resets Sep 5, 10:53am (UTC)│
 │                                                                              │
 │       review a diff · usage for tabs · /help for all commands                │
-│       New in v0.3.16: verify findings, small diff, public dismiss on skip    │
+│       New in v0.3.17: nginx 413 names the upload limit instead of Failed: {} │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮

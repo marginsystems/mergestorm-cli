@@ -90,6 +90,7 @@ export {
   PrReviewPollTimeoutError,
   ReviewPollTimeoutError,
   collectReviewInput,
+  formatReviewSubmitError,
   isTransientReviewPollError,
   isTransientReviewPollStatus,
   loadReviewContext,
@@ -111,3 +112,5 @@ export {
   type ReviewJobEnvelope,
   type ReviewJobRow,
 } from "../ui/job-envelope.js";
+
+export { discoverTrunk } from "../git-stack.js";

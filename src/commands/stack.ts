@@ -750,6 +750,10 @@ export async function cmdStackSubmit(
   deps: StackSubmitDeps = {},
 ): Promise<void> {
   const { extend, autoLand, autoReview, autoPatch, asJson } = parseStackSubmitArgs(args);
+  const progress = (message: string) => {
+    if (asJson) console.error(message);
+    else console.log(message);
+  };
   const cwd = deps.cwd ?? process.cwd();
   const gitTopLevelFn = deps.gitTopLevel ?? gitTopLevel;
   const loadStackMetaFn = deps.loadStackMeta ?? loadStackMeta;
@@ -856,7 +860,7 @@ export async function cmdStackSubmit(
     if (!branchExistsFn(layer.branch, cwd)) {
       throw new CommandError(`Stack layer branch missing locally: ${layer.branch}`);
     }
-    console.log(ansi.dim(`  Pushing ${layer.branch} …`));
+    progress(ansi.dim(`  Pushing ${layer.branch} …`));
     try {
       pushBranchFn(layer.branch, cwd);
     } catch (err) {
@@ -873,7 +877,7 @@ export async function cmdStackSubmit(
   const openLayerPr = (branch: string, base: string): { prNumber: number; created: boolean } => {
     const existing = findOpenPrNumberFn(owner, repo, branch, cwd);
     if (existing != null) {
-      console.log(ansi.dim(`  PR #${existing} already open for ${branch}`));
+      progress(ansi.dim(`  PR #${existing} already open for ${branch}`));
       return { prNumber: existing, created: false };
     }
     const aheadRef = isMgParkBranch(base) ? `origin/${base}` : base;
@@ -902,7 +906,7 @@ export async function cmdStackSubmit(
     }
     const title = tipCommitSubjectFn(branch, cwd);
     const body = buildPrBodyFn(tipCommitMessageFn(branch, cwd));
-    console.log(ansi.dim(`  Opening PR ${branch} → ${base} …`));
+    progress(ansi.dim(`  Opening PR ${branch} → ${base} …`));
     return {
       prNumber: createPrFn({
         owner,
@@ -936,7 +940,7 @@ export async function cmdStackSubmit(
   let stackId = plans.find((plan) => plan.stackId)?.stackId ?? null;
 
   const registerPr = async (prNumber: number): Promise<void> => {
-    console.log(ansi.dim(`  Registering stack via import (${owner}/${repo}#${prNumber}) …`));
+    progress(ansi.dim(`  Registering stack via import (${owner}/${repo}#${prNumber}) …`));
     const body = await adoptStackFn(owner, repo, prNumber, cfg, policy);
     if (typeof body !== "object" || body === null) {
       throw new CommandError("Unexpected response shape from adopt API");
@@ -963,7 +967,7 @@ export async function cmdStackSubmit(
         "Cannot mint a park freeze before the stack is registered. Open layers 1–2 first, then retry.",
       );
     }
-    console.log(ansi.dim(`  Ensuring upper-park freeze for stack ${stackId} …`));
+    progress(ansi.dim(`  Ensuring upper-park freeze for stack ${stackId} …`));
     const park = await ensureUpperParkFn(stackId, cfg);
     for (const plan of pendingPark) {
       const { prNumber, created } = openLayerPr(plan.branch, park.freezeBranch);

@@ -110,6 +110,8 @@ describe("pr", { concurrency: false }, () => {
       format: "json",
       wait: false,
       afterSha: undefined,
+      pass: undefined,
+      afterPass: undefined,
       timeoutMs: 480_000,
     });
     assert.equal(parsePrArgs(["acme/widgets", "12"]).prNumber, 12);
@@ -313,3 +315,55 @@ describe("pr", { concurrency: false }, () => {
     assert.equal(captured.error.code, "review_timeout");
   });
 });
+
+for (const flag of ["--pass", "--after-pass"]) {
+  test(`${flag} parses both forms and rejects invalid selectors`, () => {
+    const key = flag === "--pass" ? "pass" : "afterPass";
+    const validArgs = ["acme/widgets#12", "--wait", "--after-sha", "abc123d"];
+    assert.equal(parsePrArgs([...validArgs, flag, "2"])[key], 2);
+    assert.equal(parsePrArgs([...validArgs, `${flag}=3`])[key], 3);
+    for (const value of ["", "0", "-1", "1.5", "1e3", "two", "9007199254740992"]) {
+      assert.throws(() => parsePrArgs([...validArgs, flag, value]), /positive integer/);
+    }
+    assert.throws(() => parsePrArgs([...validArgs, flag]), /positive integer/);
+  });
+}
+
+test("pass selectors are exclusive", () => {
+  assert.throws(() => parsePrArgs(["acme/widgets#12", "--pass=2", "--after-pass=1"]), /exclusive/);
+});
+
+for (const flag of ["--pass", "--after-pass"]) {
+  test(`${flag} requires wait and after-sha`, () => {
+    assert.throws(
+      () => parsePrArgs(["acme/widgets#12", flag, "2"]),
+      /require --wait --after-sha/,
+    );
+  });
+}
+
+for (const flag of ["--pass", "--after-pass"]) {
+  test(`wait ${flag} ignores stale or missing pass and preserves the selector through retries`, async () => {
+    withApiKey();
+    const mock = mockPrFetch([
+      { status: 200, body: review("completed") },
+      { status: 200, body: review("completed", "abc123def456", { pass: 1 }) },
+      { status: 404, body: { error: "not_found" } },
+      { status: 200, body: review("in_progress", "abc123def456", { pass: 2 }) },
+      { status: 200, body: review("completed", "abc123def456", { pass: 2, id: "pass-2" }) },
+    ]);
+    const value = flag === "--pass" ? "2" : "1";
+    const captured = await captureOutput(() => cmdPr(
+      ["acme/widgets#12", "--wait", "--after-sha", "abc123d", flag, value],
+      { poll: fakeClock() },
+    ));
+    assert.equal(captured.error, null);
+    assert.equal(mock.calls().length, 5);
+    for (const url of mock.calls()) {
+      const query = new URL(url).searchParams;
+      assert.equal(query.get(flag === "--pass" ? "pass" : "after_pass"), value);
+      assert.equal(query.get("after_sha"), "abc123d");
+    }
+    assert.equal(JSON.parse(captured.stdout[0]!).id, "pass-2");
+  });
+}

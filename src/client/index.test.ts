@@ -8,6 +8,8 @@ test("mergestorm/client exports machine helpers and not TUI renderers", () => {
   assert.equal(typeof client.getReview, "function");
   assert.equal(typeof client.getPrVortexReview, "function");
   assert.equal(typeof client.submitReview, "function");
+  assert.equal(typeof client.formatReviewSubmitError, "function");
+  assert.equal(typeof client.discoverTrunk, "function");
   assert.equal(typeof client.pollReview, "function");
   assert.equal(typeof client.pollPrVortexReview, "function");
   assert.equal(typeof client.loadReviewContext, "function");

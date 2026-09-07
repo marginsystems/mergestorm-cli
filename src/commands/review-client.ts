@@ -1,6 +1,12 @@
 import { readFile, realpath } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import { apiFetch, type PrVortexReview } from "../api.js";
+import {
+  apiFetch,
+  applyPrReviewQuery,
+  isPositiveInteger,
+  type PrReviewPassSelector,
+  type PrVortexReview,
+} from "../api.js";
 import type { Config } from "../config.js";
 import { CommandError, REVIEW_EXIT, isCommandErrorCode, rateLimitedMessage } from "../errors.js";
 import {
@@ -22,6 +28,8 @@ export const REVIEW_POLL_STRETCH_SPAN_MS = 60_000;
 
 /** Same thread slug contract as POST /api/v1/reviews. */
 export const REVIEW_THREAD_SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,119}$/;
+/** Same product limit as `api/src/v1/reviews.ts` `MAX_DIFF_BYTES`. */
+export const MAX_REVIEW_DIFF_BYTES = 1_000_000;
 export const MAX_CONTEXT_TEXT_CHARS = 60_000;
 export const MAX_CONTEXT_FILES = 10;
 export const MAX_CONTEXT_FILE_CHARS = 16_000;
@@ -50,11 +58,13 @@ export async function collectReviewInput(
     if (names.length === 0) {
       diff = "";
     } else {
-      const root = repoRoot(cwd);
+      const canonicalCwd = await realpath(cwd);
+      const root = repoRoot(canonicalCwd);
       const specs = names.map(
-        (name) => `:(literal)${relative(cwd, join(root, name))}`,
+        (name) => `:(literal)${relative(canonicalCwd, join(root, name))}`,
       );
-      diff = git(["diff", `${base}...${head}`, "--", ...specs], cwd);
+      // Collection must not execute configured diff or text conversion helpers.
+      diff = git(["diff", "--no-ext-diff", "--no-textconv", `${base}...${head}`, "--", ...specs], cwd);
     }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -101,7 +111,7 @@ export type LoadReviewContextOptions = {
   contextFiles: string[];
   cwd?: string;
   readStdin?: () => Promise<string>;
-  /** Reject contextFiles that resolve outside this directory (agent-driven callers). */
+  /** Bound contextFiles to this directory; defaults to the canonical repo root. */
   sandboxCwd?: string;
 };
 
@@ -149,27 +159,28 @@ export async function loadReviewContext(
   let total = 0;
   for (const rawPath of opts.contextFiles) {
     const abs = resolve(cwd, rawPath);
-    if (opts.sandboxCwd) {
-      let sandboxReal: string;
-      let targetReal: string;
-      try {
-        [sandboxReal, targetReal] = await Promise.all([
-          realpath(resolve(opts.sandboxCwd)),
-          realpath(abs),
-        ]);
-      } catch {
-        throw contextUsage(
-          `--context-file ${rawPath} must be inside the working directory`,
-        );
-      }
-      const relToSandbox = relative(sandboxReal, targetReal);
-      if (relToSandbox === ".." || relToSandbox.startsWith(`..${sep}`)) {
-        throw contextUsage(`--context-file ${rawPath} must be inside the working directory`);
-      }
+    const boundaryLabel = opts.sandboxCwd ? "working directory" : "repo root";
+    let targetReal: string;
+    let sandboxReal: string;
+    try {
+      sandboxReal = opts.sandboxCwd ? await realpath(resolve(opts.sandboxCwd)) : repoRoot(cwd);
+    } catch {
+      throw contextUsage(
+        `--context-file ${rawPath} must be inside the ${boundaryLabel}`,
+      );
+    }
+    try {
+      targetReal = await realpath(abs);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw contextUsage(`could not read --context-file ${rawPath}: ${detail}`);
+    }
+    if (targetReal !== sandboxReal && !targetReal.startsWith(`${sandboxReal}${sep}`)) {
+      throw contextUsage(`--context-file ${rawPath} must be inside the ${boundaryLabel}`);
     }
     let content: string;
     try {
-      content = await readFile(abs, "utf8");
+      content = await readFile(targetReal, "utf8");
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       throw contextUsage(`could not read --context-file ${rawPath}: ${detail}`);
@@ -223,6 +234,38 @@ export async function submitReview(
     row: body && typeof body === "object" ? (body as ReviewJobRow) : {},
     ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
   };
+}
+
+function reviewSubmitErrorText(body: unknown): string {
+  if (body && typeof body === "object") {
+    const rec = body as Record<string, unknown>;
+    const message = typeof rec.message === "string" ? rec.message.trim() : "";
+    const error = typeof rec.error === "string" ? rec.error.trim() : "";
+    if (message) return message;
+    if (error) return error;
+  }
+  if (typeof body === "string") {
+    const trimmed = body.trim();
+    if (trimmed && !trimmed.startsWith("<")) return trimmed.slice(0, 240);
+  }
+  return "";
+}
+
+/**
+ * Human copy for a failed POST /api/v1/reviews.
+ * nginx 413 is HTML, so `submitReview` stores `{}` and used to print `Failed: {}`.
+ */
+export function formatReviewSubmitError(status: number, body: unknown): string {
+  const detail = reviewSubmitErrorText(body);
+  if (status === 413) {
+    if (detail) return `${detail} No review job was created and no credits were charged.`;
+    return (
+      "Upload rejected (HTTP 413). nginx stopped the body before a review job was created, " +
+      "so no credits were charged. Max diff size is 1 MB / 1_000_000 bytes."
+    );
+  }
+  if (detail) return `Failed (HTTP ${status}): ${detail}`;
+  return `Failed (HTTP ${status}). The API did not return a JSON error body.`;
 }
 
 /** Exponential backoff with jitter in `[0.5, 1.0]` of the base delay. */
@@ -334,9 +377,10 @@ export type PollReviewOptions = {
   random?: () => number;
 };
 
-export type PollPrVortexReviewOptions = PollReviewOptions & {
-  afterSha?: string;
-};
+export type PollPrVortexReviewOptions = PollReviewOptions &
+  PrReviewPassSelector & {
+    afterSha?: string;
+  };
 
 function shaMatches(actual: string | null | undefined, expected: string): boolean {
   const left = actual?.trim().toLowerCase() ?? "";
@@ -365,7 +409,10 @@ export async function pollPrVortexReview(
     repo,
     pr_number: String(prNumber),
   });
-  if (opts.afterSha) query.set("after_sha", opts.afterSha);
+  // #2027: the pass selector is fixed for the whole wait. after_pass stays
+  // what the caller handed in on every poll and every retry; it is never
+  // replaced by the pass of an in-progress envelope seen along the way.
+  applyPrReviewQuery(query, opts);
   let transientFailures = 0;
   let lastEnvelope: PrVortexReview | null = null;
 
@@ -460,7 +507,19 @@ export async function pollPrVortexReview(
         "review_failed",
       );
     }
-    lastEnvelope = poll.body as PrVortexReview;
+    const envelope = poll.body as PrVortexReview;
+    // The server filters by pass; re-check here so a server that ignores the
+    // selector can never satisfy the wait with the wrong pass.
+    if (
+      (opts.pass !== undefined || opts.afterPass !== undefined) &&
+      (!isPositiveInteger(envelope.pass) || (opts.pass !== undefined && envelope.pass !== opts.pass) ||
+        (opts.afterPass !== undefined && envelope.pass <= opts.afterPass))
+    ) {
+      opts.onTick?.("progress");
+      await sleepBeforePoll();
+      continue;
+    }
+    lastEnvelope = envelope;
     const resting = (lastEnvelope.raw_status ?? lastEnvelope.status) !== "in_progress";
     const matches = !opts.afterSha || shaMatches(lastEnvelope.head_sha, opts.afterSha);
     if (resting && matches) return lastEnvelope;

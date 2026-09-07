@@ -3,6 +3,7 @@ import { loadConfig } from "../config.js";
 import { CommandError, REVIEW_EXIT } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
 import { renderFindings, type ReviewFindings } from "../ui/findings.js";
+import { humanSummary } from "../ui/human-summary.js";
 import {
   PrReviewPollTimeoutError,
   REVIEW_POLL_DEFAULT_TIMEOUT_MS,
@@ -12,7 +13,7 @@ import {
 import { parseAdoptTarget } from "./stack.js";
 
 const PR_USAGE =
-  "usage: mergestorm pr <owner/repo>#<n> [--json] [--wait] [--after-sha <sha>] [--timeout <s>]";
+  "usage: mergestorm pr <owner/repo>#<n> [--json] [--wait] [--after-sha <sha>] [--pass <n>] [--after-pass <n>] [--timeout <s>]";
 
 export type ParsedPrArgs = {
   owner: string;
@@ -21,8 +22,20 @@ export type ParsedPrArgs = {
   format: "json" | "pretty";
   wait: boolean;
   afterSha?: string;
+  /** Exact pass on the head (#2027). */
+  pass?: number;
+  /** Only a pass later than this one on the head (#2027). */
+  afterPass?: number;
   timeoutMs: number;
 };
+
+function parsePassFlag(flag: "--pass" | "--after-pass", value: string | undefined): number {
+  const parsed = Number(value);
+  if (!value?.trim() || !/^[0-9]+$/.test(value.trim()) || !Number.isSafeInteger(parsed) || parsed < 1) {
+    throw usageError(`${flag} requires a positive integer`);
+  }
+  return parsed;
+}
 
 export type PrOptions = {
   defaultFormat?: "json" | "pretty";
@@ -45,6 +58,8 @@ export function parsePrArgs(
   let format = defaults.format;
   let wait = false;
   let afterSha: string | undefined;
+  let pass: number | undefined;
+  let afterPass: number | undefined;
   let timeoutMs = REVIEW_POLL_DEFAULT_TIMEOUT_MS;
 
   for (let i = 0; i < args.length; i += 1) {
@@ -74,6 +89,17 @@ export function parsePrArgs(
       }
       continue;
     }
+    if (arg === "--pass" || arg.startsWith("--pass=")) {
+      pass = parsePassFlag("--pass", arg === "--pass" ? args[++i] : arg.slice("--pass=".length));
+      continue;
+    }
+    if (arg === "--after-pass" || arg.startsWith("--after-pass=")) {
+      afterPass = parsePassFlag(
+        "--after-pass",
+        arg === "--after-pass" ? args[++i] : arg.slice("--after-pass=".length),
+      );
+      continue;
+    }
     if (arg === "--timeout" || arg.startsWith("--timeout=")) {
       const value = arg === "--timeout" ? args[++i] : arg.slice("--timeout=".length);
       const seconds = Number(value);
@@ -89,6 +115,12 @@ export function parsePrArgs(
   }
 
   if (afterSha && !wait) throw usageError("--after-sha requires --wait");
+  if (pass !== undefined && afterPass !== undefined) {
+    throw usageError("--pass and --after-pass are exclusive");
+  }
+  if ((pass !== undefined || afterPass !== undefined) && (!wait || !afterSha)) {
+    throw usageError("--pass and --after-pass require --wait --after-sha");
+  }
   if (target.length < 1 || target.length > 2) throw usageError();
   let parsed: ReturnType<typeof parseAdoptTarget>;
   try {
@@ -96,7 +128,7 @@ export function parsePrArgs(
   } catch {
     throw usageError();
   }
-  return { ...parsed, format, wait, afterSha, timeoutMs };
+  return { ...parsed, format, wait, afterSha, pass, afterPass, timeoutMs };
 }
 
 function printPretty(envelope: PrVortexReview): void {
@@ -105,7 +137,8 @@ function printPretty(envelope: PrVortexReview): void {
   if (envelope.head_sha) console.log(`Head:          ${envelope.head_sha}`);
   console.log(`Finding count: ${envelope.finding_count}`);
   if (envelope.skip_reason) console.log(`Skip reason:   ${envelope.skip_reason}`);
-  if (envelope.summary) console.log(envelope.summary);
+  const summary = envelope.summary ? humanSummary(envelope.summary) : null;
+  if (summary) console.log(summary);
   renderFindings(envelope.findings as ReviewFindings | null, {
     emptyMessage: envelope.status === "completed",
   });
@@ -128,6 +161,8 @@ export async function cmdPr(args: string[], opts: PrOptions = {}): Promise<void>
           timeoutMs: parsed.timeoutMs,
           intervalMs: opts.pollIntervalMs,
           afterSha: parsed.afterSha,
+          pass: parsed.pass,
+          afterPass: parsed.afterPass,
           signal: opts.signal,
           ...opts.poll,
           onTick(kind) {
@@ -149,7 +184,7 @@ export async function cmdPr(args: string[], opts: PrOptions = {}): Promise<void>
       parsed.repo,
       parsed.prNumber,
       cfg,
-      { signal: opts.signal },
+      { signal: opts.signal, pass: parsed.pass, afterPass: parsed.afterPass },
     );
   }
 

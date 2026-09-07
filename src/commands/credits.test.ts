@@ -39,7 +39,10 @@ function mockCreditsFetch(): void {
           key: { prefix: "msk_live_abcd", name: "laptop", created_at: "2026-08-01T00:00:00Z", last_used_at: null },
           plan_key: "free",
           resets_at: "2026-09-01T00:00:00.000Z",
-          usage: { standard: { used: 7, limit: 100, remaining: 93 } },
+          usage: {
+            standard: { used: 7, limit: 100, remaining: 93 },
+            bonus: { remaining: 12 },
+          },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
@@ -79,11 +82,12 @@ test("credits --json keeps usage and adds recent_jobs", async () => {
   mockCreditsFetch();
   const out = await capture(() => cmdCredits(["--json"]));
   const body = JSON.parse(out) as {
-    usage: { standard: { used: number } };
+    usage: { standard: { used: number }; bonus: { remaining: number } };
     resets_at: string;
     recent_jobs: { job_id: string }[];
   };
   assert.equal(body.usage.standard.used, 7);
+  assert.equal(body.usage.bonus.remaining, 12);
   assert.equal(body.resets_at, "2026-09-01T00:00:00.000Z");
   assert.equal(body.recent_jobs[0]?.job_id, "job_recent_1");
 });
@@ -95,6 +99,7 @@ test("credits pretty panel includes key, plan, and last jobs", async () => {
   const out = await capture(() => cmdCredits([]));
   assert.match(out, /msk_live_abcd · free/);
   assert.match(out, /7% used/);
+  assert.match(out, /Bonus credits: 12 remaining/);
   assert.match(out, /job_rece/);
   assert.match(out, /request_changes/);
 });

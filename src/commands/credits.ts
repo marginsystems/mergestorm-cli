@@ -49,6 +49,7 @@ export async function cmdCredits(args: string[]): Promise<void> {
     plan: me.plan_label_key ?? me.plan_key,
     used: s.used,
     limit: s.limit,
+    bonusRemaining: me.usage.bonus?.remaining,
     resetsAt: me.resets_at,
     jobs: recentJobs.map(toPanelJob),
     columns,
