@@ -54,6 +54,30 @@ async function repoWithTrunk(
   return { root, repo };
 }
 
+test("cmdReview --help prints the 1 MB cap and does not submit", async () => {
+  const captured = await captureReviewOutput(() => cmdReview(["--help"]));
+  assert.equal(captured.error, null);
+  const text = captured.stdout.join("\n");
+  assert.match(text, /usage: mergestorm review/);
+  assert.match(text, /1 MB \/ 1_000_000/);
+  assert.match(text, /HTTP 413/);
+  assert.match(text, /do not create a job/);
+  assert.doesNotMatch(text, /unknown flag/);
+  assert.equal(captured.stderr.join(""), "");
+});
+
+test("parseReviewArgs --help is usage, not unknown flag, and names the 1 MB cap", () => {
+  assert.throws(() => parseReviewArgs(["--help"]), (err: unknown) => {
+    assert.ok(err instanceof CommandError);
+    assert.match(err.message, /1 MB \/ 1_000_000/);
+    assert.match(err.message, /HTTP 413/);
+    assert.match(err.message, /do not create a job/);
+    assert.doesNotMatch(err.message, /unknown flag/);
+    return true;
+  });
+  assert.throws(() => parseReviewArgs(["-h"]), /1 MB \/ 1_000_000/);
+});
+
 test("parseReviewArgs reads router and specialists (#1078)", () => {
   assert.deepEqual(parseReviewArgs(["main", "--router", "max"]), {
     base: "main",

@@ -522,7 +522,10 @@ export async function pollPrVortexReview(
     lastEnvelope = envelope;
     const resting = (lastEnvelope.raw_status ?? lastEnvelope.status) !== "in_progress";
     const matches = !opts.afterSha || shaMatches(lastEnvelope.head_sha, opts.afterSha);
-    if (resting && matches) return lastEnvelope;
+    // MS-01: A resting completion with newer_pass_pending indicates a newer
+    // attempt is in flight. Do not satisfy the wait from this stale result.
+    const stale = lastEnvelope.newer_pass_pending === true;
+    if (resting && matches && !stale) return lastEnvelope;
 
     opts.onTick?.("progress");
     await sleepBeforePoll();

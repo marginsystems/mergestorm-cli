@@ -47,7 +47,19 @@ describe("CLI help exits", { skip: !nodeBin }, () => {
     assert.match(r.stdout, /Usage:/);
     assert.match(r.stdout, /--router/);
     assert.match(r.stdout, /mergestorm queue add/);
+    assert.match(r.stdout, /1 MB \/ 1_000_000/);
+    assert.match(r.stdout, /HTTP 413/);
     assert.equal(r.stderr.trim(), "");
+  });
+
+  it("mergestorm review --help mentions the 1 MB upload cap", () => {
+    const r = runCli(["review", "--help"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /usage: mergestorm review/);
+    assert.match(r.stdout, /1 MB \/ 1_000_000/);
+    assert.match(r.stdout, /HTTP 413/);
+    assert.match(r.stdout, /do not create a job/);
+    assert.doesNotMatch(r.stdout + r.stderr, /unknown flag/);
   });
 
   it("mergestorm help exits 0", () => {

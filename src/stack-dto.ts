@@ -44,6 +44,8 @@ export type StackReviewStatus =
  * (#1947): Work paints Incomplete, never Reviewed or all clear.
  */
 export type StackVortexStatus =
+  | "queued"
+  | "skipped"
   | "reviewing"
   | "seam_pending"
   | "all_clear"
@@ -70,6 +72,8 @@ export type StackAgentRun = {
   status: string;
   /** Full SHA when known. UI shortens to 7. */
   sha: string | null;
+  pass?: number | null;
+  skipReason?: string | null;
   startedAt?: string | null;
   finishedAt?: string | null;
   /**

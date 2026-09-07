@@ -20,6 +20,7 @@ const SETTINGS_BODY = {
   repo_overview_enabled: false,
   review_unit_land_prs_enabled: true,
   cyclone_review_unit_land_prs_enabled: false,
+  cyclone_skip_ci_enabled: true,
   vortex_seam_specialist_enabled: true,
   auto_land_default: false,
 };
@@ -29,6 +30,12 @@ const SETTINGS_BODY = {
 test("parseSettingsArgs maps --auto-patch off to auto_patch_enabled: false", () => {
   const parsed = parseSettingsArgs(["--auto-patch", "off"]);
   assert.deepEqual(parsed, { json: false, patch: { auto_patch_enabled: false } });
+});
+
+test("parseSettingsArgs maps --cyclone-skip-ci off to cyclone_skip_ci_enabled: false", () => {
+  const parsed = parseSettingsArgs(["--cyclone-skip-ci", "off"]);
+  assert.deepEqual(parsed, { json: false, patch: { cyclone_skip_ci_enabled: false } });
+  assert.deepEqual(parseSettingsArgs(["--cyclone-skip-ci=on"]).patch, { cyclone_skip_ci_enabled: true });
 });
 
 test("parseSettingsArgs maps --auto-land on to auto_land_default: true", () => {
@@ -49,6 +56,8 @@ test("parseSettingsArgs collects every flag with both value forms", () => {
     "on",
     "--cyclone-review-unit-land",
     "off",
+    "--cyclone-skip-ci",
+    "off",
     "--vortex-seam=on",
     "--auto-land",
     "on",
@@ -62,6 +71,7 @@ test("parseSettingsArgs collects every flag with both value forms", () => {
     repo_overview_enabled: true,
     review_unit_land_prs_enabled: true,
     cyclone_review_unit_land_prs_enabled: false,
+    cyclone_skip_ci_enabled: false,
     vortex_seam_specialist_enabled: true,
     auto_land_default: true,
   });

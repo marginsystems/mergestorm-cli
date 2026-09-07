@@ -296,6 +296,7 @@ const SETTINGS_BODY = {
   repo_overview_enabled: false,
   review_unit_land_prs_enabled: true,
   cyclone_review_unit_land_prs_enabled: false,
+  cyclone_skip_ci_enabled: true,
   vortex_seam_specialist_enabled: true,
   auto_land_default: false,
 };

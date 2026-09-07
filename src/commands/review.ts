@@ -98,7 +98,8 @@ export type ParsedReviewArgs = {
 };
 
 const REVIEW_USAGE =
-  "usage: mergestorm review [base] [head] [--json] [--wait|--no-wait] [--timeout seconds] [--router off|standard|max|manual] [--specialists id,id] [--context text] [--context-file path] [--idempotency-key k] [--webhook-url https://…] [--thread slug]";
+  "usage: mergestorm review [base] [head] [--json] [--wait|--no-wait] [--timeout seconds] [--router off|standard|max|manual] [--specialists id,id] [--context text] [--context-file path] [--idempotency-key k] [--webhook-url https://…] [--thread slug]\n" +
+  "Uploads over 1 MB / 1_000_000 are rejected with HTTP 413 and do not create a job.";
 
 function usageError(message = REVIEW_USAGE): CommandError {
   return new CommandError(message, REVIEW_EXIT.usage, "usage");
@@ -224,6 +225,9 @@ export function parseReviewArgs(args: string[]): ParsedReviewArgs {
       thread = slug;
       continue;
     }
+    if (a === "-h" || a === "--help") {
+      throw usageError();
+    }
     if (a.startsWith("-")) {
       throw usageError(`unknown flag: ${a}`);
     }
@@ -308,6 +312,10 @@ function asPollCommandError(err: unknown, jobId: string): CommandError {
 }
 
 export async function cmdReview(args: string[], opts: ReviewOptions = {}): Promise<void> {
+  if (args.includes("-h") || args.includes("--help")) {
+    console.log(REVIEW_USAGE);
+    return;
+  }
   const parsed = parseReviewArgs(args);
   const base = resolveReviewBase(parsed.base);
   const head = parsed.head || "HEAD";

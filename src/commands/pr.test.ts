@@ -314,6 +314,44 @@ describe("pr", { concurrency: false }, () => {
     assert.equal(captured.error.exitCode, REVIEW_EXIT.timeout);
     assert.equal(captured.error.code, "review_timeout");
   });
+
+  test("MS-01: wait after-sha continues polling when newer_pass_pending is true", async () => {
+    withApiKey();
+    const mock = mockPrFetch([
+      { status: 200, body: review("completed", "abc123def456", { newer_pass_pending: true }) },
+      { status: 200, body: review("completed", "abc123def456", { newer_pass_pending: true }) },
+      { status: 200, body: review("completed", "abc123def456", { pass: 2 }) },
+    ]);
+    const clock = fakeClock();
+    const captured = await captureOutput(() =>
+      cmdPr(
+        ["acme/widgets#12", "--json", "--wait", "--after-sha", "ABC123DEF"],
+        { poll: clock },
+      ),
+    );
+    assert.equal(captured.error, null);
+    assert.equal(mock.calls().length, 3);
+    const parsed = JSON.parse(captured.stdout[0]!);
+    assert.equal(parsed.pass, 2);
+    assert.equal(parsed.newer_pass_pending, undefined);
+  });
+
+  test("MS-01: wait after-sha times out when newer_pass_pending persists", async () => {
+    withApiKey();
+    mockPrFetch([
+      { status: 200, body: review("completed", "abc123def456", { newer_pass_pending: true }) },
+    ]);
+    const clock = fakeClock();
+    const captured = await captureOutput(() =>
+      cmdPr(
+        ["acme/widgets#12", "--json", "--wait", "--after-sha", "abc1234", "--timeout", "0.01"],
+        { poll: clock },
+      ),
+    );
+    assert.ok(captured.error instanceof CommandError);
+    assert.equal(captured.error.exitCode, REVIEW_EXIT.timeout);
+    assert.equal(captured.error.code, "review_timeout");
+  });
 });
 
 for (const flag of ["--pass", "--after-pass"]) {

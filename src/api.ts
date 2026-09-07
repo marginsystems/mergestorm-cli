@@ -316,6 +316,11 @@ export type PrVortexReview = {
   finding_count: number;
   findings: PrReviewFindings | null;
   patch_policy: unknown | null;
+  /**
+   * MS-01: True when the returned row is a resting completion but a newer
+   * attempt is in flight (active lease). The CLI must continue polling.
+   */
+  newer_pass_pending?: boolean;
 };
 
 /**

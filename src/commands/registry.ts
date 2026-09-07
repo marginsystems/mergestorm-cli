@@ -71,6 +71,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "  [--context text] [--context-file path] [--thread slug]",
       "  [--idempotency-key k] [--webhook-url https://…]",
       "  HTTP 429 exits 7 (rate_limited) with retry_after_seconds",
+      "  Uploads over 1 MB / 1_000_000 are rejected with HTTP 413 and do not create a job",
     ],
     async run(args, ctx) {
       if (ctx.mode === "shell") {
@@ -185,8 +186,8 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "mergestorm settings [--json]    Read the automation toggles (Config tab on a TTY)",
       "  [--auto-review on|off] [--auto-patch on|off] [--vortex-thinking on|off]",
       "  [--repo-overview on|off] [--review-unit-land on|off]",
-      "  [--cyclone-review-unit-land on|off] [--vortex-seam on|off]",
-      "  [--auto-land on|off]            Auto land default for stacks opened after this",
+      "  [--cyclone-review-unit-land on|off] [--cyclone-skip-ci on|off]",
+      "  [--vortex-seam on|off] [--auto-land on|off]  Auto land default for new stacks",
       "  With flags: PATCH those settings and print the stored result",
     ],
     async run(args, ctx) {

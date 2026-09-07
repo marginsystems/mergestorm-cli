@@ -99,6 +99,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.17": [
     "nginx 413 names the upload limit instead of Failed: {}",
   ],
+  "0.3.18": [
+    "pr --wait fences a stale same-head pass",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */
