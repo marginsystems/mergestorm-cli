@@ -9,10 +9,12 @@ Vortex already reviews every push to an open PR on a monitored repo; nothing her
 
 Two worlds, never mixed: reviewing a local branch before a PR exists is the `mergestorm-review` skill. This skill is only for a PR that is already open on GitHub.
 
-## Install (Claude Code / Cursor)
+The account ignore list and check colors live on Settings; manage the list with `mg settings --ignore-bot add <login>|remove <login>|clear`. The ignore list does not change this loop or its rule against setting `auto_patch_enabled` with `settings_set`.
+
+## Install (Claude Code / Cursor / Agents)
 
 ```bash
-mg skill install --claude --cursor
+mg skill install --claude --cursor --agents
 ```
 
 ## Preconditions (in order)
@@ -25,6 +27,7 @@ mg skill install --claude --cursor
 ## Loop (in order)
 
 1. Find the PR's stack with `stack_list` (the stack whose `layers` contain this PR's `prNumber` for this owner/repo). If you already have its `stack_id`, `stack_status` is the same payload.
+   - Adoption needs the Cyclone GitHub App on the account; without it `stack_adopt` returns `cyclone_not_connected` — stop and tell the human, do not retry.
    - If there is no stack and the human asked you to mute Cyclone or continue the loop: call `stack_adopt` with `{ owner, repo, pr_number, auto_patch: false }` (equivalent to `mg stack adopt … --auto-patch off`). Then call `stack_status` with the returned `result.stack.id`, confirm this PR is in the stack and `autoPatchOverride` is `false`. If adoption or verification fails, refuse the loop. Otherwise continue through the ownership check below and the remaining loop steps; do not stop and ask the human to adopt. Do not turn account auto-patch off.
    - Adoption does not fix installer ≠ key. After adoption, the same `cycloneOwnerMatch` refusal below still applies.
    - Read `cycloneOwnerMatch` on that stack. If it is missing, `lookup_failed`, or `different`: refuse the loop. Do not wait, patch, or push. Tell the human the API key and the Cyclone GitHub App install are different Mergestorm accounts (or the comparison could not be loaded). Cyclone still patches as the installer. Do not turn account auto-patch off, and do not set `auto_patch: false` to paper over this.
@@ -53,12 +56,13 @@ mg skill install --claude --cursor
 
 Map these to `mergestorm.pr_review/v1` envelope fields; do not invent statuses.
 
-- `finding_count` is 0 (empty inline and offDiff): stop. Tell the human the PR is clear and that Auto land owns landing. Never merge it yourself.
+- `finding_count` is 0 (empty inline and offDiff): stop. A skipped GitHub review body (account Skip All-clear) is still a completed pass — do not wait for an Approve / All-clear comment. Tell the human the PR is clear and that Auto land owns landing. Never merge it yourself.
 - status is `rate_limited`, or `patch_policy.mode` is `"hold"`: surface the findings to the human and stop. Do not patch.
 - status is `failed`: report to the human. Do not keep pushing to retrigger.
 - status is `in_progress` and the envelope has a `head_sha`: the pass is still running; call `review_wait_pr` again with the same `after_sha` and the same `after_pass`.
 - status is `in_progress` and the envelope has no `head_sha`: the wait timed out before Vortex wrote a pass for your SHA. Call `review_wait_pr` once more with the same `after_sha` and the same `after_pass`. If it comes back the same way a second time in a row, stop and tell the human that Vortex did not pick up the push. Do not push again to retrigger.
-- status is `skipped`, `stopped`, `trial_expired`, or `synced`: surface the status and reason to the human and stop. Do not patch or push.
+- status is `quota_exceeded` (or its legacy spelling `trial_expired`): the account's review credits are used up for this period; tell the human calmly and stop. It is not an error and not a lapsed trial. Do not patch or push.
+- status is `skipped`, `stopped`, or `synced`: surface the status and reason to the human and stop. Do not patch or push.
 
 ## Never
 

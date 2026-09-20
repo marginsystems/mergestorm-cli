@@ -1,6 +1,7 @@
 import {
   adoptStack,
   ensureUpperPark,
+  getEnrichedStack,
   landNextStack,
   listStacks,
   restackStack,
@@ -9,7 +10,7 @@ import {
   type StackPolicyPatch,
 } from "../api.js";
 import { loadConfig } from "../config.js";
-import { CommandError } from "../errors.js";
+import { rateLimitedMessage, REVIEW_EXIT, CommandError } from "../errors.js";
 import { createPr, findOpenPrNumber, requireGh } from "../gh.js";
 import { parseGithubOriginRepo } from "../git.js";
 import {
@@ -39,6 +40,12 @@ import {
   selectStackForCreate,
   setActivePolicy,
 } from "../stack-meta.js";
+import {
+  pollStackWatch,
+  StackWatchError,
+  StackWatchTimeoutError,
+  type StackWatchEnvelope,
+} from "../stack-watch.js";
 import { isMgParkBranch, planSubmitLayerBases } from "../submit-pr-base.js";
 import { ansi } from "../ui/ansi.js";
 import { runLineTabsBrowser } from "../ui/line-tabs.js";
@@ -51,6 +58,8 @@ const STACK_USAGE = `usage:
   mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
   mergestorm stack reset --force
   mergestorm stack list [--json]
+  mergestorm stack status <stack-id> [--json]
+  mergestorm stack wait <stack-id> [--json] [--timeout <s>]
   mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]
   mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
   mergestorm stack restack <stack-id> [--json]
@@ -211,7 +220,7 @@ export function stackPolicyLabels(
   return labels;
 }
 
-function formatStackHuman(s: StackDto): string[] {
+function formatStackHuman(s: StackDto, includeLayers = true): string[] {
   const lines: string[] = [];
   lines.push(
     `  ${ansi.bold(`${s.owner}/${s.repo}`)}  trunk=${s.trunkBranch}` +
@@ -224,6 +233,7 @@ function formatStackHuman(s: StackDto): string[] {
     lines.push(ansi.dim("    (no layers)"));
     return lines;
   }
+  if (!includeLayers) return lines;
   for (const layer of s.layers) {
     const title = layer.title ? ` ${layer.title}` : "";
     const pr = layer.prNumber > 0 ? `#${layer.prNumber}` : "—";
@@ -1062,6 +1072,101 @@ async function cmdStackList(args: string[]): Promise<void> {
   await present("Stacks", listed);
 }
 
+export async function cmdStackWait(
+  args: string[],
+  deps: {
+    loadConfig?: typeof loadConfig;
+    pollStackWatch?: typeof pollStackWatch;
+    signal?: AbortSignal;
+  } = {},
+): Promise<void> {
+  const usage = "usage: mergestorm stack wait <stack-id> [--json] [--timeout <s>]";
+  const positional: string[] = [];
+  let timeoutS = 45;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--json") continue;
+    if (arg === "--timeout" || arg.startsWith("--timeout=")) {
+      const value = arg === "--timeout" ? args[++i] : arg.slice("--timeout=".length);
+      timeoutS = value?.trim() ? Number(value) : NaN;
+      if (!Number.isFinite(timeoutS) || timeoutS < 0 || timeoutS > 300) {
+        throw new CommandError(`${usage}\n--timeout must be between 0 and 300 seconds`, REVIEW_EXIT.usage, "usage");
+      }
+    } else if (arg.startsWith("-")) {
+      throw new CommandError(usage, REVIEW_EXIT.usage, "usage");
+    } else {
+      positional.push(arg);
+    }
+  }
+  if (positional.length !== 1) throw new CommandError(usage, REVIEW_EXIT.usage, "usage");
+  const stackId = requireStackId(positional[0], usage);
+  const cfg = await (deps.loadConfig ?? loadConfig)();
+  const print = (envelope: StackWatchEnvelope, retryAfterSeconds?: number) => console.log(args.includes("--json")
+    ? JSON.stringify({
+      ...envelope,
+      ...(retryAfterSeconds !== undefined ? { retry_after_seconds: retryAfterSeconds } : {}),
+    }, null, 2)
+    : `Stack ${envelope.stackId} · ${envelope.status}${envelope.blocker ? ` · ${envelope.blocker}` : ""}`);
+  try {
+    print(await (deps.pollStackWatch ?? pollStackWatch)(cfg, stackId, {
+      timeoutMs: timeoutS * 1000,
+      signal: deps.signal,
+    }));
+  } catch (err) {
+    if (err instanceof StackWatchError && err.lastEnvelope.status === "rate_limited") {
+      print(err.lastEnvelope, err.retryAfterSeconds);
+      throw new CommandError(
+        rateLimitedMessage(err.retryAfterSeconds),
+        REVIEW_EXIT.rate_limited,
+        "rate_limited",
+        { retryAfterSeconds: err.retryAfterSeconds },
+      );
+    }
+    if (!(err instanceof StackWatchTimeoutError)) throw err;
+    print(err.lastEnvelope);
+    throw new CommandError(err.message, REVIEW_EXIT.timeout, "review_timeout");
+  }
+}
+
+export async function cmdStackStatus(
+  args: string[],
+  deps: {
+    loadConfig?: typeof loadConfig;
+    getEnrichedStack?: typeof getEnrichedStack;
+  } = {},
+): Promise<void> {
+  const usage = "usage: mergestorm stack status <stack-id> [--json]";
+  const positional = args.filter((arg) => arg !== "--json");
+  if (positional.length !== 1) throw new CommandError(usage, 2, "usage");
+  const stackId = requireStackId(positional[0], usage);
+  const cfg = await (deps.loadConfig ?? loadConfig)();
+  const stack = await (deps.getEnrichedStack ?? getEnrichedStack)(stackId, cfg);
+  if (!stack) {
+    throw new CommandError(
+      `Stack not found or not owned by the current user: ${stackId}`,
+      1,
+      "not_found",
+    );
+  }
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(stack, null, 2));
+    return;
+  }
+  const lines = formatStackHuman(stack, false);
+  for (const layer of stack.layers) {
+    const head = layer.headSha ? `@${layer.headSha.slice(0, 7)}` : "";
+    const pr = layer.prNumber > 0 ? `#${layer.prNumber}` : "—";
+    lines.push(
+      `    ${String(layer.position).padStart(2)}  ${pr}${head}  ${layer.state.padEnd(14)}  ${layer.branch}` +
+        `  CI: ${layer.ciStatus ?? "unknown"}  review: ${layer.reviewStatus ?? "unknown"}` +
+        (layer.vortexStatus ? `  Vortex: ${layer.vortexStatus}` : "") +
+        (layer.cycloneStatus ? `  Cyclone: ${layer.cycloneStatus}` : "") +
+        (layer.tempestStatus ? `  Tempest: ${layer.tempestStatus}` : ""),
+    );
+  }
+  await present("Stack status", lines);
+}
+
 export type StackSetDeps = {
   loadConfig?: typeof loadConfig;
   setStackPolicy?: typeof setStackPolicy;
@@ -1202,7 +1307,7 @@ async function cmdStackLand(args: string[]): Promise<void> {
   ]);
 }
 
-export async function cmdStack(args: string[]): Promise<void> {
+export async function cmdStack(args: string[], options: { signal?: AbortSignal } = {}): Promise<void> {
   const sub = args[0]?.toLowerCase();
   const rest = args.slice(1);
   // Help must exit 0 — print usage, do not throw CommandError.
@@ -1218,6 +1323,8 @@ export async function cmdStack(args: string[]): Promise<void> {
   if (sub === "submit") return cmdStackSubmit(rest);
   if (sub === "reset") return cmdStackReset(rest);
   if (sub === "list" || sub === "ls") return cmdStackList(rest);
+  if (sub === "status") return cmdStackStatus(rest);
+  if (sub === "wait") return cmdStackWait(rest, { signal: options.signal });
   if (sub === "set") return cmdStackSet(rest);
   if (sub === "adopt") return cmdStackAdopt(rest);
   if (sub === "restack") return cmdStackRestack(rest);

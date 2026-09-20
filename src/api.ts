@@ -3,7 +3,12 @@ import {
   BEARER_SETTINGS_KEYS as SETTINGS_WRITABLE_KEYS,
   type BearerSettingsKey as SettingsWritableKey,
 } from "./automation-catalog.js";
-import { CommandError, REVIEW_EXIT, rateLimitedMessage } from "./errors.js";
+import {
+  CommandError,
+  REVIEW_EXIT,
+  rateLimitedMessage,
+  type CommandErrorCode,
+} from "./errors.js";
 import type { MergeQueueEntryDto, StackDto } from "./stack-dto.js";
 
 export type {
@@ -353,10 +358,10 @@ export function applyPrReviewQuery(
 export { SETTINGS_WRITABLE_KEYS };
 export type { SettingsWritableKey };
 
-export type SettingsPatch = Partial<Record<SettingsWritableKey, boolean>>;
+export type SettingsPatch = Partial<import("./automation-catalog.js").BearerSettingsValues>;
 
 /** GET and PATCH `/api/v1/settings` both answer with this shape. */
-export type SettingsResponse = Record<SettingsWritableKey, boolean> & {
+export type SettingsResponse = import("./automation-catalog.js").BearerSettingsValues & {
   cyclone_connected: boolean;
   github_connected: boolean;
 };
@@ -681,7 +686,51 @@ export async function adoptStack(
     );
   }
   if (status !== 200) {
-    throw new CommandError(`Failed to import stack (HTTP ${status}): ${JSON.stringify(body)}`);
+    const error =
+      body && typeof body === "object" && "error" in body && typeof body.error === "string"
+        ? body.error
+        : undefined;
+    const message =
+      body && typeof body === "object" && "message" in body && typeof body.message === "string"
+        ? body.message
+        : undefined;
+    const code: CommandErrorCode | undefined =
+      error === "auth_invalid" ||
+      error === "api_timeout" ||
+      error === "not_a_repo" ||
+      error === "not_found" ||
+      error === "missing_api_key" ||
+      error === "registered_parent" ||
+      error === "usage" ||
+      error === "review_quota" ||
+      error === "review_failed" ||
+      error === "review_timeout" ||
+      error === "rate_limited" ||
+      error === "cyclone_not_installed" ||
+      error === "pr_merged" ||
+      error === "pr_closed" ||
+      error === "not_stacked" ||
+      error === "draft" ||
+      error === "reserved_branch" ||
+      error === "supabase_unconfigured" ||
+      error === "cyclone_not_connected" ||
+      error === "busy" ||
+      error === "adopt_failed"
+        ? error
+        : undefined;
+    const fallbackMessage =
+      code === "not_stacked"
+        ? "This pull request is not part of a stack."
+        : code === "supabase_unconfigured"
+          ? "Stacks are not configured on this server."
+          : undefined;
+    throw new CommandError(
+      message?.trim()
+        ? message
+        : fallbackMessage ?? `Failed to import stack (HTTP ${status}): ${JSON.stringify(body)}`,
+      1,
+      code,
+    );
   }
   return body;
 }
@@ -738,6 +787,14 @@ async function stackMutation(
     );
   }
   if (status !== 200) {
+    const rejection = body as { error?: string; message?: unknown } | null;
+    if (method === "PATCH" && rejection?.error === "cyclone_not_connected") {
+      throw new CommandError(
+        typeof rejection.message === "string" ? rejection.message : rejection.error,
+        1,
+        "cyclone_not_connected",
+      );
+    }
     throw new CommandError(`${failLabel} (HTTP ${status}): ${JSON.stringify(body)}`);
   }
   return body;

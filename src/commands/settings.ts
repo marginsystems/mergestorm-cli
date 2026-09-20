@@ -4,23 +4,33 @@ import {
   type SettingsPatch,
   type SettingsResponse,
 } from "../api.js";
-import { BEARER_SETTINGS_FLAGS } from "../automation-catalog.js";
+import { BEARER_SETTINGS, BEARER_SETTINGS_FLAGS } from "../automation-catalog.js";
 import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
 import { present } from "../ui/present.js";
 import { buildConfigRows, canBrowse, openTabsBrowser } from "./browse.js";
 
 /**
- * CLI flag → Bearer settings key. on|off only. The connected flags are
+ * CLI flag → Bearer settings key. Boolean flags take on|off. The connected flags are
  * read-only on the API and deliberately have no flag here.
  */
 export const SETTINGS_FLAGS = BEARER_SETTINGS_FLAGS;
 
-export type SettingsArgs = { json: boolean; patch: SettingsPatch };
+type IgnoreBotOperation = { action: "add" | "remove"; login: string } | { action: "clear" };
+export type SettingsArgs = { json: boolean; patch: SettingsPatch; ignoreBots?: IgnoreBotOperation[] };
 
-/** Parse `settings` argv. Accepts `--flag on|off` and `--flag=on|off`. */
+function canonicalLogin(raw: string): string {
+  const login = raw.trim().toLowerCase().replace(/\[bot\]$/, "");
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(login)) {
+    throw new CommandError(`Invalid bot login: ${raw}.`, 2, "usage");
+  }
+  return login;
+}
+
+/** Parse boolean and enum flags plus ordered ignore-list operations. */
 export function parseSettingsArgs(args: string[]): SettingsArgs {
   let json = false;
+  const ignoreBots: IgnoreBotOperation[] = [];
   const patch: SettingsPatch = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -39,20 +49,48 @@ export function parseSettingsArgs(args: string[]): SettingsArgs {
       );
     }
     const value = eq >= 0 ? arg.slice(eq + 1) : args[++i];
+    const row = BEARER_SETTINGS.find((row) => row.key === key)!;
+    if ("kind" in row && row.kind === "logins") {
+      if (value === "clear") ignoreBots.push({ action: "clear" });
+      else if ((value === "add" || value === "remove") && args[i + 1] && !args[i + 1]!.startsWith("--")) {
+        ignoreBots.push({ action: value, login: canonicalLogin(args[++i]!) });
+      } else {
+        throw new CommandError(`${flag} takes add <login>, remove <login>, or clear.`, 2, "usage");
+      }
+      continue;
+    }
+    if ("kind" in row && row.kind === "enum") {
+      if (value === undefined || !(row.values as readonly string[]).includes(value)) {
+        throw new CommandError(`${flag} takes ${row.values.join(" or ")}.`, 2, "usage");
+      }
+      Object.assign(patch, { [key]: value });
+      continue;
+    }
     if (value !== "on" && value !== "off") {
       throw new CommandError(`${flag} takes on or off.`, 2, "usage");
     }
-    patch[key] = value === "on";
+    Object.assign(patch, { [key]: value === "on" });
   }
-  return { json, patch };
+  return { json, patch, ...(ignoreBots.length ? { ignoreBots } : {}) };
 }
 
-/** Static printout of the GET/PATCH response shape (rows match the Config tab). */
+/** Static printout includes the Config toggles plus enum and login settings. */
 export function formatSettingsLines(settings: SettingsResponse): string[] {
-  const rows = buildConfigRows(settings);
+  const rows = [
+    ...buildConfigRows(settings),
+    ...BEARER_SETTINGS.filter((row) => "kind" in row).map((row) => ({
+      ...row, writable: true, value: settings[row.key],
+    })),
+  ];
   const labelWidth = Math.max(...rows.map((r) => r.label.length));
   return rows.map((row) => {
-    const value = row.writable
+    const value = "kind" in row && row.value === undefined
+      ? "(unavailable)"
+      : Array.isArray(row.value)
+      ? row.value.join(", ") || "(empty)"
+      : typeof row.value === "string"
+      ? row.value
+      : row.writable
       ? row.value
         ? "on"
         : "off"
@@ -67,8 +105,8 @@ export async function cmdSettings(
   args: string[],
   opts: { mode?: "oneshot" | "shell" } = {},
 ): Promise<void> {
-  const { json, patch } = parseSettingsArgs(args);
-  const hasPatch = Object.keys(patch).length > 0;
+  const { json, patch, ignoreBots } = parseSettingsArgs(args);
+  const hasPatch = Object.keys(patch).length > 0 || Boolean(ignoreBots?.length);
 
   // Bare `settings` on a TTY: the tabbed browser, opened on Config.
   if (!hasPatch && !json && canBrowse()) {
@@ -77,6 +115,26 @@ export async function cmdSettings(
   }
 
   const cfg = await loadConfig();
+  if (ignoreBots?.length) {
+    // A leading clear needs no read. Otherwise fetch before writing the full list.
+    const current = ignoreBots[0]!.action === "clear" ? null : await getSettings(cfg);
+    if (ignoreBots[0]!.action !== "clear" && !current) {
+      throw new CommandError("Settings are not available; cannot update ignored bot logins.");
+    }
+    let logins = [...new Set((current?.ignored_bot_logins ?? []).flatMap((raw) => {
+      try {
+        return [canonicalLogin(raw)];
+      } catch {
+        return [];
+      }
+    }))];
+    for (const op of ignoreBots) {
+      if (op.action === "clear") logins = [];
+      else if (op.action === "remove") logins = logins.filter((login) => login !== op.login);
+      else if (!logins.includes(op.login)) logins.push(op.login);
+    }
+    patch.ignored_bot_logins = logins;
+  }
   let settings: SettingsResponse;
   if (hasPatch) {
     settings = await patchSettings(patch, cfg);

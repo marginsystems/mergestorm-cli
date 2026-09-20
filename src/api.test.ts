@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import {
+  adoptStack,
   apiFetch,
   getEnrichedStack,
   getMe,
@@ -10,6 +11,7 @@ import {
   listStacks,
   parseRetryAfterSeconds,
   patchSettings,
+  setStackPolicy,
 } from "./api.js";
 import type { Config } from "./config.js";
 import { CommandError } from "./errors.js";
@@ -297,6 +299,7 @@ const SETTINGS_BODY = {
   review_unit_land_prs_enabled: true,
   cyclone_review_unit_land_prs_enabled: false,
   cyclone_skip_ci_enabled: true,
+  cyclone_patch_unverified_languages: false,
   vortex_seam_specialist_enabled: true,
   auto_land_default: false,
 };
@@ -397,4 +400,74 @@ test("stack reads preserve structured rate-limit details", async () => {
       err.exitCode === 7 &&
       err.retryAfterSeconds === 6,
   );
+});
+
+test("adoptStack preserves the server error code and message", async () => {
+  mockFetch(400, {
+    error: "cyclone_not_installed",
+    message: "Install Cyclone on this repository, then adopt. Cyclone is required for stacks.",
+  });
+  await assert.rejects(
+    () => adoptStack("acme", "widgets", 42, cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "cyclone_not_installed" &&
+      err.message ===
+        "Install Cyclone on this repository, then adopt. Cyclone is required for stacks.",
+  );
+});
+
+test("adoptStack ignores prose and blank messages as structured error fields", async () => {
+  mockFetch(409, { error: "Cannot enable Auto land on an archived stack", message: "" });
+  await assert.rejects(
+    () => adoptStack("acme", "widgets", 42, cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === undefined &&
+      err.message === 'Failed to import stack (HTTP 409): {"error":"Cannot enable Auto land on an archived stack","message":""}',
+  );
+});
+
+test("adoptStack preserves server adopt codes and supplies copy for bare codes", async () => {
+  mockFetch(422, { error: "not_stacked", stack: null, chain: [] });
+  await assert.rejects(
+    () => adoptStack("acme", "widgets", 42, cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "not_stacked" &&
+      err.message === "This pull request is not part of a stack.",
+  );
+
+  mockFetch(503, { error: "busy" });
+  await assert.rejects(
+    () => adoptStack("acme", "widgets", 42, cfg),
+    (err: unknown) => err instanceof CommandError && err.code === "busy",
+  );
+
+  mockFetch(503, { error: "supabase_unconfigured" });
+  await assert.rejects(
+    () => adoptStack("acme", "widgets", 42, cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "supabase_unconfigured" &&
+      err.message === "Stacks are not configured on this server.",
+  );
+});
+
+
+test("setStackPolicy surfaces the API cyclone_not_connected PATCH message", async () => {
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    assert.equal(String(input), "https://api.example.test/api/v1/stacks/stack-1");
+    assert.equal(init?.method, "PATCH");
+    assert.deepEqual(JSON.parse(String(init?.body)), { autoPatchOverride: true });
+    return Response.json({
+      error: "cyclone_not_connected",
+      message: "Connect Cyclone to enable auto-patch.",
+    }, { status: 400 });
+  };
+  await assert.rejects(() => setStackPolicy("stack-1", { autoPatchOverride: true }, cfg),
+    (err: unknown) => err instanceof CommandError &&
+      err.code === "cyclone_not_connected" &&
+      err.message === "Connect Cyclone to enable auto-patch.");
 });

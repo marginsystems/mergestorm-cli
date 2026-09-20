@@ -13,17 +13,17 @@ Before opening a PR; after a large refactor; when the user says review, audit, s
 
 Not for merging, landing, or pushing. For a PR that is already open on GitHub, use the `mergestorm-pr-loop` skill instead.
 
-## Install (Claude Code / Cursor)
+## Install (Claude Code / Cursor / Agents)
 
 ```bash
 mg skill install --claude
 mg skill install --cursor
-# or both: mg skill install --claude --cursor
+# or all three: mg skill install --claude --cursor --agents
 ```
 
-That writes `.claude/skills/mergestorm-review/SKILL.md` and/or `.cursor/skills/mergestorm-review/SKILL.md` in the current repo.
+That writes `.claude/skills/mergestorm-review/SKILL.md`, `.cursor/skills/mergestorm-review/SKILL.md`, and/or `.agents/skills/mergestorm-review/SKILL.md` in the current repo.
 
-Hand-copy still works: Claude Code project skill `.claude/skills/mergestorm-review/SKILL.md` (or `~/.claude/skills/mergestorm-review/SKILL.md`). Cursor: the same file under `.cursor/skills/mergestorm-review/SKILL.md`; otherwise a rule at `.cursor/rules/mergestorm-review.mdc` with this description and `alwaysApply: false`.
+Hand-copy still works: Claude Code project skill `.claude/skills/mergestorm-review/SKILL.md` (or `~/.claude/skills/mergestorm-review/SKILL.md`). Cursor: the same file under `.cursor/skills/mergestorm-review/SKILL.md`; otherwise a rule at `.cursor/rules/mergestorm-review.mdc` with this description and `alwaysApply: false`. Agents: `.agents/skills/mergestorm-review/SKILL.md`.
 
 MCP server:
 
@@ -50,6 +50,8 @@ Cursor `~/.cursor/mcp.json`:
 
 1. Prefer the `mergestorm` MCP server. Call `whoami`. If MCP is missing, require `mg` on PATH with `mg whoami --json` exit 0. If neither is available, stop and print the install one-liner above.
 2. Call `credits` (or `mg credits --json`). If remaining standard credits are 0, say so and stop.
+
+Ignored bot authors live in Settings → Vortex ("Ignore bot PR authors"), not Agents. Local `review_submit` is a manual review and is not an ignore-list skip.
 
 ## Hire policy
 

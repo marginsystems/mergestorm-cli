@@ -8,19 +8,21 @@ import { present } from "../ui/present.js";
 
 export const SKILL_NAME = "mergestorm-review";
 export const PR_LOOP_SKILL_NAME = "mergestorm-pr-loop";
-export const SKILL_NAMES = [SKILL_NAME, PR_LOOP_SKILL_NAME] as const;
+export const BOUNCE_WATCH_SKILL_NAME = "mergestorm-bounce-watch";
+export const SKILL_NAMES = [SKILL_NAME, PR_LOOP_SKILL_NAME, BOUNCE_WATCH_SKILL_NAME] as const;
 
 export type SkillName = (typeof SKILL_NAMES)[number];
 
 export const SKILL_USAGE = `usage:
-  mergestorm skill install --claude|--cursor [--json]
+  mergestorm skill install --claude|--cursor|--agents [--json]
 
-  Copies mergestorm-review and mergestorm-pr-loop into this repo (git toplevel, else cwd):
+  Copies ${SKILL_NAMES.join(", ")} into this repo (git toplevel, else cwd):
     --claude  .claude/skills/<name>/SKILL.md
     --cursor  .cursor/skills/<name>/SKILL.md
-  Pass both flags to write both trees. Overwrites existing copies.`;
+    --agents  .agents/skills/<name>/SKILL.md
+  Pass multiple flags to write multiple trees. Overwrites existing copies.`;
 
-export type SkillTarget = "claude" | "cursor";
+export type SkillTarget = "claude" | "cursor" | "agents";
 
 export type SkillInstallRequest = {
   help: boolean;
@@ -51,13 +53,21 @@ export function parseSkillArgs(args: string[]): SkillInstallRequest {
       if (!targets.includes("cursor")) targets.push("cursor");
       continue;
     }
+    if (arg === "--agents") {
+      if (!targets.includes("agents")) targets.push("agents");
+      continue;
+    }
     if (arg === "-h" || arg === "--help" || arg === "help") {
       return { help: true, json: false, targets: [] };
     }
     throw new CommandError(`${SKILL_USAGE}\nunknown flag: ${arg}`, 1, "usage");
   }
   if (targets.length === 0) {
-    throw new CommandError(`${SKILL_USAGE}\npass --claude and/or --cursor`, 1, "usage");
+    throw new CommandError(
+      `${SKILL_USAGE}\npass --claude, --cursor, and/or --agents`,
+      1,
+      "usage",
+    );
   }
   return { help: false, json, targets };
 }
@@ -79,6 +89,9 @@ export function skillDestination(
 ): string {
   if (target === "claude") {
     return path.join(root, ".claude", "skills", name, "SKILL.md");
+  }
+  if (target === "agents") {
+    return path.join(root, ".agents", "skills", name, "SKILL.md");
   }
   return path.join(root, ".cursor", "skills", name, "SKILL.md");
 }
@@ -112,7 +125,9 @@ export function resolveBundledSkillPath(
 
 async function assertNoSymlink(dest: string): Promise<void> {
   const parts = dest.split(path.sep);
-  const marker = parts.findIndex((p) => p === ".claude" || p === ".cursor");
+  const marker = parts.findIndex(
+    (p) => p === ".claude" || p === ".cursor" || p === ".agents",
+  );
   const first = marker === -1 ? parts.length - 1 : marker;
   for (let i = first; i < parts.length; i++) {
     const candidate = parts.slice(0, i + 1).join(path.sep);

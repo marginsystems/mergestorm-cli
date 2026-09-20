@@ -13,7 +13,17 @@ export type CommandErrorCode =
   | "review_quota"
   | "review_failed"
   | "review_timeout"
-  | "rate_limited";
+  | "rate_limited"
+  | "cyclone_not_installed"
+  | "pr_merged"
+  | "pr_closed"
+  | "not_stacked"
+  | "draft"
+  | "reserved_branch"
+  | "supabase_unconfigured"
+  | "cyclone_not_connected"
+  | "busy"
+  | "adopt_failed";
 
 /** Stable one-shot exit codes for machine callers of `mergestorm review`. */
 export const REVIEW_EXIT = {

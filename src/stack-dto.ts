@@ -54,6 +54,39 @@ export type StackVortexStatus =
   | "failed"
   | "incomplete";
 
+/**
+ * MS-14 viewer: the one lifecycle status of the Vortex review on a PR head.
+ * `pr_reviews` is the authority when a row exists for the SHA; a leftover
+ * `github_webhook_jobs` row paints `queued` / `reviewing` only when no pass row
+ * exists yet. `none` = never dispatched. `done` = a pass posted; the finer
+ * verdict detail lives on `vortexStatus` / `agentRuns`.
+ */
+export type StackVortexReviewViewStatus =
+  | "none"
+  | "queued"
+  | "reviewing"
+  | "skipped"
+  | "done"
+  | "failed";
+
+export type StackVortexReviewView = {
+  status: StackVortexReviewViewStatus;
+  /** `pr_reviews.skip_reason` for `skipped`; null when the writer recorded none. */
+  skip_reason: string | null;
+  /** SHA + pass identity of the attempt (#2027); null before a pass row exists. */
+  pass: number | null;
+  /** Head the status speaks for; null when neither table named one. */
+  head_sha: string | null;
+  /** In-flight sub-state while `reviewing` (fanout / synthesizing). */
+  phase: string | null;
+  /** Earliest live job start while `reviewing`; null when lease-only. */
+  started_at: string | null;
+  /** Stop control visibility: true only while a pass can actually be cancelled. */
+  stoppable: boolean;
+  /** Which table spoke: the authority row, a live job, a lease, or nothing. */
+  source: "pr_reviews" | "github_webhook_jobs" | "lease" | "none";
+};
+
 export type StackCycloneStatus = "patching" | "awaiting_fix";
 
 export type StackTempestStatus = "reviewing" | "findings" | "clear" | "failed" | "stale";
@@ -177,6 +210,12 @@ export type StackLayerDto = {
    * Undefined = producer predates runs (clients fall back to the rollup).
    */
   agentRuns?: StackAgentRun[];
+  /**
+   * MS-14 viewer output for this layer's head. Every surface renders the
+   * lifecycle status from here; `vortexStatus` / `agentRuns` only add verdict
+   * detail once it says `done`. Undefined = producer predates the viewer.
+   */
+  vortexReview?: StackVortexReviewView;
   conflictDetail: string | null;
   restackError?: RestackError | null;
   lastRestackedSha: string | null;
@@ -291,6 +330,21 @@ export type StackDto = {
    */
   autoEnqueueWhenReady?: boolean;
   /**
+   * Auto land Settling certificate. The stacks watcher publishes the identity
+   * of the settle clock it actually started (action, exact PR and head, server
+   * start time) and clears it when that clock is consumed or invalidated.
+   * Absent (older payloads) or `null` means no certified settle: paint nothing.
+   * Remaining time derives from `startedAt`; a refresh never restarts it.
+   * Partial or invalid server rows map to `null`, never to a guessed value.
+   */
+  autoEnqueueSettle?: {
+    action: "ready" | "promote";
+    prNumber: number;
+    headSha: string;
+    /** ISO timestamp of the watcher's clock start. */
+    startedAt: string;
+  } | null;
+  /**
    * Per-stack Vortex auto-review override. `null` (or missing) follows the
    * account `auto_review_enabled` flag; a boolean wins in both directions.
    */
@@ -345,8 +399,50 @@ export type MergeQueueBounceKind =
   | "seam_findings"
   | "restack_conflict"
   | "pr_draft"
+  | "must_consolidate"
   | "merge_failed"
   | "gh_error";
+
+/** Every bounce kind understood by the shared contract. */
+export const MERGE_QUEUE_BOUNCE_KINDS = [
+  "ci_failure",
+  "ci_timeout",
+  "head_moved",
+  "tempest_findings",
+  "seam_findings",
+  "restack_conflict",
+  "pr_draft",
+  "must_consolidate",
+  "merge_failed",
+  "gh_error",
+] as const satisfies readonly MergeQueueBounceKind[];
+
+export const BOUNCE_KIND_LABELS: Readonly<Record<MergeQueueBounceKind, string>> = {
+  ci_failure: "CI failed",
+  ci_timeout: "CI timed out",
+  head_moved: "head moved",
+  tempest_findings: "Tempest findings",
+  seam_findings: "seam review findings",
+  restack_conflict: "restack conflict",
+  pr_draft: "draft PR",
+  must_consolidate: "needs promote",
+  merge_failed: "merge failed",
+  gh_error: "GitHub error",
+};
+
+export function mergeQueueBounceLabel(entry: MergeQueueEntryDto): string {
+  const detail = entry.bounceDetail;
+  const kindLabel = detail ? BOUNCE_KIND_LABELS[detail.kind] : undefined;
+  if (kindLabel) {
+    const specifics =
+      detail?.failingCheck ??
+      detail?.conflictBranch ??
+      detail?.message ??
+      (detail?.prNumber != null ? `PR #${detail.prNumber}` : null);
+    return specifics ? `${kindLabel} — ${specifics}` : kindLabel;
+  }
+  return entry.bounceReason?.trim() || "bounced";
+}
 
 /** Structured bounce handoff — enough for the bar chip and the chat quote. */
 export type MergeQueueBounceDetail = {

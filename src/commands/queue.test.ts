@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import type { MergeQueueEntryDto } from "../api.js";
+import { mergeQueueBounceLabel } from "../stack-dto.js";
 import { CommandError } from "../errors.js";
 import {
   initialLineTabsState,
@@ -11,6 +12,7 @@ import { visibleWidth } from "../ui/width.js";
 import {
   buildQueueListLines,
   cmdQueue,
+  QUEUE_USAGE,
   resolveQueueEntryId,
 } from "./queue.js";
 import { cmdStack } from "./stack.js";
@@ -75,6 +77,12 @@ const STRIP_ANSI = /\u001b\[[0-9;]*m/g;
 const strip = (s: string): string => s.replace(STRIP_ANSI, "");
 
 describe("queue commands", { concurrency: false }, () => {
+  test("mg queue help describes live and bounced entries", async () => {
+    const out = await captureLines(() => cmdQueue(["--help"]));
+    assert.equal(out, QUEUE_USAGE);
+    assert.match(out, /live and recent bounced merge-queue entries/);
+  });
+
   test("mg queue --json lists live entries", async () => {
     configureApi();
     const calls: Array<{ url: string; method: string }> = [];
@@ -337,7 +345,7 @@ describe("queue commands", { concurrency: false }, () => {
         bounceReason: "ci_failure",
         position: 4,
       },
-      { ...entry, id: "q5", waitReason: longReason, position: 5 },
+      { ...entry, id: "q5", waitReason: longReason, verifyHeadSha: "abc1234567890", position: 5 },
     ];
     const lines = buildQueueListLines(rows);
     const text = strip(lines.join("\n"));
@@ -347,8 +355,8 @@ describe("queue commands", { concurrency: false }, () => {
     assert.match(text, /×\s+bounced/);
     for (const line of lines) {
       assert.ok(
-        visibleWidth(line) <= 75,
-        `queue row is ${visibleWidth(line)} cells (content is 75 at 80 cols): ${strip(line)}`,
+        visibleWidth(line) <= 80,
+        `queue row is ${visibleWidth(line)} cells (content is 80 at 80 cols): ${strip(line)}`,
       );
     }
     const layout = layoutLineTabs(
@@ -387,4 +395,56 @@ describe("queue commands", { concurrency: false }, () => {
     );
     assert.equal(fetchCalled, false);
   });
+});
+
+
+test("queue bounced rows show the PR head and shared structured bounce label", () => {
+  const bounced: MergeQueueEntryDto = {
+    ...entry,
+    state: "bounced",
+    waitReason: null,
+    bounceReason: "legacy reason",
+    bounceDetail: {
+      kind: "ci_failure",
+      prNumber: 12,
+      headSha: "abc1234567890",
+      failingCheck: "unit tests",
+    },
+    verifyHeadSha: "fffffff000000",
+  };
+  const text = strip(buildQueueListLines([bounced]).join("\n"));
+  assert.match(text, /#12@abc1234/);
+  assert.ok(text.includes(mergeQueueBounceLabel(bounced)));
+  assert.doesNotMatch(text, /legacy reason|fffffff/);
+});
+
+test("queue waiting rows show the named PR at the verified head with the wait reason", () => {
+  const waiting = { ...entry, verifyHeadSha: "abc1234567890" };
+  const text = strip(buildQueueListLines([waiting]).join("\n"));
+  assert.match(text, /#42@abc1234/);
+  assert.ok(text.includes(entry.waitReason!));
+});
+
+test("queue rows without PR or SHA details do not invent an identity", () => {
+  const text = strip(buildQueueListLines([{
+    ...entry, waitReason: null, bounceReason: "legacy bounce", state: "bounced",
+  }]).join("\n"));
+  assert.match(text, /legacy bounce/);
+  assert.doesNotMatch(text, /#|@|undefined|null/);
+});
+
+test("queue rows with a zero bounce PR do not invent an identity", () => {
+  const text = strip(buildQueueListLines([{
+    ...entry,
+    state: "bounced",
+    waitReason: null,
+    bounceReason: null,
+    bounceDetail: {
+      kind: "ci_failure",
+      prNumber: 0,
+      headSha: "abc1234567890",
+      failingCheck: "unit tests",
+    },
+  }]).join("\n"));
+  assert.doesNotMatch(text, /#0|@abc1234/);
 });

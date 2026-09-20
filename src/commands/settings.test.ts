@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { buildConfigRows } from "./browse.js";
 import { CommandError } from "../errors.js";
 import {
   cmdSettings,
@@ -12,6 +13,10 @@ const STRIP_ANSI = /\u001b\[[0-9;]*m/g;
 const stripAnsi = (s: string): string => s.replace(STRIP_ANSI, "");
 
 const SETTINGS_BODY = {
+  ignored_bot_logins: ["renovate"],
+  vortex_bot_skip_check: "none" as const,
+  vortex_findings_check: "neutral" as const,
+  cyclone_patch_failure_check: "failure" as const,
   auto_review_enabled: true,
   auto_patch_enabled: false,
   cyclone_connected: false,
@@ -21,6 +26,9 @@ const SETTINGS_BODY = {
   review_unit_land_prs_enabled: true,
   cyclone_review_unit_land_prs_enabled: false,
   cyclone_skip_ci_enabled: true,
+  cyclone_patch_unverified_languages: false,
+  vortex_auto_overflow_enabled: false,
+  vortex_skip_all_clear_comments: false,
   vortex_seam_specialist_enabled: true,
   auto_land_default: false,
 };
@@ -36,6 +44,16 @@ test("parseSettingsArgs maps --cyclone-skip-ci off to cyclone_skip_ci_enabled: f
   const parsed = parseSettingsArgs(["--cyclone-skip-ci", "off"]);
   assert.deepEqual(parsed, { json: false, patch: { cyclone_skip_ci_enabled: false } });
   assert.deepEqual(parseSettingsArgs(["--cyclone-skip-ci=on"]).patch, { cyclone_skip_ci_enabled: true });
+});
+
+test("parseSettingsArgs maps --cyclone-patch-unverified to cyclone_patch_unverified_languages", () => {
+  assert.deepEqual(parseSettingsArgs(["--cyclone-patch-unverified", "on"]), {
+    json: false,
+    patch: { cyclone_patch_unverified_languages: true },
+  });
+  assert.deepEqual(parseSettingsArgs(["--cyclone-patch-unverified=off"]).patch, {
+    cyclone_patch_unverified_languages: false,
+  });
 });
 
 test("parseSettingsArgs maps --auto-land on to auto_land_default: true", () => {
@@ -58,6 +76,10 @@ test("parseSettingsArgs collects every flag with both value forms", () => {
     "off",
     "--cyclone-skip-ci",
     "off",
+    "--cyclone-patch-unverified=on",
+    "--vortex-auto-overflow",
+    "off",
+    "--vortex-skip-all-clear=on",
     "--vortex-seam=on",
     "--auto-land",
     "on",
@@ -72,8 +94,20 @@ test("parseSettingsArgs collects every flag with both value forms", () => {
     review_unit_land_prs_enabled: true,
     cyclone_review_unit_land_prs_enabled: false,
     cyclone_skip_ci_enabled: false,
+    cyclone_patch_unverified_languages: true,
+    vortex_auto_overflow_enabled: false,
+    vortex_skip_all_clear_comments: true,
     vortex_seam_specialist_enabled: true,
     auto_land_default: true,
+  });
+});
+
+test("parseSettingsArgs maps --vortex-skip-all-clear to vortex_skip_all_clear_comments", () => {
+  assert.deepEqual(parseSettingsArgs(["--vortex-skip-all-clear", "on"]).patch, {
+    vortex_skip_all_clear_comments: true,
+  });
+  assert.deepEqual(parseSettingsArgs(["--vortex-skip-all-clear=off"]).patch, {
+    vortex_skip_all_clear_comments: false,
   });
 });
 
@@ -124,6 +158,7 @@ test("formatSettingsLines prints on/off toggles and connected flags", () => {
   const text = stripAnsi(formatSettingsLines(SETTINGS_BODY).join("\n"));
   assert.match(text, /Auto review\s+on/);
   assert.match(text, /Auto patch\s+off/);
+  assert.match(text, /Patch languages we cannot typecheck\s+off/);
   assert.match(text, /Cyclone\s+not connected/);
   assert.match(text, /GitHub\s+connected/);
 });
@@ -217,4 +252,105 @@ test("cmdSettings surfaces the API message when a PATCH is rejected", async () =
       err instanceof CommandError &&
       err.message === "Connect Cyclone to enable auto-patch.",
   );
+});
+
+test("enum flags accept their declared values and reject boolean or invalid values", () => {
+  assert.deepEqual(parseSettingsArgs([
+    "--vortex-skip-check", "neutral", "--vortex-findings=failure", "--cyclone-fail-check", "neutral",
+  ]).patch, {
+    vortex_bot_skip_check: "neutral", vortex_findings_check: "failure", cyclone_patch_failure_check: "neutral",
+  });
+  assert.deepEqual(parseSettingsArgs(["--vortex-findings", "success"]).patch, { vortex_findings_check: "success" });
+  for (const args of [
+    ["--vortex-findings", "none"], ["--vortex-skip-check", "on"], ["--cyclone-fail-check"],
+    ["--cyclone-fail-check", "success"],
+  ]) {
+    assert.throws(() => parseSettingsArgs(args), (e: unknown) => e instanceof CommandError && e.code === "usage");
+  }
+});
+
+test("ignore bot parser requires an operation and valid login", () => {
+  for (const args of [["on"], ["add"], ["remove", "--json"], ["add", "invalid_login"], ["add", " "]]) {
+    assert.throws(() => parseSettingsArgs(["--ignore-bot", ...args]), (e: unknown) => e instanceof CommandError && e.code === "usage");
+  }
+});
+
+test("human settings show stored enums and comma-separated or empty lists", () => {
+  const text = formatSettingsLines({ ...SETTINGS_BODY, ignored_bot_logins: ["renovate", "dependabot"] }).join("\n");
+  assert.match(text, /Ignored bot logins\s+renovate, dependabot/);
+  assert.match(text, /Vortex bot skip check\s+none/);
+  assert.match(text, /Vortex findings check\s+neutral/);
+  assert.match(text, /Cyclone patch failure check\s+failure/);
+  assert.match(formatSettingsLines({ ...SETTINGS_BODY, ignored_bot_logins: [] }).join("\n"), /Ignored bot logins\s+\(empty\)/);
+});
+
+test("human settings mark newer kind rows missing from an older API as unavailable", () => {
+  const olderSettings = { ...SETTINGS_BODY } as Partial<typeof SETTINGS_BODY>;
+  delete olderSettings.ignored_bot_logins;
+  delete olderSettings.vortex_bot_skip_check;
+  delete olderSettings.vortex_findings_check;
+  delete olderSettings.cyclone_patch_failure_check;
+  const text = formatSettingsLines(olderSettings as Parameters<typeof formatSettingsLines>[0]).join("\n");
+  assert.match(text, /Ignored bot logins\s+\(unavailable\)/);
+  assert.match(text, /Vortex bot skip check\s+\(unavailable\)/);
+  assert.match(text, /Vortex findings check\s+\(unavailable\)/);
+  assert.match(text, /Cyclone patch failure check\s+\(unavailable\)/);
+  assert.doesNotMatch(text, /Ignored bot logins\s+off/);
+});
+
+for (const [args, expected, methods] of [
+  [["add", " Dependabot[BOT] "], ["renovate", "dependabot"], ["GET", "PATCH"]],
+  [["add", " Renovate[BOT] "], ["renovate"], ["GET", "PATCH"]],
+  [["remove", " Renovate[BOT] "], [], ["GET", "PATCH"]],
+  [["clear"], [], ["PATCH"]],
+] as const) {
+  test(`ignore bot ${args.join(" ")} patches the full canonical list`, async () => {
+    useTestEnv();
+    originalFetch = globalThis.fetch;
+    const seen: string[] = [];
+    globalThis.fetch = async (_input, init) => {
+      const method = init?.method ?? "GET";
+      seen.push(method);
+      if (method === "PATCH") assert.deepEqual(JSON.parse(String(init?.body)), { ignored_bot_logins: expected });
+      return Response.json({ ...SETTINGS_BODY, ...(method === "PATCH" ? { ignored_bot_logins: expected } : {}) });
+    };
+    const text = await captureLog(() => cmdSettings(["--ignore-bot", ...args, "--json"]));
+    assert.deepEqual(seen, methods);
+    assert.deepEqual(JSON.parse(text).ignored_bot_logins, expected);
+  });
+}
+
+test("ignore bot add does not write when GET is unavailable", async () => {
+  useTestEnv();
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    assert.equal(init?.method ?? "GET", "GET");
+    return Response.json({}, { status: 404 });
+  };
+  await assert.rejects(() => cmdSettings(["--ignore-bot", "add", "renovate", "--json"]), /Settings are not available/);
+});
+
+test("ignore bot operations discard legacy invalid stored logins", async () => {
+  useTestEnv();
+  originalFetch = globalThis.fetch;
+  const methods: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    const method = init?.method ?? "GET";
+    methods.push(method);
+    if (method === "PATCH") {
+      assert.deepEqual(JSON.parse(String(init?.body)), { ignored_bot_logins: ["renovate", "dependabot"] });
+      return Response.json({ ...SETTINGS_BODY, ignored_bot_logins: ["renovate", "dependabot"] });
+    }
+    return Response.json({ ...SETTINGS_BODY, ignored_bot_logins: ["legacy_login", "renovate"] });
+  };
+  await cmdSettings(["--ignore-bot", "add", "dependabot", "--json"]);
+  assert.deepEqual(methods, ["GET", "PATCH"]);
+});
+
+test("Config tab excludes enum and login rows", () => {
+  const rows = buildConfigRows(SETTINGS_BODY);
+  for (const key of ["ignored_bot_logins", "vortex_bot_skip_check", "vortex_findings_check", "cyclone_patch_failure_check"]) {
+    assert.ok(!rows.some((row) => row.key === key));
+  }
+  assert.ok(rows.some((row) => row.key === "vortex_skip_all_clear_comments"));
 });

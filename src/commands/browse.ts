@@ -4,13 +4,12 @@ import {
   getSettings,
   listJobs,
   patchSettings,
-  SETTINGS_WRITABLE_KEYS,
   type JobListItem,
   type MeResponse,
   type SettingsPatch,
   type SettingsResponse,
 } from "../api.js";
-import { BEARER_SETTINGS_LABELS } from "../automation-catalog.js";
+import { BEARER_BOOLEAN_SETTINGS_KEYS, BEARER_SETTINGS_LABELS } from "../automation-catalog.js";
 import { apiBase, keyDisplay, loadConfig, resolveApiKey } from "../config.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
@@ -156,7 +155,7 @@ export const SETTINGS_LABELS = BEARER_SETTINGS_LABELS;
 /** Config rows in a stable order: writable toggles, then connected flags. */
 export function buildConfigRows(settings: SettingsResponse): TabsConfigRow[] {
   return [
-    ...SETTINGS_WRITABLE_KEYS.map((key) => ({
+    ...BEARER_BOOLEAN_SETTINGS_KEYS.map((key) => ({
       key,
       label: SETTINGS_LABELS[key],
       value: settings[key] === true,

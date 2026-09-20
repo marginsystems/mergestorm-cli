@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.18`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.19`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│ ▟██▛  mergestorm v0.3.18                                                     │
+│ ▟██▛  mergestorm v0.3.19                                                     │
 │  ▜▙   ● msk_live_…  · maelstrom                                              │
 │       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used · Resets Sep 5, 10:53am (UTC)│
 │                                                                              │
 │       review a diff · usage for tabs · /help for all commands                │
-│       New in v0.3.18: pr --wait fences a stale same-head pass                │
+│       New in v0.3.19: stack wait and held GET waits                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -89,7 +89,7 @@ mergestorm jobs [n] [--json]    Recent review jobs (default 10, max 50)
 mergestorm branches [n]         Recently reviewed branches (arrow-pick on TTY)
 mergestorm chain [slug]         Branch review-chain timeline (default: current branch)
 mergestorm whoami [--json]      Key prefix, plan, API base, config path
-mergestorm skill install --claude|--cursor  Copy the mergestorm-review and mergestorm-pr-loop skills into this repo
+mergestorm skill install --claude|--cursor|--agents  Copy the Mergestorm skills into this repo
 mergestorm thread <slug>        Jobs in a review thread
 mergestorm stack create [name]  New local stack layer (optional `--onto` / `--trunk` / `--extend`)
 mergestorm stack submit         Push layers, open PRs (`gh`), register via adopt (optional `--extend`)
@@ -97,6 +97,7 @@ mergestorm stack list [--json]  List registered stacks
 mergestorm stack adopt <owner/repo>#<pr>  Import an existing open PR chain
 mergestorm stack restack <stack-id>  Restack descendants
 mergestorm stack land <stack-id>     Land / promote (into review unit when present)
+mergestorm stack wait <stack-id>     Wait for stack attention (default 45s, max 300s)
 mergestorm stack reset --force  Clear local authoring state (not branches/PRs)
 ```
 

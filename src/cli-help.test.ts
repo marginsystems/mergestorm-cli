@@ -47,6 +47,7 @@ describe("CLI help exits", { skip: !nodeBin }, () => {
     assert.match(r.stdout, /Usage:/);
     assert.match(r.stdout, /--router/);
     assert.match(r.stdout, /mergestorm queue add/);
+    assert.match(r.stdout, /stack wait <stack-id>/);
     assert.match(r.stdout, /1 MB \/ 1_000_000/);
     assert.match(r.stdout, /HTTP 413/);
     assert.equal(r.stderr.trim(), "");
@@ -72,6 +73,7 @@ describe("CLI help exits", { skip: !nodeBin }, () => {
     const r = runCli(["stack", "--help"]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /stack land/);
+    assert.match(r.stdout, /stack wait <stack-id> \[--json\] \[--timeout <s>\]/);
     assert.doesNotMatch(r.stdout, /unknown stack subcommand/);
   });
 
@@ -79,6 +81,7 @@ describe("CLI help exits", { skip: !nodeBin }, () => {
     const r = runCli(["stack", "help"]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /stack land/);
+    assert.match(r.stdout, /stack wait <stack-id> \[--json\] \[--timeout <s>\]/);
     assert.doesNotMatch(r.stdout, /unknown stack subcommand/);
   });
 
@@ -93,7 +96,7 @@ describe("CLI help exits", { skip: !nodeBin }, () => {
   it("mergestorm queue help exits 0", () => {
     const r = runCli(["queue", "help"]);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /live merge-queue entries/);
+    assert.match(r.stdout, /live and recent bounced merge-queue entries/);
   });
 
   it("mergestorm skill --help exits 0", () => {

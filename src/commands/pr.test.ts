@@ -9,6 +9,7 @@ type MockResponse = {
   headers?: Record<string, string>;
 };
 
+let advancePoll: ((ms: number) => void) | undefined;
 let originalFetch: typeof globalThis.fetch | undefined;
 let originalApiKey: string | undefined;
 let originalApiUrl: string | undefined;
@@ -16,6 +17,7 @@ let originalApiUrl: string | undefined;
 afterEach(() => {
   if (originalFetch) globalThis.fetch = originalFetch;
   originalFetch = undefined;
+  advancePoll = undefined;
   if (originalApiKey === undefined) delete process.env.MERGESTORM_API_KEY;
   else process.env.MERGESTORM_API_KEY = originalApiKey;
   if (originalApiUrl === undefined) delete process.env.MERGESTORM_API_URL;
@@ -63,6 +65,7 @@ function mockPrFetch(responses: MockResponse[]): {
     urls.push(String(input));
     const response = responses[Math.min(index, responses.length - 1)]!;
     index += 1;
+    if (index > responses.length) advancePoll?.(Number(new URL(String(input)).searchParams.get("wait") ?? 0) * 1000);
     return new Response(JSON.stringify(response.body), {
       status: response.status,
       headers: { "Content-Type": "application/json", ...response.headers },
@@ -93,6 +96,7 @@ async function captureOutput(
 
 function fakeClock() {
   let time = 0;
+  advancePoll = (ms) => { time += ms; };
   return {
     now: () => time,
     sleep: async (ms: number) => {
@@ -405,3 +409,22 @@ for (const flag of ["--pass", "--after-pass"]) {
     assert.equal(JSON.parse(captured.stdout[0]!).id, "pass-2");
   });
 }
+
+test("PR wait uses one held GET per slice and freezes SHA/pass selectors", async (t) => {
+  const { pollPrVortexReview, PrReviewPollTimeoutError } = await import("./review-client.js");
+  let time = 0;
+  const urls: URL[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string) => {
+    const url = new URL(input);
+    urls.push(url);
+    assert.equal(url.searchParams.get("wait"), "45");
+    time += 45_000;
+    return Response.json(review("in_progress", "abc1234", { pass: 3 }));
+  });
+  await assert.rejects(pollPrVortexReview({ apiKey: "test" }, "acme", "widgets", 12, {
+    timeoutMs: 90_000, afterSha: "abc1234", afterPass: 2, now: () => time,
+    sleep: async () => { assert.fail("normal long polling must not sleep"); },
+  }), PrReviewPollTimeoutError);
+  assert.equal(urls.length, 2);
+  assert.ok(urls.every((url) => url.searchParams.get("after_sha") === "abc1234" && url.searchParams.get("after_pass") === "2"));
+});

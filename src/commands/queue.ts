@@ -6,6 +6,7 @@ import {
 } from "../api.js";
 import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
+import { mergeQueueBounceLabel } from "../stack-dto.js";
 import { ansi } from "../ui/ansi.js";
 import { runLineTabsBrowser } from "../ui/line-tabs.js";
 import { present } from "../ui/present.js";
@@ -43,7 +44,7 @@ export const QUEUE_USAGE = `usage:
   mergestorm queue add <stack-id> [--json]
   mergestorm queue rm <entry-id|stack-id> [--json]
 
-  queue lists your live merge-queue entries. rm prefers an entry id; a live
+  queue lists live and recent bounced merge-queue entries. rm prefers an entry id; a live
   stack id is resolved to its queue entry before cancellation.`;
 
 function positionalArgs(args: string[]): string[] {
@@ -89,19 +90,31 @@ export function buildQueueListLines(
     ];
   }
   return entries.map((entry) => {
-    const reason = entry.waitReason ?? entry.bounceReason;
+    const reason = entry.bounceDetail
+      ? mergeQueueBounceLabel(entry)
+      : entry.waitReason ?? (entry.bounceReason ? mergeQueueBounceLabel(entry) : null);
+    const prNumber = entry.bounceDetail?.prNumber != null && entry.bounceDetail.prNumber > 0
+      ? entry.bounceDetail.prNumber
+      : entry.waitReason?.match(/#([1-9]\d*)\b/)?.[1];
+    const headSha = entry.bounceDetail?.headSha ?? entry.verifyHeadSha;
+    const pr = prNumber != null
+      ? `  #${prNumber}${headSha ? `@${headSha.slice(0, 7)}` : ""}`
+      : "";
     const glyph = colorQueueGlyph(entry.state, queueStateGlyph(entry.state));
     const id = fullStackId ? entry.stackId : entry.stackId.slice(0, 8);
-    const core =
+    const coreWithoutReason =
       `  ${String(entry.position).padStart(2)}  ` +
-      `${glyph} ${entry.state.padEnd(8)}  ${entry.owner}/${entry.repo}  ${id}` +
-      (reason ? `  ${reason}` : "");
+      `${glyph} ${entry.state.padEnd(8)}  ${entry.owner}/${entry.repo}  ${id}`;
+    const coreWithoutPr = coreWithoutReason + (reason ? `  ${reason}` : "");
+    const core = `${coreWithoutPr}${pr}`;
     const who =
       entry.enqueuedBy === "human" || entry.enqueuedBy === "agent"
         ? `  by ${entry.enqueuedBy}`
         : "";
     const withWho = `${core}${who}`;
-    return visibleWidth(withWho) <= 75 ? withWho : core;
+    if (visibleWidth(withWho) <= 80) return withWho;
+    if (visibleWidth(core) <= 80) return core;
+    return pr ? core : coreWithoutPr;
   });
 }
 

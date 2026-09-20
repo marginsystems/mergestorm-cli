@@ -15,6 +15,7 @@ import { afterEach, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CommandError } from "../errors.js";
 import {
+  BOUNCE_WATCH_SKILL_NAME,
   cmdSkill,
   parseSkillArgs,
   PR_LOOP_SKILL_NAME,
@@ -61,17 +62,20 @@ test("parseSkillArgs treats bare skill / help as usage", () => {
   });
 });
 
-test("parseSkillArgs requires install plus --claude and/or --cursor", () => {
+test("parseSkillArgs requires install plus at least one target", () => {
   assert.deepEqual(parseSkillArgs(["install", "--claude"]), {
     help: false,
     json: false,
     targets: ["claude"],
   });
-  assert.deepEqual(parseSkillArgs(["install", "--cursor", "--claude", "--json"]), {
-    help: false,
-    json: true,
-    targets: ["cursor", "claude"],
-  });
+  assert.deepEqual(
+    parseSkillArgs(["install", "--cursor", "--claude", "--agents", "--json"]),
+    {
+      help: false,
+      json: true,
+      targets: ["cursor", "claude", "agents"],
+    },
+  );
   assert.throws(() => parseSkillArgs(["install"]), CommandError);
   assert.throws(() => parseSkillArgs(["publish"]), CommandError);
   assert.throws(() => parseSkillArgs(["install", "--global"]), CommandError);
@@ -157,6 +161,17 @@ test("writeSkillCopies refuses a symlinked .claude ancestor", async () => {
   );
 });
 
+test("writeSkillCopies refuses a symlinked .agents ancestor", async () => {
+  const dir = await tmp();
+  await symlink(dir, path.join(dir, ".agents"));
+  await assert.rejects(
+    writeSkillCopies(resolveBundledSkillPath(), [
+      path.join(dir, ".agents", "skills", SKILL_NAME, "SKILL.md"),
+    ]),
+    CommandError,
+  );
+});
+
 test("cmdSkill refuses a symlinked pr-loop destination", async () => {
   const dir = await tmp();
   const victim = path.join(dir, "victim.md");
@@ -168,21 +183,24 @@ test("cmdSkill refuses a symlinked pr-loop destination", async () => {
   assert.equal(await readFile(victim, "utf8"), "do not touch");
 });
 
-test("writeSkillCopies installs claude and cursor paths", async () => {
+test("writeSkillCopies installs claude, cursor, and agents paths", async () => {
   const dir = await tmp();
   const source = resolveBundledSkillPath();
   const written = await writeSkillCopies(source, [
     skillDestination(dir, "claude"),
     skillDestination(dir, "cursor"),
+    skillDestination(dir, "agents"),
   ]);
   const expected = await readFile(source, "utf8");
   assert.equal(await readFile(written[0]!, "utf8"), expected);
   assert.equal(await readFile(written[1]!, "utf8"), expected);
+  assert.equal(await readFile(written[2]!, "utf8"), expected);
   assert.ok(written[0]!.endsWith(path.join(".claude", "skills", SKILL_NAME, "SKILL.md")));
   assert.ok(written[1]!.endsWith(path.join(".cursor", "skills", SKILL_NAME, "SKILL.md")));
+  assert.ok(written[2]!.endsWith(path.join(".agents", "skills", SKILL_NAME, "SKILL.md")));
 });
 
-test("cmdSkill --claude installs both skills", async () => {
+test("cmdSkill --claude installs all three skills", async () => {
   const dir = await tmp();
   await capture(() => cmdSkill(["install", "--claude"], { cwd: dir }));
   for (const name of SKILL_NAMES) {
@@ -195,31 +213,45 @@ test("cmdSkill --claude installs both skills", async () => {
   }
 });
 
-test("cmdSkill --json writes all four copies and lists both names", async () => {
+test("cmdSkill --json writes all nine copies and lists all three names", async () => {
   const dir = await tmp();
   const out = await capture(() =>
-    cmdSkill(["install", "--claude", "--cursor", "--json"], { cwd: dir }),
+    cmdSkill(["install", "--claude", "--cursor", "--agents", "--json"], { cwd: dir }),
   );
   const payload = JSON.parse(out) as {
     names: string[];
     sources: Record<string, string>;
     written: string[];
   };
-  assert.deepEqual(payload.names, [SKILL_NAME, PR_LOOP_SKILL_NAME]);
-  assert.equal(payload.written.length, 4);
+  assert.deepEqual(payload.names, [SKILL_NAME, PR_LOOP_SKILL_NAME, BOUNCE_WATCH_SKILL_NAME]);
+  assert.equal(payload.written.length, 9);
   for (const name of payload.names) {
     const expected = await readFile(payload.sources[name]!, "utf8");
     const copies = payload.written.filter((dest) =>
       dest.includes(path.join("skills", name, "SKILL.md")),
     );
-    assert.equal(copies.length, 2);
+    assert.equal(copies.length, 3);
     for (const dest of copies) {
       assert.equal(await readFile(dest, "utf8"), expected);
     }
   }
 });
 
-test("publish-cli.yml packs both skills into the npm tarball", async () => {
+test("resolveBundledSkillPath resolves bounce-watch in an installed package layout", async () => {
+  const dir = await tmp();
+  const pkgRoot = path.join(dir, "node_modules", "mergestorm");
+  const skillFile = path.join(pkgRoot, "skill", BOUNCE_WATCH_SKILL_NAME, "SKILL.md");
+  await mkdir(path.dirname(skillFile), { recursive: true });
+  await copyFile(resolveBundledSkillPath(undefined, BOUNCE_WATCH_SKILL_NAME), skillFile);
+  const installedFrom = path.join(pkgRoot, "dist", "commands", "skill.js");
+  assert.equal(
+    resolveBundledSkillPath(pathToFileURL(installedFrom).href, BOUNCE_WATCH_SKILL_NAME),
+    skillFile,
+  );
+  assert.match(await readFile(skillFile, "utf8"), /^---\nname: mergestorm-bounce-watch\n/);
+});
+
+test("publish-cli.yml packs all three skills into the npm tarball", async () => {
   const repoRoot = path.resolve(fileURLToPath(new URL("../../../..", import.meta.url)));
   const workflowPath = path.join(repoRoot, ".github/workflows/publish-cli.yml");
   if (!(await access(workflowPath).then(() => true, () => false))) return;
@@ -230,4 +262,6 @@ test("publish-cli.yml packs both skills into the npm tarball", async () => {
   assert.match(workflow, /skills\/mergestorm-review\/SKILL\.md/);
   assert.match(workflow, /skills\/mergestorm-pr-loop\/SKILL\.md/);
   assert.match(workflow, /skill\/mergestorm-pr-loop\/SKILL\.md/);
+  assert.match(workflow, /cp skills\/mergestorm-bounce-watch\/SKILL\.md\s+\\\s+packages\/mergestorm-cli\/skill\/mergestorm-bounce-watch\/SKILL\.md/);
+  assert.match(workflow, /"skill\/mergestorm-bounce-watch\/SKILL\.md"/);
 });

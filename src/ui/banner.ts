@@ -102,6 +102,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.18": [
     "pr --wait fences a stale same-head pass",
   ],
+  "0.3.19": [
+    "stack wait and held GET waits",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

@@ -5,6 +5,8 @@ import type { StackMeta } from "../stack-meta.js";
 import {
   assertMayParentOntoRegistered,
   buildStackListLines,
+  cmdStack,
+  cmdStackStatus,
   cmdStackCreate,
   cmdStackSet,
   cmdStackSubmit,
@@ -924,4 +926,85 @@ test("buildStackListLines lists a registered stack", () => {
   assert.match(text, /#99/);
   assert.match(text, /auto-land on/);
   assert.doesNotMatch(text, /None yet/);
+});
+
+
+test("stack status prints the enriched stack as one JSON value", async () => {
+  const stack = structuredClone(REGISTERED[0]!);
+  stack.layers[0]!.headSha = "abc1234567890";
+  stack.layers[0]!.ciStatus = "failure";
+  stack.layers[0]!.vortexStatus = "findings";
+  const cfg = { apiKey: "msk_live_status_test", apiBase: "https://api.example.test" };
+  const captured = await captureStackOutput(() => cmdStackStatus([stack.id, "--json"], {
+    loadConfig: async () => cfg,
+    getEnrichedStack: async (id, seenCfg) => {
+      assert.equal(id, stack.id);
+      assert.equal(seenCfg, cfg);
+      return stack;
+    },
+  }));
+  assert.equal(captured.error, null);
+  assert.equal(captured.stdout.length, 1);
+  assert.deepEqual(JSON.parse(captured.stdout[0]!), stack);
+});
+
+test("stack status reports missing or unowned stacks like MCP stack_status", async () => {
+  const stackId = REGISTERED[0]!.id;
+  await assert.rejects(() => cmdStackStatus([stackId, "--json"], {
+    loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
+    getEnrichedStack: async () => null,
+  }), (err: unknown) => err instanceof CommandError && err.exitCode === 1 &&
+    err.message === `Stack not found or not owned by the current user: ${stackId}`);
+});
+
+test("stack status human output includes enriched PR checks and head", async () => {
+  const stack = structuredClone(REGISTERED[0]!);
+  stack.layers[0]!.headSha = "abc1234567890";
+  stack.layers[0]!.ciStatus = "pending";
+  stack.layers[0]!.vortexStatus = "reviewing";
+  const captured = await captureStackOutput(() => cmdStackStatus([stack.id], {
+    loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
+    getEnrichedStack: async () => stack,
+  }));
+  assert.equal(captured.error, null);
+  const text = strip(captured.stdout.join("\n"));
+  assert.match(text, /acme\/widgets/);
+  assert.match(text, /#99@abc1234/);
+  assert.match(text, /1\s+#99@abc1234\s+clean\s+fix\/existing-tip/);
+  assert.equal((text.match(/#99/g) ?? []).length, 1);
+  assert.match(text, /CI: pending/);
+  assert.match(text, /Vortex: reviewing/);
+});
+
+test("stack status uses a dash for enriched layers without a PR", async () => {
+  const stack = structuredClone(REGISTERED[0]!);
+  stack.layers[0]!.prNumber = 0;
+  stack.layers[0]!.headSha = "abc1234567890";
+  const captured = await captureStackOutput(() => cmdStackStatus([stack.id], {
+    loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
+    getEnrichedStack: async () => stack,
+  }));
+  assert.equal(captured.error, null);
+  const text = strip(captured.stdout.join("\n"));
+  assert.match(text, /—@abc1234\s+clean\s+fix\/existing-tip\s+CI:/);
+  assert.doesNotMatch(text, /#0/);
+});
+
+test("stack status uses unknown for missing enriched check statuses", async () => {
+  const stack = structuredClone(REGISTERED[0]!);
+  Object.assign(stack.layers[0]!, { ciStatus: undefined, reviewStatus: undefined });
+  const captured = await captureStackOutput(() => cmdStackStatus([stack.id], {
+    loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
+    getEnrichedStack: async () => stack,
+  }));
+  assert.equal(captured.error, null);
+  const text = strip(captured.stdout.join("\n"));
+  assert.match(text, /CI: unknown  review: unknown/);
+  assert.doesNotMatch(text, /undefined/);
+});
+
+test("stack status dispatch rejects missing ids, extra arguments and unknown flags", async () => {
+  for (const args of [[], ["not-a-uuid"], [REGISTERED[0]!.id, "extra"], [REGISTERED[0]!.id, "--wat"]]) {
+    await assert.rejects(() => cmdStack(["status", ...args]), /usage: mergestorm stack status/);
+  }
 });

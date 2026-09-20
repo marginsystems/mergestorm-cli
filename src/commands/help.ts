@@ -62,7 +62,7 @@ export function buildHelpTabs(): LineTab[] {
         "",
         rule("Single stack (from trunk)"),
         cmd("stack create --onto main", "fresh stack, not on an existing one"),
-        cmd("stack list", "what's registered for this repo"),
+        cmd("stack list · wait <id>", "registered stacks · wait for attention"),
         cmd("queue [add <stack-id>]", "list entries · queue verified landing"),
         cmd("stack land <id>", "land now · skips queue verification"),
         "",

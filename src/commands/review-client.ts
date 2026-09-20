@@ -399,7 +399,6 @@ export async function pollPrVortexReview(
   opts: PollPrVortexReviewOptions = {},
 ): Promise<PrVortexReview> {
   const timeoutMs = opts.timeoutMs ?? REVIEW_POLL_DEFAULT_TIMEOUT_MS;
-  const intervalMs = opts.intervalMs ?? REVIEW_POLL_INTERVAL_MS;
   const now = opts.now ?? Date.now;
   const wait = opts.sleep ?? sleep;
   const startedAt = now();
@@ -428,20 +427,13 @@ export async function pollPrVortexReview(
     if (waitMs > 0) await wait(waitMs, opts.signal);
   };
 
-  const sleepBeforePoll = async () => {
-    const waitMs = Math.min(
-      stretchedPollIntervalMs(now() - startedAt, intervalMs),
-      Math.max(0, deadline - now()),
-    );
-    if (waitMs > 0) await wait(waitMs, opts.signal);
-  };
-
   while (now() < deadline) {
+    query.set("wait", String(Math.min(45, Math.max(1, Math.ceil((deadline - now()) / 1000)))));
     let poll: { status: number; body: unknown; retryAfterSeconds?: number };
     try {
       poll = await apiFetch(cfg, `/api/v1/stacks/pr-review?${query.toString()}`, {
         signal: opts.signal,
-        timeoutMs: Math.max(1, Math.min(30_000, deadline - now())),
+        timeoutMs: Number(query.get("wait")) * 1000 + 5_000,
       });
     } catch (err) {
       if (
@@ -471,7 +463,6 @@ export async function pollPrVortexReview(
     if (poll.status === 404) {
       transientFailures = 0;
       opts.onTick?.("progress");
-      await sleepBeforePoll();
       continue;
     }
     if (poll.status !== 200) {
@@ -516,7 +507,6 @@ export async function pollPrVortexReview(
         (opts.afterPass !== undefined && envelope.pass <= opts.afterPass))
     ) {
       opts.onTick?.("progress");
-      await sleepBeforePoll();
       continue;
     }
     lastEnvelope = envelope;
@@ -528,7 +518,6 @@ export async function pollPrVortexReview(
     if (resting && matches && !stale) return lastEnvelope;
 
     opts.onTick?.("progress");
-    await sleepBeforePoll();
   }
 
   throw new PrReviewPollTimeoutError(owner, repo, prNumber, lastEnvelope);

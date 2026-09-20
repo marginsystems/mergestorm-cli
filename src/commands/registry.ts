@@ -187,7 +187,12 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "  [--auto-review on|off] [--auto-patch on|off] [--vortex-thinking on|off]",
       "  [--repo-overview on|off] [--review-unit-land on|off]",
       "  [--cyclone-review-unit-land on|off] [--cyclone-skip-ci on|off]",
-      "  [--vortex-seam on|off] [--auto-land on|off]  Auto land default for new stacks",
+      "  [--cyclone-patch-unverified on|off]  Patch languages we cannot typecheck",
+      "  [--vortex-seam on|off] [--vortex-skip-all-clear on|off]",
+      "  [--auto-land on|off]  Auto land default for new stacks",
+      "  [--ignore-bot add <login>|remove <login>|clear]",
+      "  [--vortex-skip-check none|neutral] [--vortex-findings failure|neutral|success]",
+      "  [--cyclone-fail-check failure|neutral]",
       "  With flags: PATCH those settings and print the stored result",
     ],
     async run(args, ctx) {
@@ -196,9 +201,9 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
   },
   {
     name: "skill",
-    summary: "Install mergestorm-review and mergestorm-pr-loop for Claude or Cursor",
+    summary: "Install Mergestorm skills for Claude, Cursor, or agents",
     usage: [
-      "mergestorm skill install --claude|--cursor  Copy the mergestorm-review and mergestorm-pr-loop skills into this repo",
+      "mergestorm skill install --claude|--cursor|--agents  Copy the Mergestorm skills into this repo",
       "  [--json]",
     ],
     async run(args) {
@@ -224,7 +229,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     name: "queue",
     summary: "Merge queue: list, add a stack, or remove an entry",
     usage: [
-      "mergestorm queue [list] [--json]  List live merge-queue entries",
+      "mergestorm queue [list] [--json]  List live and recent bounced merge-queue entries",
       "mergestorm queue add <stack-id> [--json]  Queue a stack for verified landing",
       "mergestorm queue rm <entry-id|stack-id> [--json]  Remove a live queue entry",
     ],
@@ -240,13 +245,15 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "mergestorm stack submit         Push/open active stack ([--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off])",
       "mergestorm stack reset --force  Clear this repo's pre-submit authoring state",
       "mergestorm stack list [--json]  List registered stacks",
+      "mergestorm stack status <stack-id> [--json]  Enriched stack status",
+      "mergestorm stack wait <stack-id> [--json] [--timeout <s>]  Wait for stack attention (default 45s, max 300s)",
       "mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]  Per-stack policy",
       "mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off]  Import an open PR chain",
       "mergestorm stack restack <stack-id>   Restack stack descendants",
       "mergestorm stack land <stack-id>      Land bottom PR (or promote into unit)",
     ],
-    async run(args) {
-      await cmdStack(args);
+    async run(args, ctx) {
+      await cmdStack(args, { signal: ctx.signal });
     },
   },
   {

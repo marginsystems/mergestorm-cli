@@ -171,8 +171,8 @@ test("what's new covers the shipped package version (no empty pane)", () => {
   const rows = buildBannerRows(loggedIn(cliVersion()), 120);
   const text = stripAnsi(rows.join("\n"));
   assert.match(text, new RegExp(`New in v${cliVersion().replace(/\./g, "\\.")}`));
-  assert.match(text, /pr --wait fences a stale same-head pass/);
+  assert.match(text, /stack wait and held GET waits/);
 
   const narrowText = stripAnsi(buildBannerRows(loggedIn(cliVersion()), 80).join("\n"));
-  assert.match(narrowText, /pr --wait fences a stale same-head pass/);
+  assert.match(narrowText, /stack wait and held GET waits/);
 });

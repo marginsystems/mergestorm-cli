@@ -13,6 +13,7 @@ export {
 
 export {
   BEARER_SETTINGS,
+  BEARER_BOOLEAN_SETTINGS_KEYS,
   BEARER_SETTINGS_FLAGS,
   BEARER_SETTINGS_KEYS,
   BEARER_SETTINGS_LABELS,
@@ -114,3 +115,16 @@ export {
 } from "../ui/job-envelope.js";
 
 export { discoverTrunk } from "../git-stack.js";
+
+export { BOUNCE_KIND_LABELS, mergeQueueBounceLabel } from "../stack-dto.js";
+
+export {
+  STACK_WATCH_SCHEMA,
+  STACK_WATCH_DEFAULT_TIMEOUT_MS,
+  StackWatchError,
+  StackWatchTimeoutError,
+  pollStackWatch,
+  type PollStackWatchOptions,
+  type StackWatchCursor,
+  type StackWatchEnvelope,
+} from "../stack-watch.js";
