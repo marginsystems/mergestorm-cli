@@ -625,7 +625,7 @@ export async function getEnrichedStack(
   if (!Array.isArray(stacks)) {
     throw new CommandError(`Failed to get stack status (HTTP 200): ${JSON.stringify(body)}`);
   }
-  return stacks.find((stack) => stack?.id === id) ?? null;
+  return stacks.find((stack) => typeof stack?.id === "string" && stack.id.trim().toLowerCase() === id.toLowerCase()) ?? null;
 }
 
 /**
@@ -846,12 +846,25 @@ export async function landNextStack(
 /** List the authenticated user's live merge-queue entries. */
 export async function listMergeQueueEntries(
   cfg?: Config,
+  opts?: { stackId?: string },
 ): Promise<MergeQueueEntryDto[]> {
   const resolved = cfg ?? (await loadConfig());
-  const { status, body } = await apiFetch(resolved, "/api/v1/stacks/queue");
+  const stackId = opts?.stackId?.trim();
+  const { status, body, retryAfterSeconds } = await apiFetch(
+    resolved,
+    stackId ? `/api/v1/stacks/queue?stackId=${encodeURIComponent(stackId)}` : "/api/v1/stacks/queue",
+  );
   if (status === 404) {
     throw new CommandError(
       "Merge queue API is not available on this server yet. Deploy the API update or use the dashboard.",
+    );
+  }
+  if (status === 429) {
+    throw new CommandError(
+      rateLimitedMessage(retryAfterSeconds),
+      REVIEW_EXIT.rate_limited,
+      "rate_limited",
+      { retryAfterSeconds },
     );
   }
   if (status !== 200) {

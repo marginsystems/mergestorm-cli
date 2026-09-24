@@ -147,59 +147,63 @@ export async function pollStackWatch(
     throw timeout();
   };
 
-  let firstSnapshot = true;
-  while (firstSnapshot || now() < deadline) {
-    firstSnapshot = false;
-    const snapshot = await request(`/api/v1/stacks/enrich?stackId=${encodeURIComponent(id)}`, timeoutMs === 0) as { stacks?: StackDto[] } | null;
-    let stack = snapshot && Array.isArray(snapshot.stacks)
-      ? snapshot.stacks.find((stack) => stack.id.trim().toLowerCase() === id)
+  const enrich = async (finalSnapshot: boolean): Promise<StackDto> => {
+    const snapshot = await request(`/api/v1/stacks/enrich?stackId=${encodeURIComponent(id)}`, finalSnapshot) as { stacks?: StackDto[] } | null;
+    const stack = snapshot && Array.isArray(snapshot.stacks)
+      ? snapshot.stacks.find((candidate) => candidate.id.trim().toLowerCase() === id)
       : undefined;
     if (!stack || !Array.isArray(stack.layers)) {
       throw new StackWatchError("Stack snapshot missing or invalid", { ...lastEnvelope, status: "failed", assessment: "unavailable" });
     }
-    let layer = currentLayer(stack);
-    if (!enrolled) {
-      cursor = Object.freeze({ stackId: id, enrolledHeadSha: layer?.headSha ?? null });
-      enrolled = true;
-    }
-    lastEnvelope = { ...lastEnvelope, cursor, prNumber: layer?.prNumber ?? null, headSha: layer?.headSha ?? null };
-    const initialQueue = await request(`/api/v1/stacks/queue?stackId=${encodeURIComponent(id)}`, timeoutMs === 0) as { entries?: MergeQueueEntryDto[] } | null;
-    if (!initialQueue || !Array.isArray(initialQueue.entries)) {
-      throw new StackWatchError("Invalid merge queue response", { ...lastEnvelope, status: "failed", assessment: "unavailable" });
-    }
-    const initialEntries = initialQueue.entries.filter((entry) => entry.stackId.trim().toLowerCase() === id);
-    const evaluate = (stack: StackDto, entries: MergeQueueEntryDto[]) => {
-      const { attention, issues, currentCandidate, bounce } = stackBlockers(stack, entries, cursor);
-      if (bounce) cursor = Object.freeze({ ...cursor, bounceId: bounce.id,
-        ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}) });
-      lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available",
-        blocker: attention?.blocker ?? null, bounceKind: attention?.bounceKind ?? null,
-        prNumber: attention?.prNumber ?? currentCandidate?.prNumber ?? null,
-        headSha: attention ? attention.headSha : currentCandidate?.headSha ?? null,
-        status: attention ? "attention" : entries.some((entry) => ["queued", "running", "waiting"].includes(entry.state))
-          ? "in_progress" : "waiting" };
-    };
-    evaluate(stack, initialEntries);
-    if (lastEnvelope.status === "attention" || timeoutMs === 0) return lastEnvelope;
-    const seconds = Math.min(45, Math.max(1, Math.ceil((deadline - now()) / 1000)));
-    const queue = await request(`/api/v1/stacks/queue?stackId=${encodeURIComponent(id)}&wait=${seconds}`) as { entries?: MergeQueueEntryDto[] } | null;
+    return stack;
+  };
+  const queueRoute = `/api/v1/stacks/queue?stackId=${encodeURIComponent(id)}`;
+  const readQueue = async (route: string, finalSnapshot = false) => {
+    const queue = await request(route, finalSnapshot) as { entries?: MergeQueueEntryDto[]; fingerprint?: unknown } | null;
     if (!queue || !Array.isArray(queue.entries)) {
       throw new StackWatchError("Invalid merge queue response", { ...lastEnvelope, status: "failed", assessment: "unavailable" });
     }
-    if (now() < deadline) {
-      const refreshed = await request(`/api/v1/stacks/enrich?stackId=${encodeURIComponent(id)}`, true) as { stacks?: StackDto[] } | null;
-      stack = Array.isArray(refreshed?.stacks)
-        ? refreshed.stacks.find((candidate) => candidate.id.trim().toLowerCase() === id)
-        : undefined;
-      if (!stack || !Array.isArray(stack.layers)) {
-        throw new StackWatchError("Stack snapshot missing or invalid", { ...lastEnvelope, status: "failed", assessment: "unavailable" });
-      }
-      layer = currentLayer(stack);
-      lastEnvelope = { ...lastEnvelope, prNumber: layer?.prNumber ?? null, headSha: layer?.headSha ?? null };
+    return {
+      entries: queue.entries.filter((entry) => entry.stackId.trim().toLowerCase() === id),
+      fingerprint: typeof queue.fingerprint === "string" && queue.fingerprint ? queue.fingerprint : null,
+    };
+  };
+  const evaluate = (stack: StackDto, entries: MergeQueueEntryDto[]) => {
+    const { attention, issues, currentCandidate, bounce } = stackBlockers(stack, entries, cursor);
+    if (bounce) cursor = Object.freeze({ ...cursor, bounceId: bounce.id,
+      ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}) });
+    lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available",
+      blocker: attention?.blocker ?? null, bounceKind: attention?.bounceKind ?? null,
+      prNumber: attention?.prNumber ?? currentCandidate?.prNumber ?? null,
+      headSha: attention ? attention.headSha : currentCandidate?.headSha ?? null,
+      status: attention ? "attention" : entries.some((entry) => ["queued", "running", "waiting"].includes(entry.state))
+        ? "in_progress" : "waiting" };
+  };
+
+  let stack = await enrich(timeoutMs === 0);
+  const layer = currentLayer(stack);
+  if (!enrolled) {
+    cursor = Object.freeze({ stackId: id, enrolledHeadSha: layer?.headSha ?? null });
+    enrolled = true;
+  }
+  lastEnvelope = { ...lastEnvelope, cursor, prNumber: layer?.prNumber ?? null, headSha: layer?.headSha ?? null };
+  let queue = await readQueue(queueRoute, timeoutMs === 0);
+  evaluate(stack, queue.entries);
+  if (lastEnvelope.status === "attention" || timeoutMs === 0) return lastEnvelope;
+  while (now() < deadline) {
+    const heldAt = now();
+    const seconds = Math.min(45, Math.max(1, Math.ceil((deadline - heldAt) / 1000)));
+    const seen = queue.fingerprint ? `&seen=${encodeURIComponent(queue.fingerprint)}` : "";
+    const held = await readQueue(`${queueRoute}&wait=${seconds}${seen}`);
+    if (JSON.stringify(held.entries) === JSON.stringify(queue.entries)) {
+      await pause(intervalMs - (now() - heldAt));
     }
+    queue = held;
+    stack = await enrich(true);
+    const refreshed = currentLayer(stack);
+    lastEnvelope = { ...lastEnvelope, prNumber: refreshed?.prNumber ?? null, headSha: refreshed?.headSha ?? null };
     transientFailures = 0;
-    const entries = queue.entries.filter((entry) => entry.stackId.trim().toLowerCase() === id);
-    evaluate(stack, entries);
+    evaluate(stack, queue.entries);
     if (lastEnvelope.status === "attention") return lastEnvelope;
     opts.onTick?.(lastEnvelope);
   }

@@ -50,7 +50,6 @@ function harness(initial = stack(), initialEntries: MergeQueueEntryDto[] = []) {
     fetch: async (_cfg, route, init = {}) => {
       calls.push({ route, timeoutMs: init.timeoutMs });
       const response = state.respond?.(route, init);
-      if (route.includes("&wait=") && !response) time += 1000;
       return response ?? { status: 200, body: route.includes("/queue") ? { entries: state.entries } : { stacks: [state.stack] } };
     },
   };
@@ -174,7 +173,7 @@ for (const endpoint of ["snapshot", "queue"]) {
     };
     const result = await pollStackWatch(cfg, "stack", h.options);
     assert.equal(result.status, "attention");
-    assert.deepEqual(h.sleeps, [1250]);
+    assert.deepEqual(h.sleeps, endpoint === "queue" ? [1250] : [1250, 2000]);
     assert.equal(h.ticks[0].status, "rate_limited");
     assert.equal(
       h.calls.find((call) => call.route.includes("&wait="))?.timeoutMs,
@@ -433,6 +432,52 @@ test("one held queue GET per 45-second slice, with no polling sleep", async () =
   assert.deepEqual(h.sleeps, []);
 });
 
+for (const honorsSeen of [false, true]) {
+  test(`an unchanged bounced row ${honorsSeen ? "held by the server" : "answered instantly"} bounds enrich calls in one 45s slice`, async () => {
+    const h = harness(stack(), [bounce()]);
+    h.state.respond = (route) => {
+      if (!route.includes("/queue")) return undefined;
+      const params = new URL(route, "https://local").searchParams;
+      if (params.get("wait") !== null) {
+        assert.equal(params.get("seen"), "fp-bounce");
+        if (honorsSeen) {
+          h.state.advance(Number(params.get("wait")) * 1000);
+          h.state.stack = stack([layer({ ciStatus: "failure" })]);
+        }
+      }
+      return { status: 200, body: { entries: [bounce()], fingerprint: "fp-bounce" } };
+    };
+    const options = { ...h.options, timeoutMs: 45_000, cursor: { stackId: "stack", enrolledHeadSha: HEAD, bounceId: "bounce" } };
+    const result = honorsSeen ? await pollStackWatch(cfg, "stack", options) : await timedOut(options);
+    const enriches = h.calls.filter((call) => call.route.includes("/enrich")).length;
+    const held = h.calls.filter((call) => call.route.includes("&wait=")).length;
+    if (honorsSeen) {
+      assert.equal(result.blocker, "CI failed");
+      assert.equal(enriches, 2);
+      assert.equal(held, 1);
+      assert.deepEqual(h.sleeps, []);
+    } else {
+      assert.equal(result.blocker, null);
+      assert.equal(enriches, 1 + Math.ceil(45_000 / 2_000));
+      assert.equal(held, Math.ceil(45_000 / 2_000));
+      assert.ok(h.sleeps.every((ms) => ms > 0 && ms <= 2_000));
+    }
+  });
+}
+
+test("a changed held queue snapshot is evaluated without a polling pause", async () => {
+  const h = harness(stack(), [bounce({ state: "running" })]);
+  h.state.respond = (route) => {
+    if (!route.includes("&wait=")) return undefined;
+    h.state.entries = [bounce()];
+    return undefined;
+  };
+  const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 45_000 });
+  assert.equal(result.status, "attention");
+  assert.deepEqual(h.sleeps, []);
+  assert.ok(h.calls.filter((call) => call.route.includes("&wait=")).every((call) => !call.route.includes("&seen=")));
+});
+
 function organism() {
   return stack([
     layer({ prNumber: 41, branch: "feat/cowork-authors" }),
@@ -528,6 +573,7 @@ for (const state of ["queued", "running", "waiting", null] as const) {
     assert.equal(result.assessment, "available");
     assert.equal(h.calls.length, 2);
     assert.ok(h.calls.every(call => !call.route.includes("&wait=")));
+    assert.deepEqual(h.sleeps, []);
   });
 }
 

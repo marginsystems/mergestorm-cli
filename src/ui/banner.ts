@@ -108,7 +108,7 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.20": [
     "stack watch pair-gate attention and upstack issues",
   ],
-  "0.3.21": [
+  "0.3.22": [
     "stack wait holds an unchanged queue instead of spinning",
   ],
 };
