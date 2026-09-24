@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CommandError } from "../errors.js";
+import {
+  createPrs,
+  createPrsOnRepository,
+  findOpenPrNumber,
+  GraphqlBlockedError,
+  type GhResult,
+  type GithubApi,
+  type GraphqlRunner,
+} from "../gh.js";
 import type { StackMeta } from "../stack-meta.js";
 import {
   assertMayParentOntoRegistered,
@@ -47,6 +56,8 @@ type SubmitHarness = {
   saved: StackMeta[];
   createPrCalls: number;
   createPrBases: string[];
+  createPrBatches: string[][];
+  events: string[];
   adoptCalls: number;
   /** PR numbers passed to adoptStack, in call order. */
   adoptPrs: number[];
@@ -61,6 +72,8 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
   const saved: StackMeta[] = [];
   const pushCalls: string[] = [];
   const createPrBases: string[] = [];
+  const createPrBatches: string[][] = [];
+  const events: string[] = [];
   const adoptPrs: number[] = [];
   const adoptPolicies: Array<{ autoEnqueueWhenReady?: boolean } | undefined> = [];
   const adoptStackIds: string[] = [];
@@ -69,16 +82,16 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
   let ensureParkCalls = 0;
   const {
     ensureUpperPark: ensureUpperParkOverride,
-    createPr: createPrOverride,
+    createPrs: createPrsOverride,
     adoptStack: adoptStackOverride,
     ...rest
   } = overrides;
   const deps: StackSubmitDeps = {
     cwd: "/tmp/fake-repo",
     gitTopLevel: () => "/tmp/fake-repo",
-    loadStackMeta: async (cwd?: string, stacksRoot?: string) =>
+    loadStackMeta: async (_cwd?: string, _stacksRoot?: string) =>
       structuredClone(SAMPLE_META),
-    saveStackMeta: async (meta, cwd?: string, stacksRoot?: string) => {
+    saveStackMeta: async (meta, _cwd?: string, _stacksRoot?: string) => {
       saved.push(structuredClone(meta));
     },
     parseGithubOriginRepo: () => ({ owner: "acme", repo: "widgets" }),
@@ -93,15 +106,24 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
     tipCommitSubject: () => "feat: layer one",
     tipCommitMessage: () => "feat: layer one\n\nBody.\n",
     buildPrBodyFromCommit: () => "## Summary\n- feat: layer one\n",
-    createPr: (input) => {
-      createPrCalls += 1;
-      createPrBases.push(input.base);
-      if (createPrOverride) return createPrOverride(input);
-      return 40 + createPrCalls;
+    createPrs: (input) => {
+      events.push(`createPrs:${input.prs.length}`);
+      createPrBatches.push(input.prs.map((pr) => pr.head));
+      for (const pr of input.prs) createPrBases.push(pr.base);
+      if (createPrsOverride) {
+        const numbers = createPrsOverride(input);
+        createPrCalls += input.prs.length;
+        return numbers;
+      }
+      return input.prs.map(() => {
+        createPrCalls += 1;
+        return 40 + createPrCalls;
+      });
     },
     loadConfig: async () => ({ apiKey: "msk_live_test", apiBase: "https://api.example.test" }),
     listStacks: async () => [],
     adoptStack: async (owner, repo, prNumber, cfg, policy) => {
+      events.push(`adopt:${prNumber}`);
       adoptCalls += 1;
       adoptPrs.push(prNumber);
       adoptPolicies.push(policy);
@@ -120,6 +142,7 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
       return result;
     },
     ensureUpperPark: async (stackId, cfg) => {
+      events.push("ensureUpperPark");
       ensureParkCalls += 1;
       if (ensureUpperParkOverride) return ensureUpperParkOverride(stackId, cfg);
       throw new Error("ensureUpperPark should not run");
@@ -133,6 +156,8 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
       return createPrCalls;
     },
     createPrBases,
+    createPrBatches,
+    events,
     get adoptCalls() {
       return adoptCalls;
     },
@@ -266,6 +291,7 @@ test("parseStackSubmitArgs accepts --extend and --json", () => {
     autoLand: undefined,
     autoReview: undefined,
     autoPatch: undefined,
+    rest: false,
     asJson: true,
   });
   assert.deepEqual(parseStackSubmitArgs([]), {
@@ -273,8 +299,10 @@ test("parseStackSubmitArgs accepts --extend and --json", () => {
     autoLand: undefined,
     autoReview: undefined,
     autoPatch: undefined,
+    rest: false,
     asJson: false,
   });
+  assert.equal(parseStackSubmitArgs(["--rest"]).rest, true);
   assert.equal(parseStackSubmitArgs(["--auto-land", "on"]).autoLand, true);
   assert.equal(parseStackSubmitArgs(["--auto-land=off"]).autoLand, false);
   assert.equal(parseStackSubmitArgs(["--auto-review", "on"]).autoReview, true);
@@ -904,6 +932,270 @@ test("cmdStackSubmit --extend onto a parked tip reuses the freeze without mintin
   assert.deepEqual(h.createPrBases, ["mg-park-1-g1"]);
   assert.equal(h.ensureParkCalls, 0);
   assert.equal(h.adoptCalls, 1);
+});
+
+function chainMeta(branches: string[], parent = "main"): StackMeta {
+  return {
+    version: 2,
+    trunk: "main",
+    stacks: [
+      {
+        layers: branches.map((branch, i) => ({
+          branch,
+          parentBranch: i === 0 ? parent : branches[i - 1]!,
+        })),
+      },
+    ],
+    active: 0,
+  };
+}
+
+function fakeGraphql(options: { failOnRequest?: number } = {}) {
+  const mutations: number[] = [];
+  let next = 100;
+  const runner: GraphqlRunner = (request) => {
+    const aliases = Object.keys(request.variables);
+    mutations.push((request.query.match(/createPullRequest\(/g) ?? []).length);
+    if (options.failOnRequest === mutations.length) {
+      return {
+        data: null,
+        errors: [{ message: "Head sha can't be blank, Base sha can't be blank" }],
+      };
+    }
+    const data: Record<string, unknown> = {};
+    aliases.forEach((_, i) => {
+      next += 1;
+      data[`pr${i}`] = { pullRequest: { number: next } };
+    });
+    return { data };
+  };
+  return { runner, mutations };
+}
+
+const SEVEN = ["feat/l1", "feat/l2", "feat/l3", "feat/l4", "feat/l5", "feat/l6", "feat/l7"];
+
+test("cmdStackSubmit opens a fresh 7-layer stack in two GraphQL creates around the park", async () => {
+  const gql = fakeGraphql();
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => chainMeta(SEVEN),
+    createPrs: (input) => createPrsOnRepository("R_repo", input.prs, gql.runner),
+    ensureUpperPark: async () => ({ freezeBranch: "mg-park-1-g1", created: true }),
+  });
+  const captured = await captureStackOutput(() => cmdStackSubmit(["--json"], h.deps));
+  assert.equal(captured.error, null);
+  assert.deepEqual(h.pushCalls, SEVEN);
+  assert.deepEqual(gql.mutations, [2, 5]);
+  assert.deepEqual(h.createPrBatches, [SEVEN.slice(0, 2), SEVEN.slice(2)]);
+  assert.deepEqual(h.createPrBases, [
+    "main",
+    "feat/l1",
+    "mg-park-1-g1",
+    "mg-park-1-g1",
+    "mg-park-1-g1",
+    "mg-park-1-g1",
+    "mg-park-1-g1",
+  ]);
+  assert.deepEqual(h.events, [
+    "createPrs:2",
+    "adopt:101",
+    "ensureUpperPark",
+    "createPrs:5",
+    "adopt:107",
+  ]);
+  const body = JSON.parse(captured.stdout.join("\n"));
+  assert.deepEqual(
+    body.layers.map((row: { branch: string; prNumber: number }) => [row.branch, row.prNumber]),
+    SEVEN.map((branch, i) => [branch, 101 + i]),
+  );
+});
+
+test("cmdStackSubmit opens a 2-layer stack in one request without a park", async () => {
+  const gql = fakeGraphql();
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => chainMeta(["feat/a", "feat/b"]),
+    createPrs: (input) => createPrsOnRepository("R_repo", input.prs, gql.runner),
+  });
+  await cmdStackSubmit([], h.deps);
+  assert.deepEqual(gql.mutations, [2]);
+  assert.deepEqual(h.createPrBases, ["main", "feat/a"]);
+  assert.equal(h.ensureParkCalls, 0);
+  assert.deepEqual(h.adoptPrs, [101]);
+});
+
+test("cmdStackSubmit skips an already-open PR inside a wave and keeps layer order", async () => {
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => chainMeta(["feat/a", "feat/b"]),
+    findOpenPrNumber: (_owner, _repo, branch) => (branch === "feat/a" ? 99 : null),
+  });
+  const captured = await captureStackOutput(() => cmdStackSubmit(["--json"], h.deps));
+  assert.equal(captured.error, null);
+  assert.deepEqual(h.createPrBatches, [["feat/b"]]);
+  assert.deepEqual(h.adoptPrs, [99]);
+  const body = JSON.parse(captured.stdout.join("\n"));
+  assert.deepEqual(
+    body.layers.map((row: { branch: string; prNumber: number; created: boolean }) => [
+      row.branch,
+      row.prNumber,
+      row.created,
+    ]),
+    [
+      ["feat/a", 99, false],
+      ["feat/b", 41, true],
+    ],
+  );
+});
+
+test("cmdStackSubmit --extend onto a parked tip opens 7 layers as one wave chunked 5 + 2", async () => {
+  const registered: StackDto[] = [
+    {
+      ...REGISTERED[0]!,
+      layers: [
+        extraLayer("feat/a", "mg-stack-1", 1),
+        extraLayer("feat/b", "feat/a", 2),
+        extraLayer("feat/c", "mg-park-1-g1", 3),
+      ],
+    },
+  ];
+  const gql = fakeGraphql();
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => chainMeta(SEVEN, "feat/c"),
+    listStacks: async () => structuredClone(registered),
+    createPrs: (input) => createPrsOnRepository("R_repo", input.prs, gql.runner),
+  });
+  await cmdStackSubmit(["--extend"], h.deps);
+  assert.deepEqual(h.createPrBatches, [SEVEN]);
+  assert.deepEqual(gql.mutations, [5, 2]);
+  assert.equal(h.ensureParkCalls, 0);
+  assert.deepEqual(h.adoptPrs, [101]);
+});
+
+test("cmdStackSubmit fails the first wave on a GraphQL error without adopting", async () => {
+  const gql = fakeGraphql({ failOnRequest: 1 });
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => chainMeta(["feat/a", "feat/b"]),
+    createPrs: (input) => createPrsOnRepository("R_repo", input.prs, gql.runner),
+  });
+  await assert.rejects(() => cmdStackSubmit([], h.deps), (err: unknown) => {
+    assert.ok(err instanceof CommandError);
+    assert.match(err.message, /Head sha can't be blank/);
+    assert.doesNotMatch(err.message, /GitHub did open/);
+    return true;
+  });
+  assert.equal(h.adoptCalls, 0);
+  assert.equal(h.saved.length, 0);
+});
+
+test("cmdStackSubmit fails the upper wave on a GraphQL error after the first adopt only", async () => {
+  const gql = fakeGraphql({ failOnRequest: 2 });
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => chainMeta(SEVEN),
+    createPrs: (input) => createPrsOnRepository("R_repo", input.prs, gql.runner),
+    ensureUpperPark: async () => ({ freezeBranch: "mg-park-1-g1", created: true }),
+  });
+  await assert.rejects(() => cmdStackSubmit([], h.deps), /Head sha can't be blank/);
+  assert.deepEqual(h.events, ["createPrs:2", "adopt:101", "ensureUpperPark", "createPrs:5"]);
+  assert.equal(h.saved.length, 0);
+});
+
+function recordApiModes(overrides: Partial<StackSubmitDeps> = {}) {
+  const lookups: Array<GithubApi | undefined> = [];
+  const creates: Array<GithubApi | undefined> = [];
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => chainMeta(["feat/a", "feat/b"]),
+    findOpenPrNumber: (_owner, _repo, _branch, _cwd, options) => {
+      lookups.push(options?.api);
+      return null;
+    },
+    createPrs: (input) => {
+      creates.push(input.api);
+      return input.prs.map((_, i) => 101 + i);
+    },
+    ...overrides,
+  });
+  return { h, lookups, creates };
+}
+
+test("cmdStackSubmit uses GraphQL when neither --rest nor MERGESTORM_GITHUB_API is set", async () => {
+  const { h, lookups, creates } = recordApiModes({ env: {} });
+  await cmdStackSubmit([], h.deps);
+  assert.ok(lookups.length > 0);
+  assert.ok(lookups.every((api) => api === "graphql"));
+  assert.deepEqual(creates, ["graphql"]);
+});
+
+test("cmdStackSubmit --rest forces REST for PR lookup and create", async () => {
+  const { h, lookups, creates } = recordApiModes({ env: {} });
+  await cmdStackSubmit(["--rest"], h.deps);
+  assert.ok(lookups.length > 0);
+  assert.ok(lookups.every((api) => api === "rest"));
+  assert.deepEqual(creates, ["rest"]);
+});
+
+test("cmdStackSubmit honors MERGESTORM_GITHUB_API=rest", async () => {
+  const { h, lookups, creates } = recordApiModes({ env: { MERGESTORM_GITHUB_API: "rest" } });
+  await cmdStackSubmit([], h.deps);
+  assert.ok(lookups.length > 0);
+  assert.ok(lookups.every((api) => api === "rest"));
+  assert.deepEqual(creates, ["rest"]);
+});
+
+test("cmdStackSubmit opens the stack over REST when the proxy blocks GitHub GraphQL", async () => {
+  const blockMessage =
+    "HTTP 403: GitHub GraphQL is not available from Claude Code sessions; use the REST API (gh api repos/{owner}/{repo}/...)";
+  const ghCalls: string[][] = [];
+  let nextPr = 300;
+  const gh = (args: string[], input?: string): GhResult => {
+    ghCalls.push(args);
+    if (args[0] === "pr") return { ok: false, status: 1, stderr: blockMessage };
+    if (args.includes("GET")) return { ok: true, stdout: "[]" };
+    assert.ok(input);
+    nextPr += 1;
+    return { ok: true, stdout: JSON.stringify({ number: nextPr }) };
+  };
+  const graphql: GraphqlRunner = () => {
+    throw new GraphqlBlockedError(`gh api graphql failed: ${blockMessage}`);
+  };
+  const h = makeSubmitHarness({
+    env: {},
+    loadStackMeta: async () => chainMeta(["feat/a", "feat/b"]),
+    findOpenPrNumber: (owner, repo, branch, cwd, options) =>
+      findOpenPrNumber(owner, repo, branch, cwd, { ...options, gh }),
+    createPrs: (input) => createPrs({ ...input, repo: "widgets-blocked", graphql, gh }),
+  });
+  const captured = await captureStackOutput(() => cmdStackSubmit(["--json"], h.deps));
+  assert.equal(captured.error, null);
+  assert.deepEqual(h.adoptPrs, [301]);
+  const body = JSON.parse(captured.stdout.join("\n"));
+  assert.deepEqual(
+    body.layers.map((row: { branch: string; prNumber: number }) => [row.branch, row.prNumber]),
+    [
+      ["feat/a", 301],
+      ["feat/b", 302],
+    ],
+  );
+  assert.ok(ghCalls.some((args) => args.includes("POST")));
+});
+
+test("cmdStackSubmit does not retry over REST on an ordinary GitHub GraphQL error", async () => {
+  const ghCalls: string[][] = [];
+  const gh = (args: string[]): GhResult => {
+    ghCalls.push(args);
+    return { ok: true, stdout: "[]" };
+  };
+  let call = 0;
+  const graphql: GraphqlRunner = () => {
+    call += 1;
+    if (call === 1) return { data: { repository: { id: "R_plain" } } };
+    return { data: null, errors: [{ message: "Head sha can't be blank" }] };
+  };
+  const h = makeSubmitHarness({
+    env: {},
+    loadStackMeta: async () => chainMeta(["feat/a", "feat/b"]),
+    createPrs: (input) => createPrs({ ...input, repo: "widgets-plain-error", graphql, gh }),
+  });
+  await assert.rejects(() => cmdStackSubmit([], h.deps), /Head sha can't be blank/);
+  assert.equal(ghCalls.length, 0);
+  assert.equal(h.adoptCalls, 0);
 });
 
 const STRIP = /\u001b\[[0-9;]*m/g;

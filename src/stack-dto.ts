@@ -7,6 +7,27 @@ export type RestackError = {
   backupRef: string | null;
 };
 
+const RESTACK_ATTEMPT_CAP = 3;
+
+export function restackAttemptsExhausted(error: Pick<RestackError, "attempts">): boolean {
+  return error.attempts >= RESTACK_ATTEMPT_CAP;
+}
+
+export function pushRejectionIsRetryable(message: string): boolean {
+  if (/stale info|fetch first/i.test(message)) return false;
+  return /commit_refs|remote rejected[^\n]*\(failure\)|HTTP 5\d\d|returned error: 5\d\d|RPC failed|could not resolve host|failed to connect|connection (?:reset|refused|timed out)|operation timed out|early EOF|unexpected disconnect|remote end hung up|SSL_|gnutls/i.test(message);
+}
+
+export function restackRetryPending(
+  error: { kind: string; attempts: number; detail?: string | null; headSha?: string | null },
+  layer?: { state: string; headSha?: string | null },
+): boolean {
+  if (error.kind !== "push_failed" || restackAttemptsExhausted(error)) return false;
+  if (layer && (layer.state !== "needs_restack" && layer.state !== "restacking" || layer.headSha !== error.headSha)) return false;
+  if (error.detail == null) return false;
+  return !/\(origin\/\S+ moved to /.test(error.detail) && pushRejectionIsRetryable(error.detail);
+}
+
 /**
  * Wire types returned by the stack list/enrich HTTP endpoints.
  *

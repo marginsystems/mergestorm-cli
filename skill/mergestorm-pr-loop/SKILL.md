@@ -56,7 +56,8 @@ mg skill install --claude --cursor --agents
 
 Map these to `mergestorm.pr_review/v1` envelope fields; do not invent statuses.
 
-- `finding_count` is 0 (empty inline and offDiff): stop. A skipped GitHub review body (account Skip All-clear) is still a completed pass — do not wait for an Approve / All-clear comment. Tell the human the PR is clear and that Auto land owns landing. Never merge it yourself.
+- `finding_count` is 0 and (the pass verdict is `comment` or a finding title in `findings.inline` or `findings.offDiff` is Decision required): stop. Surface the pass, and quote that note when it is present. Do not patch.
+- `finding_count` is 0 and the pass verdict is `approve`: stop. A skipped GitHub review body (account Skip All-clear) is still a completed pass — do not wait for an Approve / All-clear comment. Tell the human the PR is clear and that Auto land owns landing. Never merge it yourself.
 - status is `rate_limited`, or `patch_policy.mode` is `"hold"`: surface the findings to the human and stop. Do not patch.
 - status is `failed`: report to the human. Do not keep pushing to retrigger.
 - status is `in_progress` and the envelope has a `head_sha`: the pass is still running; call `review_wait_pr` again with the same `after_sha` and the same `after_pass`.

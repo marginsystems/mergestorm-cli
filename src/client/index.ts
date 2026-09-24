@@ -128,3 +128,5 @@ export {
   type StackWatchCursor,
   type StackWatchEnvelope,
 } from "../stack-watch.js";
+
+export { stackBlockers, stackBlockersSummary, sameHead, type StackBlocker } from "../stack-blockers.js";

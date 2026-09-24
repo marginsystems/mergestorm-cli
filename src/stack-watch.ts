@@ -1,3 +1,4 @@
+import { currentLayer, stackBlockers, type StackBlocker } from "./stack-blockers.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { apiFetch, type ApiFetchResult } from "./api.js";
 import type { Config } from "./config.js";
@@ -8,7 +9,7 @@ import {
   isTransientReviewPollStatus,
   transientRetryWaitMs,
 } from "./commands/review-client.js";
-import { mergeQueueBounceLabel, type MergeQueueEntryDto, type StackDto, type StackLayerDto } from "./stack-dto.js";
+import { type MergeQueueEntryDto, type StackDto } from "./stack-dto.js";
 
 export const STACK_WATCH_SCHEMA = "mergestorm.stack_watch/v1" as const;
 export const STACK_WATCH_DEFAULT_TIMEOUT_MS = 45_000;
@@ -30,6 +31,9 @@ export type StackWatchEnvelope = {
   prNumber: number | null;
   headSha: string | null;
   cursor: StackWatchCursor;
+  issues: StackBlocker[];
+  currentCandidate: { prNumber: number; headSha: string | null } | null;
+  assessment: "available" | "unavailable";
 };
 
 export type PollStackWatchOptions = {
@@ -64,73 +68,6 @@ export class StackWatchError extends Error {
   }
 }
 
-function sameHead(a: string | null | undefined, b: string | null | undefined): boolean {
-  const left = a?.trim().toLowerCase();
-  const right = b?.trim().toLowerCase();
-  return !!left && !!right && (left.startsWith(right) || right.startsWith(left));
-}
-
-function currentLayer(stack: StackDto): StackLayerDto | undefined {
-  const open = stack.layers.filter((layer) =>
-    layer.prNumber > 0 && layer.state !== "merged" && layer.state !== "closed",
-  );
-  const promote = open.filter((layer) =>
-    layer.prNumber !== stack.unit?.landPrNumber &&
-    !stack.unit?.members.some((member) => member.prNumber === layer.prNumber && member.promotedHeadSha),
-  ).sort((a, b) => a.position - b.position);
-  const land = stack.unit?.landPr;
-  return promote[0] ?? open.find((layer) => layer.prNumber === stack.unit?.landPrNumber) ??
-    (land && land.prNumber > 0 && land.state !== "merged" && land.state !== "closed" ? land : undefined);
-}
-
-/** Keep label text and precedence aligned with MCP stack-summary.blockerLabel. */
-function attention(
-  stack: StackDto,
-  layer: StackLayerDto | undefined,
-  queue: MergeQueueEntryDto[],
-  cursor: StackWatchCursor,
-): { blocker: string | null; bounceKind: string | null; bounce?: MergeQueueEntryDto } {
-  const none = { blocker: null, bounceKind: null };
-  if (stack.archivedAt || queue.some((entry) => ["queued", "running", "waiting"].includes(entry.state))) return none;
-  const bounce = queue.filter((entry) => entry.state === "bounced")
-    .sort((a, b) => (Date.parse(b.finishedAt ?? "") || 0) - (Date.parse(a.finishedAt ?? "") || 0))[0];
-  const kind = bounce?.bounceDetail?.kind;
-  const recoverable = kind === "head_moved" || kind === "must_consolidate";
-  const recoverableSha = kind === "head_moved"
-    ? bounce?.bounceDetail?.headSha ?? bounce?.verifyHeadSha
-    : bounce?.verifyHeadSha ?? bounce?.bounceDetail?.headSha;
-  const currentRecoverable = recoverable && sameHead(layer?.headSha, recoverableSha);
-  const hardBlock = (blocker: string) => ({ blocker, bounceKind: null });
-  if (layer) {
-    if (layer.restackError && layer.state !== "restacking") {
-      return hardBlock(layer.restackError.kind === "rebase_conflict" ? "Conflict" : "Restack failed");
-    }
-    if (layer.state === "conflict") return hardBlock("Conflict");
-    if (layer.draft) return hardBlock("Draft PR");
-    if ((!layer.headSha || layer.mergeableHeadSha === layer.headSha) &&
-      (layer.mergeable === false || layer.mergeableState?.toLowerCase() === "dirty")) return hardBlock("Merge conflicts");
-    if (!currentRecoverable && (layer.ciStatus === "failure" || (layer.checks?.failure ?? 0) > 0)) {
-      const name = layer.checks?.failingName?.trim();
-      return hardBlock(`CI failed${name ? ` — ${name}` : ""}`);
-    }
-    const tempest = layer.agentRuns?.find((run) => run.agent === "tempest" &&
-      ["findings", "failed"].includes(run.status) && sameHead(run.sha, layer.headSha));
-    if (tempest) return hardBlock(`Tempest ${tempest.status}`);
-    if (layer.vortexStatus === "failed") return hardBlock("Review failed");
-    if (stack.unit?.landPrNumber === layer.prNumber) {
-      if (stack.unit.landingBlockReason?.trim()) return hardBlock(stack.unit.landingBlockReason.trim());
-      if (stack.unit.tempestLandStatus?.toLowerCase() === "failed") return hardBlock("Tempest failed");
-    }
-  }
-  if (!bounce || !kind || recoverable || !layer) return none;
-  if (cursor.bounceId === bounce.id || (cursor.afterFinishedAt &&
-    !(Date.parse(bounce.finishedAt ?? "") > Date.parse(cursor.afterFinishedAt)))) return none;
-  // Compare with the observed promote/land head, never the enrollment or verify head.
-  if (!sameHead(bounce.bounceDetail?.headSha ?? bounce.verifyHeadSha, layer.headSha) ||
-    (bounce.bounceDetail?.prNumber != null && bounce.bounceDetail.prNumber !== layer.prNumber)) return none;
-  return { blocker: mergeQueueBounceLabel(bounce), bounceKind: kind, bounce };
-}
-
 /** Wait on queue invalidations, then evaluate a fresh stack snapshot. */
 export async function pollStackWatch(
   cfg: Config,
@@ -157,11 +94,12 @@ export async function pollStackWatch(
     stackId: id,
   });
   let lastEnvelope: StackWatchEnvelope = {
-    schema: STACK_WATCH_SCHEMA, status: "waiting", stackId: id, blocker: null,
+    schema: STACK_WATCH_SCHEMA, status: "failed", stackId: id, blocker: null,
     bounceKind: null, prNumber: null, headSha: null, cursor,
+    issues: [], currentCandidate: null, assessment: "unavailable",
   };
   let transientFailures = 0;
-  const timeout = () => new StackWatchTimeoutError({ ...lastEnvelope, status: "waiting" });
+  const timeout = () => new StackWatchTimeoutError(lastEnvelope);
   const pause = async (ms: number) => {
     const remaining = Math.min(ms, Math.max(0, deadline - now()));
     if (remaining > 0) await wait(remaining, opts.signal);
@@ -180,39 +118,44 @@ export async function pollStackWatch(
         });
       } catch (err) {
         if (opts.signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
-        if (now() >= deadline) throw timeout();
-        if (isTransientReviewPollError(err) && transientFailures < REVIEW_POLL_MAX_TRANSIENT_RETRIES) {
+        if (now() >= deadline && timeoutMs !== 0) throw timeout();
+        if (timeoutMs !== 0 && isTransientReviewPollError(err) && transientFailures < REVIEW_POLL_MAX_TRANSIENT_RETRIES) {
           transientFailures += 1;
           opts.onTick?.(lastEnvelope);
           await pause(transientRetryWaitMs({ failureCount: transientFailures, random: opts.random }));
           continue;
         }
         throw new StackWatchError(err instanceof Error ? err.message : String(err),
-          { ...lastEnvelope, status: "failed" }, { cause: err });
+          { ...lastEnvelope, status: "failed", assessment: "unavailable" }, { cause: err });
       }
       if (response.status === 200) return response.body;
-      if (isTransientReviewPollStatus(response.status) && transientFailures < REVIEW_POLL_MAX_TRANSIENT_RETRIES) {
+      const retryWaitMs = transientRetryWaitMs({
+        failureCount: transientFailures + 1, retryAfterSeconds: response.retryAfterSeconds, random: opts.random,
+      });
+      if (timeoutMs !== 0 && isTransientReviewPollStatus(response.status) && transientFailures < REVIEW_POLL_MAX_TRANSIENT_RETRIES &&
+        (response.status !== 429 || retryWaitMs < deadline - now())) {
         transientFailures += 1;
         opts.onTick?.({ ...lastEnvelope, status: response.status === 429 ? "rate_limited" : lastEnvelope.status });
-        await pause(transientRetryWaitMs({
-          failureCount: transientFailures, retryAfterSeconds: response.retryAfterSeconds, random: opts.random,
-        }));
+        await pause(retryWaitMs);
         continue;
       }
       throw new StackWatchError(`Stack poll failed (HTTP ${response.status})`, {
         ...lastEnvelope, status: response.status === 429 ? "rate_limited" : "failed",
+        assessment: "unavailable",
       }, undefined, response.retryAfterSeconds);
     }
     throw timeout();
   };
 
-  while (now() < deadline) {
-    const snapshot = await request(`/api/v1/stacks/enrich?stackId=${encodeURIComponent(id)}`) as { stacks?: StackDto[] } | null;
+  let firstSnapshot = true;
+  while (firstSnapshot || now() < deadline) {
+    firstSnapshot = false;
+    const snapshot = await request(`/api/v1/stacks/enrich?stackId=${encodeURIComponent(id)}`, timeoutMs === 0) as { stacks?: StackDto[] } | null;
     let stack = snapshot && Array.isArray(snapshot.stacks)
       ? snapshot.stacks.find((stack) => stack.id.trim().toLowerCase() === id)
       : undefined;
     if (!stack || !Array.isArray(stack.layers)) {
-      throw new StackWatchError("Stack snapshot missing or invalid", { ...lastEnvelope, status: "failed" });
+      throw new StackWatchError("Stack snapshot missing or invalid", { ...lastEnvelope, status: "failed", assessment: "unavailable" });
     }
     let layer = currentLayer(stack);
     if (!enrolled) {
@@ -220,27 +163,28 @@ export async function pollStackWatch(
       enrolled = true;
     }
     lastEnvelope = { ...lastEnvelope, cursor, prNumber: layer?.prNumber ?? null, headSha: layer?.headSha ?? null };
-    const initialQueue = await request(`/api/v1/stacks/queue?stackId=${encodeURIComponent(id)}`) as { entries?: MergeQueueEntryDto[] } | null;
+    const initialQueue = await request(`/api/v1/stacks/queue?stackId=${encodeURIComponent(id)}`, timeoutMs === 0) as { entries?: MergeQueueEntryDto[] } | null;
     if (!initialQueue || !Array.isArray(initialQueue.entries)) {
-      throw new StackWatchError("Invalid merge queue response", { ...lastEnvelope, status: "failed" });
+      throw new StackWatchError("Invalid merge queue response", { ...lastEnvelope, status: "failed", assessment: "unavailable" });
     }
     const initialEntries = initialQueue.entries.filter((entry) => entry.stackId.trim().toLowerCase() === id);
-    const initial = attention(stack, layer, initialEntries, cursor);
-    if (initial.blocker) {
-      const { bounce, ...result } = initial;
-      if (bounce) {
-        cursor = Object.freeze({
-          ...cursor,
-          bounceId: bounce.id,
-          ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}),
-        });
-      }
-      return { ...lastEnvelope, ...result, cursor, status: "attention" };
-    }
+    const evaluate = (stack: StackDto, entries: MergeQueueEntryDto[]) => {
+      const { attention, issues, currentCandidate, bounce } = stackBlockers(stack, entries, cursor);
+      if (bounce) cursor = Object.freeze({ ...cursor, bounceId: bounce.id,
+        ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}) });
+      lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available",
+        blocker: attention?.blocker ?? null, bounceKind: attention?.bounceKind ?? null,
+        prNumber: attention?.prNumber ?? currentCandidate?.prNumber ?? null,
+        headSha: attention ? attention.headSha : currentCandidate?.headSha ?? null,
+        status: attention ? "attention" : entries.some((entry) => ["queued", "running", "waiting"].includes(entry.state))
+          ? "in_progress" : "waiting" };
+    };
+    evaluate(stack, initialEntries);
+    if (lastEnvelope.status === "attention" || timeoutMs === 0) return lastEnvelope;
     const seconds = Math.min(45, Math.max(1, Math.ceil((deadline - now()) / 1000)));
     const queue = await request(`/api/v1/stacks/queue?stackId=${encodeURIComponent(id)}&wait=${seconds}`) as { entries?: MergeQueueEntryDto[] } | null;
     if (!queue || !Array.isArray(queue.entries)) {
-      throw new StackWatchError("Invalid merge queue response", { ...lastEnvelope, status: "failed" });
+      throw new StackWatchError("Invalid merge queue response", { ...lastEnvelope, status: "failed", assessment: "unavailable" });
     }
     if (now() < deadline) {
       const refreshed = await request(`/api/v1/stacks/enrich?stackId=${encodeURIComponent(id)}`, true) as { stacks?: StackDto[] } | null;
@@ -248,26 +192,14 @@ export async function pollStackWatch(
         ? refreshed.stacks.find((candidate) => candidate.id.trim().toLowerCase() === id)
         : undefined;
       if (!stack || !Array.isArray(stack.layers)) {
-        throw new StackWatchError("Stack snapshot missing or invalid", { ...lastEnvelope, status: "failed" });
+        throw new StackWatchError("Stack snapshot missing or invalid", { ...lastEnvelope, status: "failed", assessment: "unavailable" });
       }
       layer = currentLayer(stack);
       lastEnvelope = { ...lastEnvelope, prNumber: layer?.prNumber ?? null, headSha: layer?.headSha ?? null };
     }
     transientFailures = 0;
     const entries = queue.entries.filter((entry) => entry.stackId.trim().toLowerCase() === id);
-    const { bounce, ...result } = attention(stack, layer, entries, cursor);
-    if (bounce) {
-      cursor = Object.freeze({
-        ...cursor,
-        bounceId: bounce.id,
-        ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}),
-      });
-    }
-    lastEnvelope = {
-      ...lastEnvelope, ...result, cursor,
-      status: result.blocker ? "attention" : entries.some((entry) => ["queued", "running", "waiting"].includes(entry.state))
-        ? "in_progress" : "waiting",
-    };
+    evaluate(stack, entries);
     if (lastEnvelope.status === "attention") return lastEnvelope;
     opts.onTick?.(lastEnvelope);
   }

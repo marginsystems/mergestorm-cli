@@ -13,8 +13,6 @@ import {
   isTransientReviewPollStatus,
   parseReviewArgs,
   resolveReviewBase,
-  VORTEX_ROUTER_CAPS,
-  VORTEX_SPECIALIST_IDS,
   withReviewJobRecovery,
 } from "./review.js";
 import {

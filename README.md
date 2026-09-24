@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.19`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.20`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│ ▟██▛  mergestorm v0.3.19                                                     │
+│ ▟██▛  mergestorm v0.3.20                                                     │
 │  ▜▙   ● msk_live_…  · maelstrom                                              │
 │       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used · Resets Sep 5, 10:53am (UTC)│
 │                                                                              │
 │       review a diff · usage for tabs · /help for all commands                │
-│       New in v0.3.19: stack wait and held GET waits                          │
+│       New in v0.3.20: stack watch pair-gate attention and upstack issues     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -97,7 +97,7 @@ mergestorm stack list [--json]  List registered stacks
 mergestorm stack adopt <owner/repo>#<pr>  Import an existing open PR chain
 mergestorm stack restack <stack-id>  Restack descendants
 mergestorm stack land <stack-id>     Land / promote (into review unit when present)
-mergestorm stack wait <stack-id>     Wait for stack attention (default 45s, max 300s)
+mergestorm stack wait <stack-id> [--timeout <s>]  Wait for stack attention (default 45s, max 300s; 0 = one snapshot, no wait)
 mergestorm stack reset --force  Clear local authoring state (not branches/PRs)
 ```
 

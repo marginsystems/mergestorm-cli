@@ -1,3 +1,4 @@
+import { stackBlockersSummary } from "../stack-blockers.js";
 import {
   adoptStack,
   ensureUpperPark,
@@ -11,7 +12,14 @@ import {
 } from "../api.js";
 import { loadConfig } from "../config.js";
 import { rateLimitedMessage, REVIEW_EXIT, CommandError } from "../errors.js";
-import { createPr, findOpenPrNumber, requireGh } from "../gh.js";
+import {
+  createPrs,
+  findOpenPrNumber,
+  githubApiFromEnv,
+  requireGh,
+  type GithubApi,
+  type NewPr,
+} from "../gh.js";
 import { parseGithubOriginRepo } from "../git.js";
 import {
   branchExists,
@@ -55,7 +63,7 @@ import { openHelpBrowser } from "./help.js";
 
 const STACK_USAGE = `usage:
   mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
-  mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
+  mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--rest] [--json]
   mergestorm stack reset --force
   mergestorm stack list [--json]
   mergestorm stack status <stack-id> [--json]
@@ -71,6 +79,8 @@ const STACK_USAGE = `usage:
   stack submit opens PRs with a body generated from each layer tip commit.
   Layers 1–2 use the git parent as GitHub base. Layer 3+ opens onto the
   review-unit park freeze (mg-park-*) so adopt does not retarget after open.
+  stack submit talks to GitHub GraphQL and falls back to the REST API when
+  GraphQL is blocked; --rest (or MERGESTORM_GITHUB_API=rest) forces REST.
   Parenting onto a branch that already belongs to a registered (submitted)
   stack requires --extend on create and submit — otherwise mg starts a new
   stack from trunk. stack land promotes into the review unit when one exists;
@@ -382,9 +392,11 @@ export function parseStackSubmitArgs(args: string[]): {
   autoLand?: boolean;
   autoReview?: boolean;
   autoPatch?: boolean;
+  rest: boolean;
   asJson: boolean;
 } {
   let extend = false;
+  let rest = false;
   const policy: StackOpenPolicyFlags = {};
   let asJson = false;
   for (let i = 0; i < args.length; i++) {
@@ -397,13 +409,17 @@ export function parseStackSubmitArgs(args: string[]): {
       extend = true;
       continue;
     }
+    if (a === "--rest") {
+      rest = true;
+      continue;
+    }
     const next = takeOpenPolicyFlag(args, i, policy, "stack submit");
     if (next !== null) {
       i = next - 1;
       continue;
     }
     throw new CommandError(
-      "usage: mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]",
+      "usage: mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--rest] [--json]",
     );
   }
   return {
@@ -411,6 +427,7 @@ export function parseStackSubmitArgs(args: string[]): {
     autoLand: policy.autoLand,
     autoReview: policy.autoReview,
     autoPatch: policy.autoPatch,
+    rest,
     asJson,
   };
 }
@@ -748,18 +765,20 @@ export type StackSubmitDeps = {
   tipCommitSubject?: typeof tipCommitSubject;
   tipCommitMessage?: typeof tipCommitMessage;
   buildPrBodyFromCommit?: typeof buildPrBodyFromCommit;
-  createPr?: typeof createPr;
+  createPrs?: typeof createPrs;
   loadConfig?: typeof loadConfig;
   listStacks?: typeof listStacks;
   adoptStack?: typeof adoptStack;
   ensureUpperPark?: typeof ensureUpperPark;
+  env?: NodeJS.ProcessEnv;
 };
 
 export async function cmdStackSubmit(
   args: string[],
   deps: StackSubmitDeps = {},
 ): Promise<void> {
-  const { extend, autoLand, autoReview, autoPatch, asJson } = parseStackSubmitArgs(args);
+  const { extend, autoLand, autoReview, autoPatch, rest, asJson } = parseStackSubmitArgs(args);
+  const api: GithubApi = rest ? "rest" : githubApiFromEnv(deps.env ?? process.env);
   const progress = (message: string) => {
     if (asJson) console.error(message);
     else console.log(message);
@@ -778,7 +797,7 @@ export async function cmdStackSubmit(
   const tipCommitSubjectFn = deps.tipCommitSubject ?? tipCommitSubject;
   const tipCommitMessageFn = deps.tipCommitMessage ?? tipCommitMessage;
   const buildPrBodyFn = deps.buildPrBodyFromCommit ?? buildPrBodyFromCommit;
-  const createPrFn = deps.createPr ?? createPr;
+  const createPrsFn = deps.createPrs ?? createPrs;
   const loadConfigFn = deps.loadConfig ?? loadConfig;
   const listStacksFn = deps.listStacks ?? listStacks;
   const adoptStackFn = deps.adoptStack ?? adoptStack;
@@ -878,18 +897,14 @@ export async function cmdStackSubmit(
     }
   }
 
-  const opened: { branch: string; base: string; prNumber: number; created: boolean }[] = [];
+  type OpenedLayer = { branch: string; base: string; prNumber: number; created: boolean };
+  const opened: OpenedLayer[] = [];
   const pendingPark = plans.filter((plan) => {
-    if (findOpenPrNumberFn(owner, repo, plan.branch, cwd) != null) return false;
+    if (findOpenPrNumberFn(owner, repo, plan.branch, cwd, { api }) != null) return false;
     return plan.githubBase == null;
   });
 
-  const openLayerPr = (branch: string, base: string): { prNumber: number; created: boolean } => {
-    const existing = findOpenPrNumberFn(owner, repo, branch, cwd);
-    if (existing != null) {
-      progress(ansi.dim(`  PR #${existing} already open for ${branch}`));
-      return { prNumber: existing, created: false };
-    }
+  const prepareLayerPr = (branch: string, base: string): NewPr => {
     const aheadRef = isMgParkBranch(base) ? `origin/${base}` : base;
     if (isMgParkBranch(base)) {
       try {
@@ -914,31 +929,54 @@ export async function cmdStackSubmit(
           `Commit your changes, then retry \`mg stack submit\`.`,
       );
     }
-    const title = tipCommitSubjectFn(branch, cwd);
-    const body = buildPrBodyFn(tipCommitMessageFn(branch, cwd));
-    progress(ansi.dim(`  Opening PR ${branch} → ${base} …`));
     return {
-      prNumber: createPrFn({
-        owner,
-        repo,
-        base,
-        head: branch,
-        title,
-        body,
-        cwd,
-      }),
-      created: true,
+      base,
+      head: branch,
+      title: tipCommitSubjectFn(branch, cwd),
+      body: buildPrBodyFn(tipCommitMessageFn(branch, cwd)),
     };
   };
 
-  for (const plan of plans) {
-    if (plan.githubBase == null && findOpenPrNumberFn(owner, repo, plan.branch, cwd) == null) {
-      continue;
+  const openLayerWave = (wave: readonly { branch: string; base: string }[]): OpenedLayer[] => {
+    const rows: OpenedLayer[] = [];
+    const pending: { index: number; pr: NewPr }[] = [];
+    for (const { branch, base } of wave) {
+      const existing = findOpenPrNumberFn(owner, repo, branch, cwd, { api });
+      if (existing != null) {
+        progress(ansi.dim(`  PR #${existing} already open for ${branch}`));
+        rows.push({ branch, base, prNumber: existing, created: false });
+        continue;
+      }
+      pending.push({ index: rows.length, pr: prepareLayerPr(branch, base) });
+      rows.push({ branch, base, prNumber: 0, created: true });
     }
-    const base = plan.githubBase ?? plan.gitParent;
-    const { prNumber, created } = openLayerPr(plan.branch, base);
-    opened.push({ branch: plan.branch, base, prNumber, created });
-  }
+    if (pending.length === 0) return rows;
+    for (const { pr } of pending) {
+      progress(ansi.dim(`  Opening PR ${pr.head} → ${pr.base} …`));
+    }
+    const numbers = createPrsFn({ owner, repo, prs: pending.map((p) => p.pr), cwd, api });
+    if (numbers.length !== pending.length) {
+      throw new CommandError(
+        `GitHub returned ${numbers.length} PR numbers for ${pending.length} new pull requests.`,
+      );
+    }
+    pending.forEach(({ index }, i) => {
+      rows[index]!.prNumber = numbers[i]!;
+    });
+    return rows;
+  };
+
+  opened.push(
+    ...openLayerWave(
+      plans
+        .filter(
+          (plan) =>
+            plan.githubBase != null ||
+            findOpenPrNumberFn(owner, repo, plan.branch, cwd, { api }) != null,
+        )
+        .map((plan) => ({ branch: plan.branch, base: plan.githubBase ?? plan.gitParent })),
+    ),
+  );
 
   const cfg = await loadConfigFn();
   type AdoptPayload = {
@@ -979,10 +1017,11 @@ export async function cmdStackSubmit(
     }
     progress(ansi.dim(`  Ensuring upper-park freeze for stack ${stackId} …`));
     const park = await ensureUpperParkFn(stackId, cfg);
-    for (const plan of pendingPark) {
-      const { prNumber, created } = openLayerPr(plan.branch, park.freezeBranch);
-      opened.push({ branch: plan.branch, base: park.freezeBranch, prNumber, created });
-    }
+    opened.push(
+      ...openLayerWave(
+        pendingPark.map((plan) => ({ branch: plan.branch, base: park.freezeBranch })),
+      ),
+    );
     await registerPr(opened[opened.length - 1]!.prNumber);
   } else {
     if (opened.length === 0) {
@@ -1106,7 +1145,7 @@ export async function cmdStackWait(
       ...envelope,
       ...(retryAfterSeconds !== undefined ? { retry_after_seconds: retryAfterSeconds } : {}),
     }, null, 2)
-    : `Stack ${envelope.stackId} · ${envelope.status}${envelope.blocker ? ` · ${envelope.blocker}` : ""}`);
+    : `Stack ${envelope.stackId} · ${envelope.status}${stackBlockersSummary(envelope.blocker && envelope.prNumber != null ? { prNumber: envelope.prNumber, blocker: envelope.blocker } : null, envelope.issues)}${envelope.assessment === "unavailable" ? " · assessment unavailable" : ""}`);
   try {
     print(await (deps.pollStackWatch ?? pollStackWatch)(cfg, stackId, {
       timeoutMs: timeoutS * 1000,
@@ -1121,6 +1160,10 @@ export async function cmdStackWait(
         "rate_limited",
         { retryAfterSeconds: err.retryAfterSeconds },
       );
+    }
+    if (err instanceof StackWatchError) {
+      print(err.lastEnvelope);
+      throw err;
     }
     if (!(err instanceof StackWatchTimeoutError)) throw err;
     print(err.lastEnvelope);

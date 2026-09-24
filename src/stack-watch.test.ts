@@ -73,9 +73,31 @@ test("attention at enrollment: CI on the current head", async () => {
     schema: "mergestorm.stack_watch/v1", status: "attention", stackId: "stack",
     blocker: "CI failed — lint", bounceKind: null, prNumber: 42, headSha: HEAD,
     cursor: { stackId: "stack", enrolledHeadSha: HEAD },
+    issues: [], currentCandidate: { prNumber: 42, headSha: HEAD }, assessment: "available",
   });
   assert.deepEqual(h.calls.map((call) => call.route), ["/api/v1/stacks/enrich?stackId=stack", "/api/v1/stacks/queue?stackId=stack"]);
   assert.deepEqual(h.sleeps, []);
+});
+
+test("draft with an empty queue returns pr_draft attention without a bounce cursor", async () => {
+  const h = harness(stack([layer({ draft: true })]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Draft PR");
+  assert.equal(result.bounceKind, "pr_draft");
+  assert.deepEqual(result.cursor, { stackId: "stack", enrolledHeadSha: HEAD });
+});
+
+test("draft with a matching pr_draft bounce stamps the cursor", async () => {
+  const entry = bounce({ bounceDetail: { kind: "pr_draft", headSha: HEAD, prNumber: 42 } });
+  const h = harness(stack([layer({ draft: true })]), [entry]);
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Draft PR");
+  assert.equal(result.bounceKind, "pr_draft");
+  assert.deepEqual(result.cursor, {
+    stackId: "stack", enrolledHeadSha: HEAD, bounceId: entry.id, afterFinishedAt: entry.finishedAt,
+  });
 });
 
 test("timeout resume keeps enrollment and selectors through changed heads and retries", async () => {
@@ -118,6 +140,21 @@ test("surfaced bounce is added to the cursor for the next watch cycle", async ()
   );
 });
 
+test("a transport failure returns a failed envelope", async () => {
+  const h = harness();
+  h.options.fetch = async () => { throw new Error("connection refused"); };
+
+  await assert.rejects(
+    pollStackWatch(cfg, "stack", h.options),
+    (err: unknown) => {
+      assert.ok(err instanceof StackWatchError);
+      assert.equal(err.lastEnvelope.status, "failed");
+      assert.equal(err.lastEnvelope.assessment, "unavailable");
+      return true;
+    },
+  );
+});
+
 for (const endpoint of ["snapshot", "queue"]) {
   test(`429 from ${endpoint} backs off using Retry-After then succeeds`, async () => {
     const h = harness();
@@ -147,17 +184,31 @@ for (const endpoint of ["snapshot", "queue"]) {
 }
 
 for (const kind of ["head_moved", "must_consolidate"] as const) {
-  test(`${kind} on current head is recoverable even with stale CI failure`, async () => {
-    const h = harness(stack([layer({ ciStatus: "failure" })]), [bounce({ bounceDetail: { kind, headSha: HEAD }, verifyHeadSha: HEAD })]);
+  test(`a recoverable bounce never suppresses current-head project CI failure: ${kind}`, async () => {
+    for (const failure of [
+      { ciStatus: "failure" as const },
+      { checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: "project tests" } },
+    ]) {
+      const h = harness(stack([layer(failure)]), [bounce({ bounceDetail: { kind, headSha: HEAD, prNumber: 42 }, verifyHeadSha: HEAD })]);
+      const result = await pollStackWatch(cfg, "stack", h.options);
+      assert.equal(result.status, "attention");
+      assert.equal(result.blocker, failure.checks ? "CI failed — project tests" : "CI failed");
+      assert.equal(result.prNumber, 42);
+      assert.equal(result.headSha, HEAD);
+      assert.equal(result.bounceKind, null);
+    }
+  });
+
+  test(`${kind} without a live hard blocker remains recoverable`, async () => {
+    const h = harness(stack(), [bounce({ bounceDetail: { kind, headSha: HEAD }, verifyHeadSha: HEAD })]);
     assert.equal((await timedOut(h.options)).blocker, null);
   });
 }
 
 for (const state of ["queued", "running", "waiting"] as const) {
-  test(`live ${state} suppresses hard blockers and bounce attention`, async () => {
+  test(`live ${state} does not suppress gate hard blockers`, async () => {
     const h = harness(stack([layer({ ciStatus: "failure" })]), [bounce(), bounce({ id: "live", state })]);
-    await timedOut(h.options);
-    assert.ok(h.ticks.every((tick) => tick.status === "in_progress" && tick.blocker === null));
+    assert.equal((await pollStackWatch(cfg, "stack", h.options)).status, "attention");
   });
 }
 
@@ -210,23 +261,78 @@ test("bottom unpromoted real layer then unit land PR supplies enrollment", async
   assert.equal(result.prNumber, 50);
 });
 
-test("bounce on a higher layer is not attention for the current layer", async () => {
-  const h = harness(stack([layer(), layer({ prNumber: 43, position: 1, headSha: NEXT })]), [bounce({ bounceDetail: { kind: "ci_failure", headSha: NEXT, prNumber: 43 } })]);
-  await timedOut(h.options);
+test("bounce only on a non-child higher layer is not attention for the current layer", async () => {
+  const h = harness(stack([
+    layer(),
+    layer({ prNumber: 43, position: 1, branch: "child", parentBranch: "feature" }),
+    layer({ prNumber: 44, position: 2, parentBranch: "child", headSha: NEXT }),
+  ]), [bounce({ bounceDetail: { kind: "ci_failure", headSha: NEXT, prNumber: 44 } })]);
+  const result = await timedOut(h.options);
+  assert.equal(result.blocker, null);
+  assert.deepEqual(result.issues, []);
 });
+
+test("conflicted non-adjacent child is attention naming its PR and head", async () => {
+  const h = harness(stack([
+    layer(),
+    layer({ prNumber: 43, position: 1, branch: "middle", parentBranch: "feature" }),
+    layer({ prNumber: 44, position: 2, parentBranch: "feature", headSha: NEXT, state: "conflict" }),
+  ]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Conflict");
+  assert.equal(result.prNumber, 44);
+  assert.equal(result.headSha, NEXT);
+  assert.deepEqual(result.issues, []);
+});
+
+for (const conflict of [
+  { state: "conflict" as const },
+  { restackError: { kind: "rebase_conflict" as const, detail: "conflict", headSha: NEXT, attemptedAt: "", attempts: 1, backupRef: null } },
+]) {
+  test(`conflicted direct child is attention naming its PR and head: ${conflict.state ?? conflict.restackError.kind}`, async () => {
+    const h = harness(stack([
+      layer(),
+      layer({ prNumber: 43, position: 1, parentBranch: "feature", headSha: NEXT, ...conflict }),
+    ]));
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, "Conflict");
+    assert.equal(result.prNumber, 43);
+    assert.equal(result.headSha, NEXT);
+    assert.deepEqual(result.currentCandidate, { prNumber: 42, headSha: HEAD });
+    assert.deepEqual(result.issues, []);
+  });
+}
 
 for (const [overrides, expected] of [
   [{ state: "conflict" }, "Conflict"],
   [{ draft: true }, "Draft PR"],
-  [{ mergeable: false }, "Merge conflicts"],
+  [{ mergeable: false }, "Merge conflicts vs main"],
   [{ vortexStatus: "failed" }, "Review failed"],
   [{ agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD }] }, "Tempest findings"],
   [{ agentRuns: [{ agent: "tempest", status: "failed", sha: HEAD }] }, "Tempest failed"],
   [{ restackError: { kind: "push_failed", detail: "failure", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null } }, "Restack failed"],
+  [{ restackError: { kind: "push_failed", detail: "force-push failed: ! [remote rejected] b -> b (failure)", headSha: HEAD, attemptedAt: "", attempts: 3, backupRef: null } }, "Restack failed"],
+  [{ restackError: { kind: "checkout_failed", detail: "failure", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null } }, "Restack failed"],
+  [{ restackError: { kind: "head_unresolved", detail: "failure", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null } }, "Restack failed"],
 ] as [Partial<StackLayerDto>, string][]) {
   test(`matches MCP label: ${expected}`, async () => {
     const h = harness(stack([layer(overrides)]));
     assert.equal((await pollStackWatch(cfg, "stack", h.options)).blocker, expected);
+  });
+}
+
+for (const attempts of [1, 2]) {
+  test(`a retryable push failure at attempt ${attempts} is not a hard block`, async () => {
+    const h = harness(stack([layer({ state: "needs_restack", restackError: {
+      kind: "push_failed", detail: "force-push failed: ! [remote rejected] b -> b (failure)",
+      headSha: HEAD, attemptedAt: "", attempts, backupRef: null,
+    } })]));
+    await assert.rejects(
+      pollStackWatch(cfg, "stack", h.options),
+      (err: unknown) => err instanceof StackWatchTimeoutError && err.lastEnvelope.blocker === null,
+    );
   });
 }
 
@@ -253,13 +359,23 @@ test("held requests include response headroom and refresh the deadline snapshot"
   assert.equal(result.headSha, NEXT);
 });
 
-test("Retry-After exceeding deadline yields waiting timeout", async () => {
-  const h = harness();
-  h.state.respond = () => ({ status: 429, body: {}, retryAfterSeconds: 60 });
-  await timedOut(h.options);
-  assert.deepEqual(h.sleeps, [4000]);
-  assert.equal(h.calls.length, 1);
-});
+for (const endpoint of ["snapshot", "queue"]) {
+  test(`Retry-After exceeding deadline preserves rate_limited and retry delay: ${endpoint}`, async () => {
+    const h = harness();
+    h.state.respond = (route) => (endpoint === "snapshot" || route.includes("&wait="))
+      ? { status: 429, body: {}, retryAfterSeconds: 60 }
+      : undefined;
+    await assert.rejects(pollStackWatch(cfg, "stack", h.options), (err: unknown) => {
+      assert.ok(err instanceof StackWatchError);
+      assert.equal(err.lastEnvelope.status, "rate_limited");
+      assert.equal(err.lastEnvelope.assessment, "unavailable");
+      assert.equal(err.retryAfterSeconds, 60);
+      return true;
+    });
+    assert.deepEqual(h.sleeps, []);
+    assert.equal(h.calls.length, endpoint === "snapshot" ? 1 : 3);
+  });
+}
 
 test("transient retries are bounded; exhausted 429 carries rate_limited envelope", async () => {
   const h = harness();
@@ -267,6 +383,7 @@ test("transient retries are bounded; exhausted 429 carries rate_limited envelope
   await assert.rejects(pollStackWatch(cfg, "stack", h.options), (err: unknown) => {
     assert.ok(err instanceof StackWatchError);
     assert.equal(err.lastEnvelope.status, "rate_limited");
+    assert.equal(err.lastEnvelope.assessment, "unavailable");
     return true;
   });
   assert.deepEqual(h.sleeps, [250, 500, 1000]);
@@ -314,4 +431,147 @@ test("one held queue GET per 45-second slice, with no polling sleep", async () =
   await timedOut(h.options);
   assert.equal(h.calls.filter((call) => call.route.includes("/queue")).length, 2);
   assert.deepEqual(h.sleeps, []);
+});
+
+function organism() {
+  return stack([
+    layer({ prNumber: 41, branch: "feat/cowork-authors" }),
+    layer({ prNumber: 42, position: 1, branch: "child", parentBranch: "feat/cowork-authors",
+      headSha: NEXT, mergeableHeadSha: NEXT, mergeable: false, mergeableState: "dirty" }),
+    ...[43, 44, 45].map((prNumber) => layer({ prNumber, position: prNumber - 41,
+      parentBranch: "mg-park-freeze", mergeable: false, mergeableState: "dirty", lastRestackedSha: HEAD,
+      ciStatus: prNumber === 45 ? "failure" : "success", vortexStatus: prNumber === 44 ? "throttled" : null })),
+  ]);
+}
+
+test("Organism pair gate names #42 and preserves parked #45 CI", async () => {
+  const h = harness(organism());
+  const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 });
+  assert.equal(result.status, "attention");
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.headSha, NEXT);
+  assert.equal(result.blocker, "Merge conflicts vs feat/cowork-authors");
+  assert.deepEqual(result.currentCandidate, { prNumber: 41, headSha: HEAD });
+  assert.deepEqual(result.issues, [{ prNumber: 45, headSha: HEAD, blocker: "CI failed", bounceKind: null }]);
+  assert.equal(h.calls.length, 2);
+  assert.ok(h.calls.every(call => !call.route.includes("&wait=")));
+});
+
+test("Organism pair gate preserves a headless child head", async () => {
+  const fixture = organism();
+  fixture.layers[1].headSha = null;
+  const h = harness(fixture);
+  const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 });
+  assert.equal(result.status, "attention");
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.headSha, null);
+  assert.equal(result.blocker, "Merge conflicts vs feat/cowork-authors");
+});
+
+for (const scenario of ["stale", "pending", "different-parent", "parked-bottom"] as const) {
+  test(`${scenario} does not produce pair-gate attention`, async () => {
+    const fixture = organism();
+    fixture.layers = fixture.layers.slice(0, 2);
+    if (scenario === "stale") fixture.layers[1].mergeableHeadSha = HEAD;
+    if (scenario === "pending") Object.assign(fixture.layers[1], { mergeable: true, mergeableState: "clean", ciStatus: "pending" });
+    if (scenario === "different-parent") fixture.layers[1].parentBranch = "other";
+    if (scenario === "parked-bottom") fixture.layers = [layer({ parentBranch: "mg-park-freeze", lastRestackedSha: "old", mergeable: false, mergeableState: "dirty" })];
+    const h = harness(fixture);
+    const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 });
+    assert.equal(result.status, "waiting");
+    assert.equal(result.blocker, null);
+    assert.equal(result.assessment, "available");
+    assert.equal(result.issues.length, scenario === "different-parent" ? 1 : 0);
+    assert.equal(h.calls.length, 2);
+  });
+}
+
+for (const live of [false, true]) {
+  test(`issues survive ${live ? "live queue" : "waiting"}`, async () => {
+    const fixture = organism();
+    Object.assign(fixture.layers[1], { mergeable: true, mergeableState: "clean" });
+    const h = harness(fixture, live ? [bounce({ state: "running" })] : []);
+    const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 });
+    assert.equal(result.status, live ? "in_progress" : "waiting");
+    assert.deepEqual(result.issues.map(issue => issue.prNumber), [45]);
+  });
+}
+
+test("zero timeout with an unread snapshot stays unavailable and never waiting", async () => {
+  const h = harness();
+  h.state.respond = () => ({ status: 403, body: {} });
+  await assert.rejects(pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 }), (err: unknown) => {
+    assert.ok(err instanceof StackWatchError);
+    assert.equal(err.lastEnvelope.status, "failed");
+    assert.equal(err.lastEnvelope.assessment, "unavailable");
+    assert.deepEqual(err.lastEnvelope.issues, []);
+    return true;
+  });
+});
+
+test("zero timeout transport error on an unread snapshot stays unavailable and never waiting", async () => {
+  const h = harness();
+  h.options.fetch = async () => { throw new Error("network unavailable"); };
+  await assert.rejects(pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 }), (err: unknown) => {
+    assert.ok(err instanceof StackWatchError);
+    assert.equal(err.lastEnvelope.status, "failed");
+    assert.equal(err.lastEnvelope.assessment, "unavailable");
+    return true;
+  });
+});
+
+for (const state of ["queued", "running", "waiting", null] as const) {
+  test(`zero timeout assesses ${state ?? "quiet"} queue as ${state ? "in_progress" : "waiting"}`, async () => {
+    const h = harness(stack(), state ? [bounce({ state })] : []);
+    const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 });
+    assert.equal(result.status, state ? "in_progress" : "waiting");
+    assert.equal(result.assessment, "available");
+    assert.equal(h.calls.length, 2);
+    assert.ok(h.calls.every(call => !call.route.includes("&wait=")));
+  });
+}
+
+test("deadline before the first snapshot stays unavailable and never waiting", async () => {
+  const h = harness();
+  let time = 0;
+  await assert.rejects(pollStackWatch(cfg, "stack", { ...h.options, now: () => time++ * 4000 }), (err: unknown) => {
+    assert.ok(err instanceof StackWatchTimeoutError);
+    assert.equal(err.lastEnvelope.status, "failed");
+    assert.equal(err.lastEnvelope.assessment, "unavailable");
+    return true;
+  });
+  assert.equal(h.calls.length, 0);
+});
+
+test("degraded mid-wait snapshot invalidates the previous assessment", async () => {
+  const h = harness(stack([
+    layer(),
+    layer({ prNumber: 43, position: 1, ciStatus: "failure" }),
+  ]));
+  h.state.respond = (route) => route.includes("&wait=")
+    ? { status: 200, body: {} }
+    : undefined;
+  await assert.rejects(pollStackWatch(cfg, "stack", h.options), (err: unknown) => {
+    assert.ok(err instanceof StackWatchError);
+    assert.equal(err.lastEnvelope.status, "failed");
+    assert.equal(err.lastEnvelope.assessment, "unavailable");
+    assert.deepEqual(err.lastEnvelope.issues.map((issue) => issue.prNumber), [43]);
+    return true;
+  });
+});
+
+test("live queue timeout retains in_progress and upstack issues", async () => {
+  const h = harness(stack([layer(), layer({ prNumber: 43, position: 1, ciStatus: "failure" })]), [bounce({ state: "running" })]);
+  await assert.rejects(pollStackWatch(cfg, "stack", h.options), (err: unknown) => {
+    assert.ok(err instanceof StackWatchTimeoutError);
+    assert.equal(err.lastEnvelope.status, "in_progress");
+    assert.deepEqual(err.lastEnvelope.issues.map(issue => issue.prNumber), [43]);
+    return true;
+  });
+});
+
+test("recoverable bounce cannot suppress another PR sharing its SHA", async () => {
+  const h = harness(stack([layer({ ciStatus: "failure" }), layer({ prNumber: 43, position: 1 })]),
+    [bounce({ bounceDetail: { kind: "head_moved", headSha: HEAD, prNumber: 43 } })]);
+  assert.equal((await pollStackWatch(cfg, "stack", h.options)).blocker, "CI failed");
 });

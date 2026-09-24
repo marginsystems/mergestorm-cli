@@ -105,6 +105,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.19": [
     "stack wait and held GET waits",
   ],
+  "0.3.20": [
+    "stack watch pair-gate attention and upstack issues",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */
