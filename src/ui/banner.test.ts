@@ -171,8 +171,8 @@ test("what's new covers the shipped package version (no empty pane)", () => {
   const rows = buildBannerRows(loggedIn(cliVersion()), 120);
   const text = stripAnsi(rows.join("\n"));
   assert.match(text, new RegExp(`New in v${cliVersion().replace(/\./g, "\\.")}`));
-  assert.match(text, /stack watch pair-gate attention and upstack issues/);
+  assert.match(text, /stack wait holds an unchanged queue instead of spinning/);
 
   const narrowText = stripAnsi(buildBannerRows(loggedIn(cliVersion()), 80).join("\n"));
-  assert.match(narrowText, /stack watch pair-gate attention and upstack issues/);
+  assert.match(narrowText, /stack wait holds an unchanged queue instead of spinning/);
 });

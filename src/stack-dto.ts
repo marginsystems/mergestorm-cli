@@ -108,7 +108,7 @@ export type StackVortexReviewView = {
   source: "pr_reviews" | "github_webhook_jobs" | "lease" | "none";
 };
 
-export type StackCycloneStatus = "patching" | "awaiting_fix";
+export type StackCycloneStatus = "patching" | "awaiting_fix" | "failed";
 
 export type StackTempestStatus = "reviewing" | "findings" | "clear" | "failed" | "stale";
 
