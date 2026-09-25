@@ -111,6 +111,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.22": [
     "stack wait holds an unchanged queue instead of spinning",
   ],
+  "0.3.23": [
+    "leave a stack bottom on mg-stack-<n>",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

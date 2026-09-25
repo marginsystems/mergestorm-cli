@@ -72,19 +72,8 @@ export function runGh(
   return { ok: true, stdout: result.stdout ?? "" };
 }
 
-export function requireGh(cwd = process.cwd()): void {
-  const check = runGh(["--version"], cwd);
-  if (!check.ok) {
-    throw new CommandError(
-      "GitHub CLI (`gh`) is required for `stack submit`. Install https://cli.github.com and run `gh auth login`.",
-    );
-  }
-  const auth = runGh(["auth", "status"], cwd);
-  if (!auth.ok) {
-    throw new CommandError(
-      "`gh` is installed but not authenticated. Run `gh auth login`, then retry `stack submit`.",
-    );
-  }
+export function ghReady(cwd = process.cwd(), gh: GhRunner = (args) => runGh(args, cwd)): boolean {
+  return gh(["--version"]).ok && gh(["api", "user"]).ok;
 }
 
 /** Open PR number for `head` branch in owner/repo, or null. */

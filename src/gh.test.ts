@@ -12,7 +12,7 @@ import {
   ghGraphql,
   GraphqlBlockedError,
   isGraphqlEndpointBlocked,
-  requireGh,
+  ghReady,
   runGh,
   type GhResult,
   type GraphqlRequest,
@@ -445,13 +445,31 @@ test("runGh forwards stdin and preserves stdout on failure", () => {
   });
 });
 
-test("requireGh throws CommandError when gh is unusable", () => {
-  // Smoke: if gh works in this environment, requireGh should not throw.
-  // If gh is missing, it must throw CommandError (not a raw Error).
-  try {
-    requireGh();
-  } catch (err) {
-    assert.ok(err instanceof CommandError);
-    assert.match(err.message, /gh/i);
-  }
+test("ghReady probes auth with REST gh api user, never gh auth status", () => {
+  const calls: string[][] = [];
+  const ready = ghReady("/tmp", (args) => {
+    calls.push(args);
+    return { ok: true, stdout: "" };
+  });
+  assert.equal(ready, true);
+  assert.deepEqual(calls, [["--version"], ["api", "user"]]);
+});
+
+test("ghReady is false when gh is missing, without probing auth", () => {
+  const calls: string[][] = [];
+  const ready = ghReady("/tmp", (args) => {
+    calls.push(args);
+    return { ok: false, stderr: "gh not found", status: null };
+  });
+  assert.equal(ready, false);
+  assert.deepEqual(calls, [["--version"]]);
+});
+
+test("ghReady is false when gh api user fails", () => {
+  const ready = ghReady("/tmp", (args) =>
+    args[0] === "api"
+      ? { ok: false, stderr: "HTTP 401: Bad credentials", status: 1 }
+      : { ok: true, stdout: "gh version 2.60.0" },
+  );
+  assert.equal(ready, false);
 });

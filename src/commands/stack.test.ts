@@ -95,7 +95,7 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
       saved.push(structuredClone(meta));
     },
     parseGithubOriginRepo: () => ({ owner: "acme", repo: "widgets" }),
-    requireGh: () => {},
+    ghReady: () => true,
     branchExists: () => true,
     fetchRemoteBranch: () => {},
     pushBranch: (branch) => {
@@ -657,6 +657,139 @@ test("cmdStackSubmit skips createPr when an open PR already exists", async () =>
   assert.equal(h.adoptCalls, 1);
   assert.equal(h.saved.length, 1);
   assert.equal(h.saved[0]!.stacks[0]!.layers.length, 0);
+});
+
+test("cmdStackSubmit tells the human to leave an mg-stack-* bottom base", async () => {
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => chainMeta(["feat/a", "feat/b"]),
+    adoptStack: async () => ({
+      stack: { id: "11111111-1111-4111-8111-111111111111", trunkBranch: "mg-stack-7" },
+      chain: [],
+    }),
+  });
+  const out = await captureStackOutput(() => cmdStackSubmit([], h.deps));
+  assert.equal(out.error, null);
+  assert.match(
+    out.stdout.join("\n"),
+    /Bottom base is now mg-stack-7 \(Mergestorm-owned trunk\)\. Leave it\./,
+  );
+});
+
+test("cmdStackSubmit prints no bottom-base line when the trunk is main", async () => {
+  const h = makeSubmitHarness();
+  const out = await captureStackOutput(() => cmdStackSubmit([], h.deps));
+  assert.equal(out.error, null);
+  assert.match(out.stdout.join("\n"), /Registered stack/);
+  assert.doesNotMatch(out.stdout.join("\n"), /Bottom base is now/);
+});
+
+function apiOpenerHarness(overrides: Partial<StackSubmitDeps> = {}) {
+  const apiCalls: string[] = [];
+  const opened: Array<{ head: string; base: string; title: string; body: string }> = [];
+  const h = makeSubmitHarness({
+    ghReady: () => false,
+    findOpenPrNumber: () => {
+      throw new Error("gh lookup must not run");
+    },
+    createPrs: () => {
+      throw new Error("gh create must not run");
+    },
+    findStackPull: async (_cfg, input) => {
+      apiCalls.push(`find:${input.head}`);
+      return null;
+    },
+    openStackPull: async (_cfg, input) => {
+      apiCalls.push(`open:${input.head}->${input.base}`);
+      opened.push({ head: input.head, base: input.base, title: input.title, body: input.body });
+      return { number: 70 + opened.length, url: "", created: true };
+    },
+    ...overrides,
+  });
+  return { h, apiCalls, opened };
+}
+
+test("cmdStackSubmit with a ready gh keeps gh lookup/create and never calls the API opener", async () => {
+  const h = makeSubmitHarness({
+    findStackPull: async () => {
+      throw new Error("API lookup must not run");
+    },
+    openStackPull: async () => {
+      throw new Error("API opener must not run");
+    },
+  });
+  await cmdStackSubmit([], h.deps);
+  assert.equal(h.createPrCalls, 1);
+  assert.deepEqual(h.adoptPrs, [41]);
+});
+
+test("cmdStackSubmit without a ready gh opens through the API with the gh title and body, then adopts", async () => {
+  const { h, apiCalls, opened } = apiOpenerHarness();
+  await cmdStackSubmit([], h.deps);
+  assert.deepEqual(apiCalls, ["find:feat/layer-1", "open:feat/layer-1->main"]);
+  assert.deepEqual(opened, [
+    {
+      head: "feat/layer-1",
+      base: "main",
+      title: "feat: layer one",
+      body: "## Summary\n- feat: layer one\n",
+    },
+  ]);
+  assert.deepEqual(h.pushCalls, ["feat/layer-1"]);
+  assert.deepEqual(h.adoptPrs, [71]);
+  assert.equal(h.saved.length, 1);
+});
+
+test("cmdStackSubmit through the API reuses an open PR without opening one", async () => {
+  const { h, apiCalls } = apiOpenerHarness({
+    findStackPull: async () => 99,
+  });
+  await cmdStackSubmit(["--json"], h.deps);
+  assert.deepEqual(apiCalls, []);
+  assert.deepEqual(h.adoptPrs, [99]);
+});
+
+test("cmdStackSubmit through the API reports created from the response", async () => {
+  const { h } = apiOpenerHarness({
+    openStackPull: async () => ({ number: 12, url: "", created: false }),
+  });
+  const out = await captureStackOutput(() => cmdStackSubmit(["--json"], h.deps));
+  assert.equal(out.error, null);
+  const json = JSON.parse(out.stdout.join("\n")) as { layers: Array<{ prNumber: number; created: boolean }> };
+  assert.deepEqual(json.layers.map((l) => [l.prNumber, l.created]), [[12, false]]);
+});
+
+test("cmdStackSubmit opens a 3-layer stack onto the park through the API", async () => {
+  const { h, apiCalls } = apiOpenerHarness({
+    loadStackMeta: async () => chainMeta(["feat/a", "feat/b", "feat/c"]),
+    ensureUpperPark: async () => ({ freezeBranch: "mg-park-abc", created: true }),
+  });
+  await cmdStackSubmit([], h.deps);
+  assert.deepEqual(apiCalls, [
+    "find:feat/a",
+    "find:feat/b",
+    "find:feat/c",
+    "open:feat/a->main",
+    "open:feat/b->feat/a",
+    "open:feat/c->mg-park-abc",
+  ]);
+  assert.deepEqual(h.adoptPrs, [71, 73]);
+});
+
+test("cmdStackSubmit stops before pushing when Cyclone is not installed and gh is not ready", async () => {
+  const sentence =
+    "Opening PRs needs either the GitHub CLI (gh auth login) or Cyclone installed on acme/widgets " +
+    "(https://github.com/apps/mergestorm-cyclone/installations/new).";
+  const { h } = apiOpenerHarness({
+    findStackPull: async () => {
+      throw new CommandError(sentence, 1, "cyclone_not_installed");
+    },
+  });
+  await assert.rejects(
+    () => cmdStackSubmit([], h.deps),
+    (err: unknown) => err instanceof CommandError && err.message === sentence,
+  );
+  assert.deepEqual(h.pushCalls, []);
+  assert.equal(h.adoptCalls, 0);
 });
 
 test("cmdStackSubmit refuses parenting onto a registered tip without --extend", async () => {

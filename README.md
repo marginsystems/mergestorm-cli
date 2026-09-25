@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.22`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.23`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│ ▟██▛  mergestorm v0.3.22                                                     │
+│ ▟██▛  mergestorm v0.3.23                                                     │
 │  ▜▙   ● msk_live_…  · maelstrom                                              │
 │       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used · Resets Sep 5, 10:53am (UTC)│
 │                                                                              │
 │       review a diff · usage for tabs · /help for all commands                │
-│       New in v0.3.22: stack wait holds an unchanged queue instead of spinning│
+│       New in v0.3.23: leave a stack bottom on mg-stack-<n>                  │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -107,7 +107,7 @@ mergestorm stack reset --force  Clear local authoring state (not branches/PRs)
 
 If the parent branch is already a layer of a **registered** (submitted) stack, `create` and `submit` refuse unless you pass **`--extend`**. That blocks accidentally gluing an unrelated PR onto an open unit. Growing a registered stack on purpose: `mg stack create --onto <tip> --extend` → commit → `mg stack submit --extend`.
 
-`stack submit` walks the **active** local stack: `git push -u origin` each layer, opens a PR with `gh` (`--base` = parent or trunk; skips heads that already have an open PR; body from the tip commit — Summary + Test plan, preserving Fixes/Closes/Resolves), registers the stack with `POST /api/v1/stacks/adopt` internally (Mergestorm API key), then drops that local stack entry so the next create onto trunk is clean. Push/PR auth is your local `git` + `gh auth` — not a GitHub App installation token.
+`stack submit` walks the **active** local stack: `git push -u origin` each layer, opens a PR with `gh` (`--base` = parent or trunk; adopt then moves the bottom of a 2+ PR stack onto `mg-stack-<n>` — leave it there; skips heads that already have an open PR; body from the tip commit — Summary + Test plan, preserving Fixes/Closes/Resolves), registers the stack with `POST /api/v1/stacks/adopt` internally (Mergestorm API key), then drops that local stack entry so the next create onto trunk is clean. Push is always your local `git` credentials. PRs open as you when `gh` is installed and `gh api user` succeeds; otherwise `stack submit` asks the Mergestorm API (`POST /api/v1/stacks/pulls`) to open them as Cyclone on your behalf, after checking your GitHub account has write access, and assigns you. Without either, submit stops before pushing and links the Cyclone install page.
 
 Legacy repo-local `.mergestorm/stack.json` state migrates automatically on the next stack command. If local authoring state is stale or malformed, use `mg stack reset --force`; this clears only pre-submit CLI state and never deletes branches, PRs, or registered stacks.
 

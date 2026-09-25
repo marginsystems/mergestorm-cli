@@ -30,6 +30,7 @@ mg skill install --claude --cursor --agents
    - Adoption needs the Cyclone GitHub App on the account; without it `stack_adopt` returns `cyclone_not_connected` — stop and tell the human, do not retry.
    - If there is no stack and the human asked you to mute Cyclone or continue the loop: call `stack_adopt` with `{ owner, repo, pr_number, auto_patch: false }` (equivalent to `mg stack adopt … --auto-patch off`). Then call `stack_status` with the returned `result.stack.id`, confirm this PR is in the stack and `autoPatchOverride` is `false`. If adoption or verification fails, refuse the loop. Otherwise continue through the ownership check below and the remaining loop steps; do not stop and ask the human to adopt. Do not turn account auto-patch off.
    - Adoption does not fix installer ≠ key. After adoption, the same `cycloneOwnerMatch` refusal below still applies.
+   - After adopting 2+ PRs the bottom PR's GitHub base is `mg-stack-<n>` and PR3+ sit on an `mg-park-*` freeze; a 1-PR stack stays on main. That is expected; leave every base as Mergestorm set it.
    - Read `cycloneOwnerMatch` on that stack. If it is missing, `lookup_failed`, or `different`: refuse the loop. Do not wait, patch, or push. Tell the human the API key and the Cyclone GitHub App install are different Mergestorm accounts (or the comparison could not be loaded). Cyclone still patches as the installer. Do not turn account auto-patch off, and do not set `auto_patch: false` to paper over this.
    - If it is `same` or `none`: continue. `none` means no Cyclone install monitors this repo.
 2. Call `settings_get` and read `auto_patch_enabled`.
@@ -73,6 +74,7 @@ Map these to `mergestorm.pr_review/v1` envelope fields; do not invent statuses.
 - treat the key user's mute or `auto_patch_enabled` as covering a different Cyclone install user
 - set `auto_patch: true` on any stack
 - push any branch other than the PR head
+- change a PR's GitHub base (`gh pr edit --base` or the REST equivalent), including moving a bottom from `mg-stack-<n>` back to main. If one was moved, stop and tell the human. Do not run stack land or re-adopt to repair it.
 - force-push, or rebase and retry a push that was rejected because the remote moved
 - patch a pass whose `head_sha` is not the commit you have checked out
 - wrap the CLI in a shell escape hatch

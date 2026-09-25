@@ -761,6 +761,86 @@ export async function ensureUpperPark(
   };
 }
 
+export const CYCLONE_INSTALL_URL = "https://github.com/apps/mergestorm-cyclone/installations/new";
+
+export function cycloneNotInstalledMessage(owner: string, repo: string, installUrl = CYCLONE_INSTALL_URL): string {
+  return (
+    `Opening PRs needs either the GitHub CLI (gh auth login) or Cyclone installed on ` +
+    `${owner}/${repo} (${installUrl}).`
+  );
+}
+
+function installUrlFrom(message: unknown): string {
+  if (typeof message !== "string") return CYCLONE_INSTALL_URL;
+  return message.match(/https:\/\/github\.com\/apps\/[^\s)]+\/installations\/new/)?.[0] ?? CYCLONE_INSTALL_URL;
+}
+
+function stackPullFailure(
+  status: number,
+  body: unknown,
+  owner: string,
+  repo: string,
+  failLabel: string,
+): CommandError {
+  const rejection = (body && typeof body === "object" ? body : {}) as {
+    error?: unknown;
+    message?: unknown;
+  };
+  const text = `${String(rejection.error ?? "")} ${String(rejection.message ?? "")}`;
+  if (
+    rejection.error === "cyclone_not_installed" ||
+    /not installed|installation[^\n]*not found/i.test(text)
+  ) {
+    return new CommandError(
+      cycloneNotInstalledMessage(owner, repo, installUrlFrom(rejection.message)),
+      1,
+      "cyclone_not_installed",
+    );
+  }
+  if (status === 404) {
+    return new CommandError(
+      "Stacks API cannot open PRs on this server yet. Install the GitHub CLI (gh auth login) and retry.",
+    );
+  }
+  const detail = typeof rejection.message === "string" ? rejection.message : JSON.stringify(body);
+  return new CommandError(`${failLabel} (HTTP ${status}): ${detail}`);
+}
+
+export async function findStackPull(
+  cfg: Config,
+  input: { owner: string; repo: string; head: string },
+): Promise<number | null> {
+  const query = new URLSearchParams(input).toString();
+  const { status, body } = await apiFetch(cfg, `/api/v1/stacks/pulls?${query}`);
+  if (status !== 200) {
+    throw stackPullFailure(status, body, input.owner, input.repo, `Failed to look up the PR for ${input.head}`);
+  }
+  const n = (body as { number?: unknown } | null)?.number;
+  return typeof n === "number" && n > 0 ? n : null;
+}
+
+export async function openStackPull(
+  cfg: Config,
+  input: { owner: string; repo: string; head: string; base: string; title: string; body: string },
+): Promise<{ number: number; url: string; created: boolean }> {
+  const { status, body } = await apiFetch(cfg, "/api/v1/stacks/pulls", {
+    method: "POST",
+    json: input,
+  });
+  if (status !== 200 && status !== 201) {
+    throw stackPullFailure(status, body, input.owner, input.repo, `Failed to open PR ${input.head} → ${input.base}`);
+  }
+  const row = (body ?? {}) as { number?: unknown; url?: unknown; created?: unknown };
+  if (typeof row.number !== "number" || row.number <= 0) {
+    throw new CommandError(`Failed to open PR ${input.head} → ${input.base}: no pull request number returned`);
+  }
+  return {
+    number: row.number,
+    url: typeof row.url === "string" ? row.url : "",
+    created: row.created === true,
+  };
+}
+
 async function stackMutation(
   stackId: string,
   pathSuffix: string,

@@ -2,9 +2,11 @@ import { stackBlockersSummary } from "../stack-blockers.js";
 import {
   adoptStack,
   ensureUpperPark,
+  findStackPull,
   getEnrichedStack,
   landNextStack,
   listStacks,
+  openStackPull,
   restackStack,
   setStackPolicy,
   type StackDto,
@@ -15,8 +17,8 @@ import { rateLimitedMessage, REVIEW_EXIT, CommandError } from "../errors.js";
 import {
   createPrs,
   findOpenPrNumber,
+  ghReady,
   githubApiFromEnv,
-  requireGh,
   type GithubApi,
   type NewPr,
 } from "../gh.js";
@@ -79,6 +81,9 @@ const STACK_USAGE = `usage:
   stack submit opens PRs with a body generated from each layer tip commit.
   Layers 1–2 use the git parent as GitHub base. Layer 3+ opens onto the
   review-unit park freeze (mg-park-*) so adopt does not retarget after open.
+  After adopt, the bottom of a 2+ PR stack is based on the owned trunk
+  mg-stack-<n>; leave it (do not retarget it to trunk). A 1-PR stack stays on
+  trunk.
   stack submit talks to GitHub GraphQL and falls back to the REST API when
   GraphQL is blocked; --rest (or MERGESTORM_GITHUB_API=rest) forces REST.
   Parenting onto a branch that already belongs to a registered (submitted)
@@ -756,7 +761,7 @@ export type StackSubmitDeps = {
   loadStackMeta?: typeof loadStackMeta;
   saveStackMeta?: typeof saveStackMeta;
   parseGithubOriginRepo?: typeof parseGithubOriginRepo;
-  requireGh?: (cwd?: string) => void;
+  ghReady?: (cwd?: string) => boolean;
   branchExists?: typeof branchExists;
   fetchRemoteBranch?: typeof fetchRemoteBranch;
   pushBranch?: typeof pushBranch;
@@ -766,6 +771,8 @@ export type StackSubmitDeps = {
   tipCommitMessage?: typeof tipCommitMessage;
   buildPrBodyFromCommit?: typeof buildPrBodyFromCommit;
   createPrs?: typeof createPrs;
+  findStackPull?: typeof findStackPull;
+  openStackPull?: typeof openStackPull;
   loadConfig?: typeof loadConfig;
   listStacks?: typeof listStacks;
   adoptStack?: typeof adoptStack;
@@ -788,7 +795,7 @@ export async function cmdStackSubmit(
   const loadStackMetaFn = deps.loadStackMeta ?? loadStackMeta;
   const saveStackMetaFn = deps.saveStackMeta ?? saveStackMeta;
   const parseOriginFn = deps.parseGithubOriginRepo ?? parseGithubOriginRepo;
-  const requireGhFn = deps.requireGh ?? requireGh;
+  const ghReadyFn = deps.ghReady ?? ghReady;
   const branchExistsFn = deps.branchExists ?? branchExists;
   const fetchRemoteBranchFn = deps.fetchRemoteBranch ?? fetchRemoteBranch;
   const pushBranchFn = deps.pushBranch ?? pushBranch;
@@ -798,6 +805,8 @@ export async function cmdStackSubmit(
   const tipCommitMessageFn = deps.tipCommitMessage ?? tipCommitMessage;
   const buildPrBodyFn = deps.buildPrBodyFromCommit ?? buildPrBodyFromCommit;
   const createPrsFn = deps.createPrs ?? createPrs;
+  const findStackPullFn = deps.findStackPull ?? findStackPull;
+  const openStackPullFn = deps.openStackPull ?? openStackPull;
   const loadConfigFn = deps.loadConfig ?? loadConfig;
   const listStacksFn = deps.listStacks ?? listStacks;
   const adoptStackFn = deps.adoptStack ?? adoptStack;
@@ -825,7 +834,31 @@ export async function cmdStackSubmit(
   }
   const { owner, repo } = origin;
 
-  requireGhFn(cwd);
+  type PrOpener = {
+    findOpen: (branch: string) => Promise<number | null>;
+    create: (prs: readonly NewPr[]) => Promise<{ number: number; created: boolean }[]>;
+  };
+  let opener: PrOpener;
+  if (ghReadyFn(cwd)) {
+    opener = {
+      findOpen: async (branch) => findOpenPrNumberFn(owner, repo, branch, cwd, { api }),
+      create: async (prs) =>
+        createPrsFn({ owner, repo, prs, cwd, api }).map((number) => ({ number, created: true })),
+    };
+  } else {
+    const apiCfg = await loadConfigFn();
+    opener = {
+      findOpen: (branch) => findStackPullFn(apiCfg, { owner, repo, head: branch }),
+      create: async (prs) => {
+        const rows: { number: number; created: boolean }[] = [];
+        for (const pr of prs) {
+          const row = await openStackPullFn(apiCfg, { owner, repo, ...pr });
+          rows.push({ number: row.number, created: row.created });
+        }
+        return rows;
+      },
+    };
+  }
 
   // Safety net: refuse submit that would open/register onto a registered tip
   // without --extend. Check every layer's parent (mid-stack layers from older
@@ -885,6 +918,11 @@ export async function cmdStackSubmit(
     autoPatch: pick(autoPatch, stored?.autoPatchOverride),
   });
 
+  const existingPrs = new Map<string, number | null>();
+  for (const plan of plans) {
+    existingPrs.set(plan.branch, await opener.findOpen(plan.branch));
+  }
+
   for (const layer of layers) {
     if (!branchExistsFn(layer.branch, cwd)) {
       throw new CommandError(`Stack layer branch missing locally: ${layer.branch}`);
@@ -899,10 +937,9 @@ export async function cmdStackSubmit(
 
   type OpenedLayer = { branch: string; base: string; prNumber: number; created: boolean };
   const opened: OpenedLayer[] = [];
-  const pendingPark = plans.filter((plan) => {
-    if (findOpenPrNumberFn(owner, repo, plan.branch, cwd, { api }) != null) return false;
-    return plan.githubBase == null;
-  });
+  const pendingPark = plans.filter(
+    (plan) => existingPrs.get(plan.branch) == null && plan.githubBase == null,
+  );
 
   const prepareLayerPr = (branch: string, base: string): NewPr => {
     const aheadRef = isMgParkBranch(base) ? `origin/${base}` : base;
@@ -937,11 +974,13 @@ export async function cmdStackSubmit(
     };
   };
 
-  const openLayerWave = (wave: readonly { branch: string; base: string }[]): OpenedLayer[] => {
+  const openLayerWave = async (
+    wave: readonly { branch: string; base: string }[],
+  ): Promise<OpenedLayer[]> => {
     const rows: OpenedLayer[] = [];
     const pending: { index: number; pr: NewPr }[] = [];
     for (const { branch, base } of wave) {
-      const existing = findOpenPrNumberFn(owner, repo, branch, cwd, { api });
+      const existing = existingPrs.get(branch) ?? null;
       if (existing != null) {
         progress(ansi.dim(`  PR #${existing} already open for ${branch}`));
         rows.push({ branch, base, prNumber: existing, created: false });
@@ -954,28 +993,25 @@ export async function cmdStackSubmit(
     for (const { pr } of pending) {
       progress(ansi.dim(`  Opening PR ${pr.head} → ${pr.base} …`));
     }
-    const numbers = createPrsFn({ owner, repo, prs: pending.map((p) => p.pr), cwd, api });
+    const numbers = await opener.create(pending.map((p) => p.pr));
     if (numbers.length !== pending.length) {
       throw new CommandError(
         `GitHub returned ${numbers.length} PR numbers for ${pending.length} new pull requests.`,
       );
     }
     pending.forEach(({ index }, i) => {
-      rows[index]!.prNumber = numbers[i]!;
+      rows[index]!.prNumber = numbers[i]!.number;
+      rows[index]!.created = numbers[i]!.created;
     });
     return rows;
   };
 
   opened.push(
-    ...openLayerWave(
+    ...(await openLayerWave(
       plans
-        .filter(
-          (plan) =>
-            plan.githubBase != null ||
-            findOpenPrNumberFn(owner, repo, plan.branch, cwd, { api }) != null,
-        )
+        .filter((plan) => plan.githubBase != null || existingPrs.get(plan.branch) != null)
         .map((plan) => ({ branch: plan.branch, base: plan.githubBase ?? plan.gitParent })),
-    ),
+    )),
   );
 
   const cfg = await loadConfigFn();
@@ -1018,9 +1054,9 @@ export async function cmdStackSubmit(
     progress(ansi.dim(`  Ensuring upper-park freeze for stack ${stackId} …`));
     const park = await ensureUpperParkFn(stackId, cfg);
     opened.push(
-      ...openLayerWave(
+      ...(await openLayerWave(
         pendingPark.map((plan) => ({ branch: plan.branch, base: park.freezeBranch })),
-      ),
+      )),
     );
     await registerPr(opened[opened.length - 1]!.prNumber);
   } else {
@@ -1060,6 +1096,12 @@ export async function cmdStackSubmit(
       ansi.brightGreen(
         `  #${row.prNumber}  ${row.branch} → ${row.base}  (${verb})`,
       ),
+    );
+  }
+  const adoptedTrunk = data.stack?.trunkBranch;
+  if (adoptedTrunk?.startsWith("mg-stack-")) {
+    summary.push(
+      ansi.dim(`  Bottom base is now ${adoptedTrunk} (Mergestorm-owned trunk). Leave it.`),
     );
   }
   if (stackId) {

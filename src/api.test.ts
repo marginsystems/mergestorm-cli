@@ -3,6 +3,8 @@ import { afterEach, test } from "node:test";
 import {
   adoptStack,
   apiFetch,
+  findStackPull,
+  openStackPull,
   getEnrichedStack,
   getMe,
   getPrVortexReview,
@@ -470,4 +472,58 @@ test("setStackPolicy surfaces the API cyclone_not_connected PATCH message", asyn
     (err: unknown) => err instanceof CommandError &&
       err.code === "cyclone_not_connected" &&
       err.message === "Connect Cyclone to enable auto-patch.");
+});
+
+const PULL_INPUT = {
+  owner: "acme",
+  repo: "widgets",
+  head: "ms/feat-a",
+  base: "main",
+  title: "feat: a",
+  body: "Body.",
+};
+
+test("openStackPull returns the number and created flag", async () => {
+  mockFetch(201, { number: 77, url: "https://github.com/acme/widgets/pull/77", created: true });
+  assert.deepEqual(await openStackPull(cfg, PULL_INPUT), {
+    number: 77,
+    url: "https://github.com/acme/widgets/pull/77",
+    created: true,
+  });
+});
+
+test("openStackPull maps cyclone_not_installed to the actionable sentence with the API link", async () => {
+  mockFetch(400, {
+    error: "cyclone_not_installed",
+    message:
+      "Opening PRs needs either the GitHub CLI (gh auth login) or Cyclone installed on acme/widgets " +
+      "(https://github.com/apps/mergestorm-cyclone-staging/installations/new).",
+  });
+  await assert.rejects(
+    () => openStackPull(cfg, PULL_INPUT),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "cyclone_not_installed" &&
+      err.message ===
+        "Opening PRs needs either the GitHub CLI (gh auth login) or Cyclone installed on acme/widgets " +
+          "(https://github.com/apps/mergestorm-cyclone-staging/installations/new).",
+  );
+});
+
+test("findStackPull falls back to the canonical install link on a transport not-installed error", async () => {
+  mockFetch(500, { error: "github_unavailable", message: "GitHub App is not installed on acme/widgets" });
+  await assert.rejects(
+    () => findStackPull(cfg, { owner: "acme", repo: "widgets", head: "ms/feat-a" }),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "cyclone_not_installed" &&
+      err.message.endsWith(
+        "Cyclone installed on acme/widgets (https://github.com/apps/mergestorm-cyclone/installations/new).",
+      ),
+  );
+});
+
+test("findStackPull returns null when no PR is open", async () => {
+  mockFetch(200, { number: null, url: null });
+  assert.equal(await findStackPull(cfg, { owner: "acme", repo: "widgets", head: "ms/feat-a" }), null);
 });
