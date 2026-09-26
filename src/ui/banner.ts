@@ -114,6 +114,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.23": [
     "leave a stack bottom on mg-stack-<n>",
   ],
+  "0.3.24": [
+    "mg settings --auto-land-settle (15-300 seconds)",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

@@ -1,5 +1,5 @@
 export type RestackError = {
-  kind: "rebase_conflict" | "checkout_failed" | "head_unresolved" | "push_failed";
+  kind: "rebase_conflict" | "checkout_failed" | "head_unresolved" | "push_failed" | "retarget_failed";
   detail: string;
   headSha: string;
   attemptedAt: string;
@@ -359,11 +359,12 @@ export type StackDto = {
    * Partial or invalid server rows map to `null`, never to a guessed value.
    */
   autoEnqueueSettle?: {
-    action: "ready" | "promote";
+    action: "ready" | "promote" | "mergeability";
     prNumber: number;
     headSha: string;
     /** ISO timestamp of the watcher's clock start. */
     startedAt: string;
+    windowSeconds?: number;
   } | null;
   /**
    * Per-stack Vortex auto-review override. `null` (or missing) follows the

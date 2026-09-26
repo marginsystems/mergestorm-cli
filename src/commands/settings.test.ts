@@ -31,6 +31,7 @@ const SETTINGS_BODY = {
   vortex_skip_all_clear_comments: false,
   vortex_seam_specialist_enabled: true,
   auto_land_default: false,
+  auto_land_settle_seconds: 60,
 };
 
 // --- parseSettingsArgs --------------------------------------------------------
@@ -60,6 +61,31 @@ test("parseSettingsArgs maps --auto-land on to auto_land_default: true", () => {
   const parsed = parseSettingsArgs(["--auto-land", "on"]);
   assert.deepEqual(parsed, { json: false, patch: { auto_land_default: true } });
   assert.deepEqual(parseSettingsArgs(["--auto-land=off"]).patch, { auto_land_default: false });
+});
+
+test("parseSettingsArgs maps --auto-land-settle to whole seconds from 15 through 300", () => {
+  assert.deepEqual(parseSettingsArgs(["--auto-land-settle", "30"]), {
+    json: false,
+    patch: { auto_land_settle_seconds: 30 },
+  });
+  assert.deepEqual(parseSettingsArgs(["--auto-land-settle=300"]).patch, { auto_land_settle_seconds: 300 });
+  assert.deepEqual(parseSettingsArgs(["--auto-land-settle", "15"]).patch, { auto_land_settle_seconds: 15 });
+  for (const args of [
+    ["--auto-land-settle"], ["--auto-land-settle", "14"], ["--auto-land-settle", "301"],
+    ["--auto-land-settle", "on"], ["--auto-land-settle", "30.5"], ["--auto-land-settle", "-30"],
+    ["--auto-land-settle="],
+  ]) {
+    assert.throws(
+      () => parseSettingsArgs(args),
+      (e: unknown) => e instanceof CommandError && e.code === "usage" && /15 through 300/.test(e.message),
+      JSON.stringify(args),
+    );
+  }
+});
+
+test("human settings print the Auto land settle seconds", () => {
+  const text = formatSettingsLines({ ...SETTINGS_BODY, auto_land_settle_seconds: 30 }).join("\n");
+  assert.match(text, /Auto land settle \(seconds\)\s+30s/);
 });
 
 test("parseSettingsArgs collects every flag with both value forms", () => {

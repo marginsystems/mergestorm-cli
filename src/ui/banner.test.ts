@@ -171,8 +171,8 @@ test("what's new covers the shipped package version (no empty pane)", () => {
   const rows = buildBannerRows(loggedIn(cliVersion()), 120);
   const text = stripAnsi(rows.join("\n"));
   assert.match(text, new RegExp(`New in v${cliVersion().replace(/\./g, "\\.")}`));
-  assert.match(text, /leave a stack bottom on mg-stack-<n>/);
+  assert.match(text, /mg settings --auto-land-settle \(15-300 seconds\)/);
 
   const narrowText = stripAnsi(buildBannerRows(loggedIn(cliVersion()), 80).join("\n"));
-  assert.match(narrowText, /leave a stack bottom on mg-stack-<n>/);
+  assert.match(narrowText, /mg settings --auto-land-settle \(15-300 seconds\)/);
 });

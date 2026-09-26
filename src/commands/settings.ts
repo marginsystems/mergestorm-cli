@@ -59,6 +59,18 @@ export function parseSettingsArgs(args: string[]): SettingsArgs {
       }
       continue;
     }
+    if ("kind" in row && row.kind === "seconds") {
+      const seconds = value !== undefined && /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      if (!Number.isInteger(seconds) || seconds < row.min || seconds > row.max) {
+        throw new CommandError(
+          `${flag} takes a whole number of seconds from ${row.min} through ${row.max}.`,
+          2,
+          "usage",
+        );
+      }
+      Object.assign(patch, { [key]: seconds });
+      continue;
+    }
     if ("kind" in row && row.kind === "enum") {
       if (value === undefined || !(row.values as readonly string[]).includes(value)) {
         throw new CommandError(`${flag} takes ${row.values.join(" or ")}.`, 2, "usage");
@@ -90,6 +102,8 @@ export function formatSettingsLines(settings: SettingsResponse): string[] {
       ? row.value.join(", ") || "(empty)"
       : typeof row.value === "string"
       ? row.value
+      : typeof row.value === "number"
+      ? `${row.value}s`
       : row.writable
       ? row.value
         ? "on"
