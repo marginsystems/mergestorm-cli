@@ -1187,7 +1187,7 @@ export async function cmdStackWait(
       ...envelope,
       ...(retryAfterSeconds !== undefined ? { retry_after_seconds: retryAfterSeconds } : {}),
     }, null, 2)
-    : `Stack ${envelope.stackId} · ${envelope.status}${stackBlockersSummary(envelope.blocker && envelope.prNumber != null ? { prNumber: envelope.prNumber, blocker: envelope.blocker } : null, envelope.issues)}${envelope.assessment === "unavailable" ? " · assessment unavailable" : ""}`);
+    : `Stack ${envelope.stackId} · ${envelope.status}${stackBlockersSummary(envelope.blocker && envelope.prNumber != null ? { prNumber: envelope.prNumber, blocker: envelope.blocker } : null, envelope.issues, envelope.busy)}${envelope.assessment === "unavailable" ? " · assessment unavailable" : ""}`);
   try {
     print(await (deps.pollStackWatch ?? pollStackWatch)(cfg, stackId, {
       timeoutMs: timeoutS * 1000,

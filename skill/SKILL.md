@@ -68,12 +68,12 @@ Call `review_submit` with `wait: false` (the default) on the repo cwd (git colle
 
 Optional: `thread`, `idempotency_key`, `wait`, `timeout_s`. Submit returns without waiting. Record `job_id` as soon as it returns, then loop `review_wait` with that `job_id` and `timeout_s: 45` until the job finishes. Each call is one 45s slice. On timeout, call `review_wait` again with the same `job_id`. Do not pass 300; hosts drop long MCP calls. Explicit `wait: true` also defaults to one 45s slice.
 
-Call `review_list` before any resubmit, including when a submit or wait call is interrupted. Resume the existing job with `review_get` or `review_wait`; do not create a second job because a slice died or the submit response was lost.
+Call `review_list` before any resubmit, including when a submit or wait call is interrupted. Resume the existing job with `review_wait` (`timeout_s: 0` reads it once without waiting); do not create a second job because a slice died or the submit response was lost.
 
 Status handling:
 
 - status is `no_changes`: success. The branch matches the selected base, no review job was submitted, and no review credit was used. Stop unless the user expected a different base.
-- status is `rate_limited`: wait `retry_after_seconds`. Use `review_list`, `review_get`, or `review_wait` for an existing in-flight job before resubmitting. Do not immediately resubmit the same diff.
+- status is `rate_limited`: wait `retry_after_seconds`. Use `review_list` or `review_wait` for an existing in-flight job before resubmitting. Do not immediately resubmit the same diff.
 
 ## Apply findings
 

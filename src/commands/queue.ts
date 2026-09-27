@@ -186,8 +186,15 @@ async function removeQueue(args: string[], asJson: boolean): Promise<void> {
     console.log(JSON.stringify(body, null, 2));
     return;
   }
+  const cancelRequested =
+    typeof body === "object" && body !== null &&
+    (body as { cancelRequested?: unknown }).cancelRequested === true;
   await present("Merge queue", [
-    ansi.brightGreen(`  Removed ${entryId} from the merge queue`),
+    cancelRequested
+      ? ansi.brightGreen(
+          `  Cancel requested for ${entryId}: it is merging, and the queue cancels it before the merge call unless the merge already started`,
+        )
+      : ansi.brightGreen(`  Removed ${entryId} from the merge queue`),
   ]);
 }
 

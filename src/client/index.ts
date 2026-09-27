@@ -116,11 +116,12 @@ export {
 
 export { discoverTrunk } from "../git-stack.js";
 
-export { BOUNCE_KIND_LABELS, mergeQueueBounceLabel } from "../stack-dto.js";
+export { BOUNCE_KIND_LABELS, deriveStackAgentsBusy, mergeQueueBounceLabel, type StackAgentsBusy } from "../stack-dto.js";
 
 export {
   STACK_WATCH_SCHEMA,
   STACK_WATCH_DEFAULT_TIMEOUT_MS,
+  STACK_WATCH_BUSY_RECHECK_S,
   StackWatchError,
   StackWatchTimeoutError,
   pollStackWatch,
@@ -129,4 +130,13 @@ export {
   type StackWatchEnvelope,
 } from "../stack-watch.js";
 
-export { stackBlockers, stackBlockersSummary, sameHead, type StackBlocker } from "../stack-blockers.js";
+export {
+  stackBlockers,
+  stackBlockersSummary,
+  sameHead,
+  layerAgents,
+  layerAgentsBusy,
+  type StackAgentBusy,
+  type StackBlocker,
+  type StackLayerAgents,
+} from "../stack-blockers.js";

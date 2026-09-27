@@ -1,4 +1,11 @@
-import { currentLayer, stackBlockers, type StackBlocker } from "./stack-blockers.js";
+import {
+  currentLayer,
+  layerAgents,
+  stackBlockers,
+  type StackAgentBusy,
+  type StackBlocker,
+  type StackLayerAgents,
+} from "./stack-blockers.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { apiFetch, type ApiFetchResult } from "./api.js";
 import type { Config } from "./config.js";
@@ -13,6 +20,7 @@ import { type MergeQueueEntryDto, type StackDto } from "./stack-dto.js";
 
 export const STACK_WATCH_SCHEMA = "mergestorm.stack_watch/v1" as const;
 export const STACK_WATCH_DEFAULT_TIMEOUT_MS = 45_000;
+export const STACK_WATCH_BUSY_RECHECK_S = 15;
 
 /** Resume selectors are fixed for the entire wait, including transient retries. */
 export type StackWatchCursor = {
@@ -34,6 +42,8 @@ export type StackWatchEnvelope = {
   issues: StackBlocker[];
   currentCandidate: { prNumber: number; headSha: string | null } | null;
   assessment: "available" | "unavailable";
+  busy: StackAgentBusy[];
+  agents: StackLayerAgents | null;
 };
 
 export type PollStackWatchOptions = {
@@ -96,7 +106,7 @@ export async function pollStackWatch(
   let lastEnvelope: StackWatchEnvelope = {
     schema: STACK_WATCH_SCHEMA, status: "failed", stackId: id, blocker: null,
     bounceKind: null, prNumber: null, headSha: null, cursor,
-    issues: [], currentCandidate: null, assessment: "unavailable",
+    issues: [], currentCandidate: null, assessment: "unavailable", busy: [], agents: null,
   };
   let transientFailures = 0;
   const timeout = () => new StackWatchTimeoutError(lastEnvelope);
@@ -169,14 +179,15 @@ export async function pollStackWatch(
     };
   };
   const evaluate = (stack: StackDto, entries: MergeQueueEntryDto[]) => {
-    const { attention, issues, currentCandidate, bounce } = stackBlockers(stack, entries, cursor);
+    const { attention, issues, currentCandidate, bounce, busy, agents } = stackBlockers(stack, entries, cursor);
     if (bounce) cursor = Object.freeze({ ...cursor, bounceId: bounce.id,
       ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}) });
-    lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available",
+    const held = busy[0];
+    lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available", busy, agents,
       blocker: attention?.blocker ?? null, bounceKind: attention?.bounceKind ?? null,
-      prNumber: attention?.prNumber ?? currentCandidate?.prNumber ?? null,
-      headSha: attention ? attention.headSha : currentCandidate?.headSha ?? null,
-      status: attention ? "attention" : entries.some((entry) => ["queued", "running", "waiting"].includes(entry.state))
+      prNumber: attention?.prNumber ?? held?.prNumber ?? currentCandidate?.prNumber ?? null,
+      headSha: attention ? attention.headSha : held ? held.headSha : currentCandidate?.headSha ?? null,
+      status: attention ? "attention" : busy.length || entries.some((entry) => ["queued", "running", "waiting"].includes(entry.state))
         ? "in_progress" : "waiting" };
   };
 
@@ -186,13 +197,15 @@ export async function pollStackWatch(
     cursor = Object.freeze({ stackId: id, enrolledHeadSha: layer?.headSha ?? null });
     enrolled = true;
   }
-  lastEnvelope = { ...lastEnvelope, cursor, prNumber: layer?.prNumber ?? null, headSha: layer?.headSha ?? null };
+  lastEnvelope = { ...lastEnvelope, cursor, prNumber: layer?.prNumber ?? null, headSha: layer?.headSha ?? null,
+    agents: layer ? layerAgents(layer) : null };
   let queue = await readQueue(queueRoute, timeoutMs === 0);
   evaluate(stack, queue.entries);
   if (lastEnvelope.status === "attention" || timeoutMs === 0) return lastEnvelope;
   while (now() < deadline) {
     const heldAt = now();
-    const seconds = Math.min(45, Math.max(1, Math.ceil((deadline - heldAt) / 1000)));
+    const seconds = Math.min(lastEnvelope.busy.length ? STACK_WATCH_BUSY_RECHECK_S : 45,
+      Math.max(1, Math.ceil((deadline - heldAt) / 1000)));
     const seen = queue.fingerprint ? `&seen=${encodeURIComponent(queue.fingerprint)}` : "";
     const held = await readQueue(`${queueRoute}&wait=${seconds}${seen}`);
     if (JSON.stringify(held.entries) === JSON.stringify(queue.entries)) {
@@ -201,7 +214,8 @@ export async function pollStackWatch(
     queue = held;
     stack = await enrich(true);
     const refreshed = currentLayer(stack);
-    lastEnvelope = { ...lastEnvelope, prNumber: refreshed?.prNumber ?? null, headSha: refreshed?.headSha ?? null };
+    lastEnvelope = { ...lastEnvelope, prNumber: refreshed?.prNumber ?? null, headSha: refreshed?.headSha ?? null,
+      agents: refreshed ? layerAgents(refreshed) : null };
     transientFailures = 0;
     evaluate(stack, queue.entries);
     if (lastEnvelope.status === "attention") return lastEnvelope;

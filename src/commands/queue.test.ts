@@ -273,6 +273,23 @@ describe("queue commands", { concurrency: false }, () => {
     assert.match(out, new RegExp(`Removed ${entryId} from the merge queue`));
   });
 
+  test("mg queue rm prints Cancel requested for a merging entry", async () => {
+    configureApi();
+    globalThis.fetch = async (_input, init) => {
+      if (init?.method !== "POST") {
+        return Response.json({ entries: [{ ...entry, state: "running" }] });
+      }
+      return Response.json(
+        { entry: { ...entry, state: "running" }, cancelRequested: true },
+        { status: 202 },
+      );
+    };
+
+    const out = strip(await captureLines(() => cmdQueue(["rm", stackId])));
+    assert.match(out, new RegExp(`Cancel requested for ${entryId}`));
+    assert.doesNotMatch(out, /Removed/);
+  });
+
   test("buildQueueListLines renders the empty-queue hint", () => {
     const lines = buildQueueListLines([]);
     assert.match(strip(lines.join("\n")), /Nothing queued/);
@@ -405,16 +422,19 @@ test("queue bounced rows show the PR head and shared structured bounce label", (
     waitReason: null,
     bounceReason: "legacy reason",
     bounceDetail: {
-      kind: "ci_failure",
+      kind: "restack_conflict",
       prNumber: 12,
       headSha: "abc1234567890",
-      failingCheck: "unit tests",
+      conflictPaths: ["a.txt", "b.txt"],
+      message: "restack guidance",
     },
     verifyHeadSha: "fffffff000000",
   };
   const text = strip(buildQueueListLines([bounced]).join("\n"));
   assert.match(text, /#12@abc1234/);
-  assert.ok(text.includes(mergeQueueBounceLabel(bounced)));
+  assert.equal(mergeQueueBounceLabel(bounced), "restack conflict — a.txt, b.txt");
+  assert.ok(text.includes("restack conflict — a.txt, b.txt"));
+  assert.doesNotMatch(text, /restack guidance/);
   assert.doesNotMatch(text, /legacy reason|fffffff/);
 });
 

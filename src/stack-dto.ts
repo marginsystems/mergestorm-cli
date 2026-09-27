@@ -150,6 +150,44 @@ export type StackAgentRun = {
   coverage?: { reviewed: number; total: number } | null;
 };
 
+export type StackAgentsBusy = {
+  vortex: boolean;
+  cyclone: boolean;
+  headSha: string | null;
+};
+
+export const STACK_AGENT_QUEUED_STALE_MS = 15 * 60 * 1000;
+
+function agentShaMayBeHead(sha: string | null | undefined, head: string | null | undefined): boolean {
+  const left = sha?.trim().toLowerCase();
+  const right = head?.trim().toLowerCase();
+  if (!left || !right) return false;
+  return left.startsWith(right) || right.startsWith(left);
+}
+
+export function deriveStackAgentsBusy(
+  layer: Pick<StackLayerDto, "headSha" | "vortexStatus" | "cycloneStatus" | "agentRuns" | "vortexReview">,
+  opts: { cycloneClaimed?: boolean; nowMs?: number } = {},
+): StackAgentsBusy {
+  const headSha = layer.headSha?.trim() || null;
+  const nowMs = opts.nowMs ?? Date.now();
+  const runs = (layer.agentRuns ?? []).filter((run) => !run.finishedAt);
+  const vortexRuns = runs.filter((run) => run.agent === "vortex" && agentShaMayBeHead(run.sha, headSha));
+  const freshQueued = vortexRuns.some((run) => {
+    const queuedAt = Date.parse(run.startedAt ?? "");
+    return run.status === "queued" && Number.isFinite(queuedAt) && nowMs - queuedAt <= STACK_AGENT_QUEUED_STALE_MS;
+  });
+  const review = layer.vortexReview;
+  const reviewOnHead = !!review && agentShaMayBeHead(review.head_sha, headSha);
+  const vortex = (reviewOnHead && review.status === "reviewing") ||
+    vortexRuns.some((run) => run.status === "reviewing") ||
+    freshQueued ||
+    (layer.agentRuns === undefined && review === undefined && layer.vortexStatus === "reviewing");
+  const cyclone = opts.cycloneClaimed === true || layer.cycloneStatus === "patching" ||
+    runs.some((run) => run.agent === "cyclone" && run.status === "patching");
+  return { vortex, cyclone, headSha };
+}
+
 export type StackLayerChecks = {
   total: number;
   success: number;
@@ -237,6 +275,7 @@ export type StackLayerDto = {
    * detail once it says `done`. Undefined = producer predates the viewer.
    */
   vortexReview?: StackVortexReviewView;
+  agentsBusy?: StackAgentsBusy | null;
   conflictDetail: string | null;
   restackError?: RestackError | null;
   lastRestackedSha: string | null;
@@ -459,6 +498,7 @@ export function mergeQueueBounceLabel(entry: MergeQueueEntryDto): string {
     const specifics =
       detail?.failingCheck ??
       detail?.conflictBranch ??
+      (detail?.conflictPaths?.length ? detail.conflictPaths.join(", ") : null) ??
       detail?.message ??
       (detail?.prNumber != null ? `PR #${detail.prNumber}` : null);
     return specifics ? `${kindLabel} — ${specifics}` : kindLabel;
@@ -474,6 +514,7 @@ export type MergeQueueBounceDetail = {
   failingCheck?: string;
   conflictBranch?: string;
   conflictDetail?: string;
+  conflictPaths?: string[];
   message?: string;
 };
 
@@ -497,5 +538,6 @@ export type MergeQueueEntryDto = {
   verifyHeadSha: string | null;
   /** Target tip included in the verified PR head. Null until recorded. */
   verifyBaseSha: string | null;
+  cancelRequestedAt?: string | null;
   finishedAt: string | null;
 };

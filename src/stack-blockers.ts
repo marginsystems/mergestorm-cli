@@ -1,4 +1,12 @@
-import { mergeQueueBounceLabel, restackRetryPending, type MergeQueueEntryDto, type StackDto, type StackLayerDto } from "./stack-dto.js";
+import {
+  deriveStackAgentsBusy,
+  mergeQueueBounceLabel,
+  restackRetryPending,
+  type MergeQueueEntryDto,
+  type StackAgentsBusy,
+  type StackDto,
+  type StackLayerDto,
+} from "./stack-dto.js";
 import type { StackWatchCursor } from "./stack-watch.js";
 
 export type StackBlocker = {
@@ -7,6 +15,39 @@ export type StackBlocker = {
   blocker: string;
   bounceKind: string | null;
 };
+
+export type StackAgentBusy = {
+  prNumber: number;
+  headSha: string | null;
+  agent: "vortex" | "cyclone";
+  blocker: string;
+};
+
+export type StackLayerAgents = {
+  prNumber: number;
+  headSha: string | null;
+  vortexStatus: StackLayerDto["vortexStatus"];
+  cycloneStatus: StackLayerDto["cycloneStatus"];
+  vortexReview: { status: string; headSha: string | null; pass: number | null } | null;
+  busy: { vortex: boolean; cyclone: boolean };
+};
+
+export function layerAgentsBusy(layer: StackLayerDto): StackAgentsBusy {
+  return layer.agentsBusy ?? deriveStackAgentsBusy(layer);
+}
+
+export function layerAgents(layer: StackLayerDto): StackLayerAgents {
+  const busy = layerAgentsBusy(layer);
+  const review = layer.vortexReview;
+  return {
+    prNumber: layer.prNumber,
+    headSha: layer.headSha ?? null,
+    vortexStatus: layer.vortexStatus ?? null,
+    cycloneStatus: layer.cycloneStatus ?? null,
+    vortexReview: review ? { status: review.status, headSha: review.head_sha, pass: review.pass } : null,
+    busy: { vortex: busy.vortex, cyclone: busy.cyclone },
+  };
+}
 
 export function isMgParkBase(branch: string | null | undefined): boolean {
   return (branch ?? "").trim().toLowerCase().startsWith("mg-park-");
@@ -39,6 +80,18 @@ export function currentLayer(stack: StackDto): StackLayerDto | undefined {
   const land = stack.unit?.landPr;
   return promote[0] ?? open.find((layer) => layer.prNumber === stack.unit?.landPrNumber) ??
     (land && land.prNumber > 0 && land.state !== "merged" && land.state !== "closed" ? land : undefined);
+}
+
+function seamGateBlocker(stack: StackDto, layer: StackLayerDto): string | null {
+  const members = stack.unit?.members ?? [];
+  if (layer.prNumber === stack.unit?.landPrNumber) return null;
+  if (!members.some((member) => member.promotedHeadSha?.trim())) return null;
+  const member = members.find((entry) => entry.prNumber === layer.prNumber);
+  if (!member || member.promotedHeadSha?.trim()) return null;
+  const seamState = member.seamState?.trim().toLowerCase();
+  if (seamState === "failed") return "Seam review failed";
+  if (seamState === "findings" && sameHead(member.seamReviewedSha, layer.headSha)) return "Seam findings";
+  return null;
 }
 
 /** Shared live-fact precedence; bounce history is only passed for the candidate. */
@@ -75,6 +128,8 @@ function layerAttention(
       ["findings", "failed"].includes(run.status) && sameHead(run.sha, layer.headSha));
     if (tempest) return hardBlock(`Tempest ${tempest.status}`);
     if (layer.vortexStatus === "failed") return hardBlock("Review failed");
+    const seam = seamGateBlocker(stack, layer);
+    if (seam) return hardBlock(seam);
     if (stack.unit?.landPrNumber === layer.prNumber) {
       if (stack.unit.landingBlockReason?.trim()) return hardBlock(stack.unit.landingBlockReason.trim());
       if (stack.unit.tempestLandStatus?.toLowerCase() === "failed") return hardBlock("Tempest failed");
@@ -105,6 +160,7 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       (layer.state !== "restacking" && layer.restackError?.kind === "rebase_conflict")),
   ).sort((a, b) => a.position - b.position)[0];
   let attention: StackBlocker | null = null;
+  let attentionLayer: StackLayerDto | undefined;
   let bounce: MergeQueueEntryDto | undefined;
   const issues: StackBlocker[] = [];
   for (const layer of open) {
@@ -115,16 +171,29 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       blocker: result.blocker, bounceKind: result.bounceKind };
     if (selected || (!attention && layer === child)) {
       attention = issue;
+      attentionLayer = layer;
       bounce = result.bounce;
     } else if (!candidate || layer.position > candidate.position) issues.push(issue);
   }
-  return { attention, issues, currentCandidate, bounce };
+  const focus = attentionLayer ?? candidate;
+  const agents = focus ? layerAgents(focus) : null;
+  const busy: StackAgentBusy[] = [];
+  if (attention && agents) {
+    for (const agent of ["cyclone", "vortex"] as const) {
+      if (agents.busy[agent]) busy.push({ prNumber: attention.prNumber, headSha: attention.headSha, agent, blocker: attention.blocker });
+    }
+  }
+  if (busy.length) return { attention: null, issues, currentCandidate, bounce: undefined, busy, agents };
+  return { attention, issues, currentCandidate, bounce, busy, agents };
 }
 
 /** Compact contract text shared by status and wait summaries. */
 export function stackBlockersSummary(attention: Pick<StackBlocker, "prNumber" | "blocker"> | null,
-  issues: StackBlocker[]): string {
+  issues: StackBlocker[], busy: readonly StackAgentBusy[] = []): string {
   const blocked = attention ? ` · blocked: #${attention.prNumber} ${attention.blocker}` : "";
+  const working = busy.length
+    ? ` · held: #${busy[0]!.prNumber} ${busy[0]!.blocker} while ${busy.map((entry) => entry.agent === "cyclone" ? "Cyclone patches" : "Vortex reviews").join(" and ")}`
+    : "";
   const labels = issues.slice(0, 3).map(issue => `#${issue.prNumber} ${issue.blocker}`).join("; ");
-  return blocked + (issues.length ? ` · issues: ${labels}${issues.length > 3 ? `; +${issues.length - 3} more` : ""}` : "");
+  return blocked + working + (issues.length ? ` · issues: ${labels}${issues.length > 3 ? `; +${issues.length - 3} more` : ""}` : "");
 }

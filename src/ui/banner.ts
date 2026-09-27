@@ -117,6 +117,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.24": [
     "mg settings --auto-land-settle (15-300 seconds)",
   ],
+  "0.3.25": [
+    "stack wait holds a PR while Cyclone or Vortex works",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

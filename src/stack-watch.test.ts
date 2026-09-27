@@ -72,7 +72,9 @@ test("attention at enrollment: CI on the current head", async () => {
     schema: "mergestorm.stack_watch/v1", status: "attention", stackId: "stack",
     blocker: "CI failed — lint", bounceKind: null, prNumber: 42, headSha: HEAD,
     cursor: { stackId: "stack", enrolledHeadSha: HEAD },
-    issues: [], currentCandidate: { prNumber: 42, headSha: HEAD }, assessment: "available",
+    issues: [], currentCandidate: { prNumber: 42, headSha: HEAD }, assessment: "available", busy: [],
+    agents: { prNumber: 42, headSha: HEAD, vortexStatus: null, cycloneStatus: null, vortexReview: null,
+      busy: { vortex: false, cyclone: false } },
   });
   assert.deepEqual(h.calls.map((call) => call.route), ["/api/v1/stacks/enrich?stackId=stack", "/api/v1/stacks/queue?stackId=stack"]);
   assert.deepEqual(h.sleeps, []);
@@ -620,4 +622,219 @@ test("recoverable bounce cannot suppress another PR sharing its SHA", async () =
   const h = harness(stack([layer({ ciStatus: "failure" }), layer({ prNumber: 43, position: 1 })]),
     [bounce({ bounceDetail: { kind: "head_moved", headSha: HEAD, prNumber: 43 } })]);
   assert.equal((await pollStackWatch(cfg, "stack", h.options)).blocker, "CI failed");
+});
+
+async function heldInProgress(options: PollStackWatchOptions): Promise<StackWatchEnvelope> {
+  try { await pollStackWatch(cfg, "stack", options); }
+  catch (err) {
+    assert.ok(err instanceof StackWatchTimeoutError);
+    assert.equal(err.lastEnvelope.status, "in_progress");
+    return err.lastEnvelope;
+  }
+  assert.fail("Expected in_progress timeout");
+}
+
+const redCi = { ciStatus: "failure" as const, checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: "lint" } };
+const reviewing = (head: string) => ({
+  status: "reviewing" as const, skip_reason: null, pass: 2, head_sha: head, phase: null,
+  started_at: null, stoppable: true, source: "pr_reviews" as const,
+});
+const done = (head: string) => ({ ...reviewing(head), status: "done" as const, stoppable: false });
+
+test("CI red while Cyclone patches is in_progress naming the busy agent, never attention", async () => {
+  const h = harness(stack([layer({ ...redCi, cycloneStatus: "patching",
+    agentRuns: [{ agent: "cyclone", status: "patching", sha: NEXT }] })]));
+  const result = await heldInProgress(h.options);
+  assert.equal(result.blocker, null);
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.headSha, HEAD);
+  assert.deepEqual(result.busy, [{ prNumber: 42, headSha: HEAD, agent: "cyclone", blocker: "CI failed — lint" }]);
+  assert.equal(result.agents?.cycloneStatus, "patching");
+  assert.deepEqual(result.agents?.busy, { vortex: false, cyclone: true });
+});
+
+test("CI red while Vortex reviews the current head is in_progress", async () => {
+  const h = harness(stack([layer({ ...redCi, vortexStatus: "reviewing", vortexReview: reviewing(HEAD),
+    agentRuns: [{ agent: "vortex", status: "reviewing", sha: HEAD }] })]));
+  const result = await heldInProgress(h.options);
+  assert.deepEqual(result.busy.map((entry) => entry.agent), ["vortex"]);
+  assert.deepEqual(result.agents?.vortexReview, { status: "reviewing", headSha: HEAD, pass: 2 });
+});
+
+test("a Vortex run with an unknown SHA does not hold a CI blocker", async () => {
+  const h = harness(stack([layer({ ...redCi, vortexStatus: "reviewing",
+    agentRuns: [{ agent: "vortex", status: "reviewing", sha: null }] })]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "CI failed — lint");
+  assert.deepEqual(result.busy, []);
+});
+
+test("Vortex still reviewing an older head does not hold attention on the current head", async () => {
+  const h = harness(stack([layer({ ...redCi, vortexStatus: "reviewing", vortexReview: done(HEAD),
+    agentRuns: [{ agent: "vortex", status: "reviewing", sha: NEXT }] })]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "CI failed — lint");
+  assert.deepEqual(result.busy, []);
+  assert.deepEqual(result.agents?.busy, { vortex: false, cyclone: false });
+});
+
+test("finished agent runs and resting statuses leave attention", async () => {
+  const h = harness(stack([layer({ ...redCi, vortexStatus: "findings", cycloneStatus: "awaiting_fix", vortexReview: done(HEAD),
+    agentRuns: [
+      { agent: "vortex", status: "reviewing", sha: HEAD, finishedAt: "2026-01-01T00:00:00Z" },
+      { agent: "cyclone", status: "patching", sha: HEAD, finishedAt: "2026-01-01T00:00:00Z" },
+    ] })]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+});
+
+test("seam_pending, a legacy queued rollup, and a stale or untimed queued dispatch never hold attention", async () => {
+  const queuedView = { ...reviewing(HEAD), status: "queued" as const, stoppable: false };
+  for (const extra of [
+    { vortexStatus: "seam_pending" as const, agentRuns: [] },
+    { vortexStatus: "seam_pending" as const },
+    { vortexStatus: "queued" as const },
+    { vortexStatus: "queued" as const, vortexReview: queuedView,
+      agentRuns: [{ agent: "vortex" as const, status: "queued", sha: HEAD, startedAt: new Date(Date.now() - 16 * 60_000).toISOString() }] },
+    { vortexStatus: "queued" as const, vortexReview: queuedView,
+      agentRuns: [{ agent: "vortex" as const, status: "queued", sha: null }] },
+  ]) {
+    const h = harness(stack([layer({ ...redCi, ...extra })]));
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention", JSON.stringify(extra));
+  }
+});
+
+test("a fresh queued Vortex dispatch on the current head holds attention", async () => {
+  const h = harness(stack([layer({ ...redCi, vortexStatus: "queued",
+    agentRuns: [{ agent: "vortex", status: "queued", sha: HEAD, startedAt: new Date(Date.now() - 60_000).toISOString() }] })]));
+  const result = await heldInProgress(h.options);
+  assert.deepEqual(result.busy.map((entry) => entry.agent), ["vortex"]);
+});
+
+test("the server agentsBusy field is authoritative over the client fallback", async () => {
+  const claimed = harness(stack([layer({ ...redCi, agentsBusy: { vortex: false, cyclone: true, headSha: HEAD } })]));
+  const held = await heldInProgress(claimed.options);
+  assert.deepEqual(held.busy.map((entry) => entry.agent), ["cyclone"]);
+  const idle = harness(stack([layer({ ...redCi, cycloneStatus: "patching", agentsBusy: { vortex: false, cyclone: false, headSha: HEAD } })]));
+  assert.equal((await pollStackWatch(cfg, "stack", idle.options)).status, "attention");
+});
+
+test("a held bounce wakes within one busy recheck once the agent finishes, then stamps the cursor", async () => {
+  const h = harness(stack([layer({ cycloneStatus: "patching", agentRuns: [{ agent: "cyclone", status: "patching", sha: HEAD }] })]), [bounce()]);
+  const waits: string[] = [];
+  h.state.respond = (route) => {
+    if (!route.includes("/queue")) return undefined;
+    const wait = new URL(route, "https://local").searchParams.get("wait");
+    if (wait !== null) {
+      waits.push(wait);
+      h.state.advance(Number(wait) * 1000);
+      h.state.stack = stack([layer({ cycloneStatus: null, agentRuns: [] })]);
+    }
+    return { status: 200, body: { entries: [bounce()], fingerprint: "fp-bounce" } };
+  };
+  const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 45_000 });
+  assert.deepEqual(waits, ["15"]);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "CI failed — lint");
+  assert.deepEqual(result.busy, []);
+  assert.deepEqual(result.cursor, {
+    stackId: "stack", enrolledHeadSha: HEAD, bounceId: "bounce", afterFinishedAt: "2026-01-01T00:01:00Z",
+  });
+});
+
+test("a busy hold never stamps the bounce into the cursor", async () => {
+  const h = harness(stack([layer({ cycloneStatus: "patching" })]), [bounce()]);
+  const result = await heldInProgress(h.options);
+  assert.deepEqual(result.cursor, { stackId: "stack", enrolledHeadSha: HEAD });
+  assert.deepEqual(result.busy.map((entry) => entry.blocker), ["CI failed — lint"]);
+});
+
+type UnitMember = NonNullable<StackDto["unit"]>["members"][number];
+function seamUnit(target: StackDto, seamState: string, seamReviewedSha: string | null,
+  promoted: UnitMember[] = [{ prNumber: 41, promotedHeadSha: "promoted", promotedAt: "2026-09-27T00:28:09Z", seamState: "none", seamReviewedSha: null } as UnitMember]): StackDto {
+  target.unit = {
+    id: "unit", uNumber: 77, state: "growing", branch: "unit", landTarget: "main", landPrNumber: 50,
+    tempestLandStatus: null, landingBlockReason: null, landPr: null,
+    members: [...promoted, { prNumber: 42, promotedHeadSha: null, promotedAt: "2026-09-27T00:28:21Z", seamState, seamReviewedSha } as UnitMember],
+  };
+  return target;
+}
+
+test("seam findings at the current head are attention on that member", async () => {
+  const h = harness(seamUnit(stack(), "findings", HEAD));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Seam findings");
+  assert.equal(result.bounceKind, null);
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.headSha, HEAD);
+  assert.deepEqual(result.cursor, { stackId: "stack", enrolledHeadSha: HEAD });
+});
+
+test("seam findings reviewed at an abbreviated head still block", async () => {
+  const h = harness(seamUnit(stack(), "findings", HEAD.slice(0, 7).toUpperCase()));
+  assert.equal((await pollStackWatch(cfg, "stack", h.options)).blocker, "Seam findings");
+});
+
+test("a failed seam review is attention whatever head it last reviewed", async () => {
+  for (const reviewed of [null, NEXT, HEAD]) {
+    const h = harness(seamUnit(stack(), "failed", reviewed));
+    assert.equal((await pollStackWatch(cfg, "stack", h.options)).blocker, "Seam review failed", String(reviewed));
+  }
+});
+
+test("seam findings on a stale head wait for the re-review", async () => {
+  for (const reviewed of [NEXT, null]) {
+    const h = harness(seamUnit(stack(), "findings", reviewed));
+    const result = await timedOut(h.options);
+    assert.equal(result.blocker, null);
+    assert.deepEqual(result.issues, []);
+  }
+});
+
+for (const seamState of ["approved", "none", "pending", "reviewing", "pending_rereview"]) {
+  test(`seam ${seamState} is not a blocker`, async () => {
+    const h = harness(seamUnit(stack(), seamState, HEAD));
+    assert.equal((await timedOut(h.options)).blocker, null);
+  });
+}
+
+test("seam findings before any member is promoted do not gate promotion", async () => {
+  const h = harness(seamUnit(stack(), "findings", HEAD, []));
+  assert.equal((await timedOut(h.options)).blocker, null);
+});
+
+test("seam findings on an already promoted member are not a blocker", async () => {
+  const target = seamUnit(stack(), "findings", HEAD);
+  target.unit!.members[1] = { ...target.unit!.members[1]!, promotedHeadSha: HEAD };
+  const h = harness(target);
+  assert.equal((await timedOut(h.options)).blocker, null);
+});
+
+test("seam findings on an upstack member are an issue behind the candidate", async () => {
+  const target = seamUnit(stack([layer(), layer({ prNumber: 43, position: 1, branch: "upper", parentBranch: "feature", headSha: NEXT })]), "none", null);
+  target.unit!.members.push({ prNumber: 43, promotedHeadSha: null, promotedAt: "2026-09-27T00:28:21Z", seamState: "findings", seamReviewedSha: NEXT } as UnitMember);
+  const h = harness(target);
+  const result = await timedOut(h.options);
+  assert.equal(result.blocker, null);
+  assert.deepEqual(result.issues, [{ prNumber: 43, headSha: NEXT, blocker: "Seam findings", bounceKind: null }]);
+});
+
+test("seam findings while Vortex re-reviews the seam hold as in_progress", async () => {
+  const h = harness(seamUnit(stack([layer({ vortexStatus: "reviewing",
+    agentRuns: [{ agent: "vortex", status: "reviewing", sha: HEAD }] })]), "findings", HEAD));
+  const result = await heldInProgress(h.options);
+  assert.equal(result.blocker, null);
+  assert.deepEqual(result.busy, [{ prNumber: 42, headSha: HEAD, agent: "vortex", blocker: "Seam findings" }]);
+});
+
+test("a live seam finding outranks a seam_findings bounce without stamping the cursor", async () => {
+  const entry = bounce({ bounceDetail: { kind: "seam_findings", headSha: HEAD, prNumber: 42 } });
+  const h = harness(seamUnit(stack(), "findings", HEAD), [entry]);
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.blocker, "Seam findings");
+  assert.deepEqual(result.cursor, { stackId: "stack", enrolledHeadSha: HEAD });
 });

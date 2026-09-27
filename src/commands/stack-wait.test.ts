@@ -8,7 +8,7 @@ import { cmdStack, cmdStackWait } from "./stack.js";
 
 const stackId = "11111111-1111-4111-8111-111111111111";
 const envelope: StackWatchEnvelope = {
-  issues: [], currentCandidate: null, assessment: "available",
+  issues: [], currentCandidate: null, assessment: "available", busy: [], agents: null,
   schema: "mergestorm.stack_watch/v1", status: "attention", stackId,
   blocker: "Conflict", bounceKind: null, prNumber: 12, headSha: "head",
   cursor: { stackId, enrolledHeadSha: "enrolled" },
