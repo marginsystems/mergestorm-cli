@@ -19,6 +19,7 @@ import {
   cmdStackCreate,
   cmdStackSet,
   cmdStackSubmit,
+  openStackWatch,
   findRegisteredParent,
   openPolicyPatch,
   parseAdoptTarget,
@@ -367,6 +368,7 @@ test("cmdStackSet writes Auto land and prints the API JSON response", async () =
   assert.deepEqual(call, { stackId, policy: { autoEnqueueWhenReady: true } });
   assert.deepEqual(JSON.parse(output.join("\n")), {
     autoEnqueueWhenReady: true,
+    watch: openStackWatch(stackId, { unread: true }),
   });
 });
 
@@ -397,6 +399,7 @@ test("cmdStackSet sends only the override keys given, with default as null", asy
   assert.deepEqual(JSON.parse(output.join("\n")), {
     autoReviewOverride: null,
     autoPatchOverride: false,
+    watch: openStackWatch(stackId, { unread: true }),
   });
 });
 
@@ -1009,6 +1012,11 @@ test("cmdStackSubmit --json stdout is one JSON value without park/push progress 
   assert.equal(body.repo, "widgets");
   assert.equal(body.stackId, STACK_A);
   assert.equal(body.trunk, "main");
+  assert.deepEqual(body.watch, openStackWatch(STACK_A));
+  assert.equal(body.watch.done, false);
+  assert.deepEqual(body.watch.next, {
+    tool: "stack_wait", args: { stack_id: STACK_A, timeout_s: 45 }, command: `mg stack wait ${STACK_A} --json`,
+  });
   assert.match(captured.stderr.join("\n"), /Pushing /);
   assert.match(captured.stderr.join("\n"), /Ensuring upper-park/);
 });
@@ -1370,16 +1378,36 @@ test("stack status prints the enriched stack as one JSON value", async () => {
   }));
   assert.equal(captured.error, null);
   assert.equal(captured.stdout.length, 1);
-  assert.deepEqual(JSON.parse(captured.stdout[0]!), stack);
+  const { repair, watch, ...printed } = JSON.parse(captured.stdout[0]!);
+  assert.deepEqual(printed, stack);
+  assert.equal(repair.kind, "ci_failure");
+  assert.equal(repair.prNumber, stack.layers[0]!.prNumber);
+  assert.equal(watch.done, false);
+  assert.equal(watch.until, "landed");
+  assert.deepEqual(watch.next.args, { stack_id: stack.id, enrolled_head_sha: "abc1234567890", timeout_s: 45 });
 });
 
-test("stack status reports missing or unowned stacks like MCP stack_status", async () => {
+test("stack status --json reports missing stacks as one document and preserves failure status", async () => {
   const stackId = REGISTERED[0]!.id;
-  await assert.rejects(() => cmdStackStatus([stackId, "--json"], {
-    loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
-    getEnrichedStack: async () => null,
-  }), (err: unknown) => err instanceof CommandError && err.exitCode === 1 &&
-    err.message === `Stack not found or not owned by the current user: ${stackId}`);
+  const previousExitCode = process.exitCode;
+  try {
+    const captured = await captureStackOutput(() => cmdStackStatus([stackId, "--json"], {
+      loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
+      getEnrichedStack: async () => null,
+    }));
+    assert.equal(captured.error, null);
+    assert.equal(captured.stdout.length, 1);
+    const body = JSON.parse(captured.stdout[0]!);
+    assert.deepEqual(body.error, { code: "not_found", stack_id: stackId });
+    assert.deepEqual(
+      { done: body.watch.done, reason: body.watch.reason, next: body.watch.next },
+      { done: true, reason: "not_found", next: null },
+    );
+    assert.deepEqual(captured.stderr, []);
+    assert.equal(process.exitCode, 1);
+  } finally {
+    process.exitCode = previousExitCode;
+  }
 });
 
 test("stack status human output includes enriched PR checks and head", async () => {

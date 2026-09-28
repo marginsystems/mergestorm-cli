@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.25`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.26`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│ ▟██▛  mergestorm v0.3.25                                                     │
-│  ▜▙   ● msk_live_…  · maelstrom                                              │
-│       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used · Resets Sep 5, 10:53am (UTC)│
-│                                                                              │
-│       review a diff · usage for tabs · /help for all commands                │
-│       New in v0.3.25: stack wait holds a PR while Cyclone or Vortex works   │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.26                                             │
+│ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
+│  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
+│   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
+│     ▝▀▀▘      review a diff · usage for tabs · /help for all commands        │
+│       ▀       New: stack results say the watch ends only at land             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮

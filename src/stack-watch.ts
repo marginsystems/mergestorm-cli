@@ -5,7 +5,15 @@ import {
   type StackAgentBusy,
   type StackBlocker,
   type StackLayerAgents,
+  type StackLandGatePending,
+  type StackRepairHint,
 } from "./stack-blockers.js";
+import {
+  stackTerminalReason,
+  stackWatchObligation,
+  type StackWatchDoneReason,
+  type StackWatchObligation,
+} from "./stack-watch-obligation.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { apiFetch, type ApiFetchResult } from "./api.js";
 import type { Config } from "./config.js";
@@ -44,7 +52,12 @@ export type StackWatchEnvelope = {
   assessment: "available" | "unavailable";
   busy: StackAgentBusy[];
   agents: StackLayerAgents | null;
+  repair: StackRepairHint | null;
+  landGatePending: StackLandGatePending | null;
+  watch: StackWatchObligation;
 };
+
+type StackWatchSnapshot = Omit<StackWatchEnvelope, "watch">;
 
 export type PollStackWatchOptions = {
   timeoutMs?: number;
@@ -103,13 +116,23 @@ export async function pollStackWatch(
     ...(opts.cursor ?? { stackId: id, enrolledHeadSha: null }),
     stackId: id,
   });
-  let lastEnvelope: StackWatchEnvelope = {
+  let lastEnvelope: StackWatchSnapshot = {
     schema: STACK_WATCH_SCHEMA, status: "failed", stackId: id, blocker: null,
     bounceKind: null, prNumber: null, headSha: null, cursor,
-    issues: [], currentCandidate: null, assessment: "unavailable", busy: [], agents: null,
+    issues: [], currentCandidate: null, assessment: "unavailable", busy: [], agents: null, repair: null,
+    landGatePending: null,
   };
+  let terminal: StackWatchDoneReason | null = null;
+  const seal = (snapshot: StackWatchSnapshot, retryAfterSeconds?: number): StackWatchEnvelope => ({
+    ...snapshot,
+    watch: stackWatchObligation({
+      stackId: id, terminal, cursor: snapshot.cursor, status: snapshot.status, retryAfterSeconds,
+      attention: snapshot.status === "attention" && snapshot.blocker && snapshot.prNumber != null
+        ? { prNumber: snapshot.prNumber, blocker: snapshot.blocker } : null,
+    }),
+  });
   let transientFailures = 0;
-  const timeout = () => new StackWatchTimeoutError(lastEnvelope);
+  const timeout = () => new StackWatchTimeoutError(seal(lastEnvelope));
   const pause = async (ms: number) => {
     const remaining = Math.min(ms, Math.max(0, deadline - now()));
     if (remaining > 0) await wait(remaining, opts.signal);
@@ -131,12 +154,12 @@ export async function pollStackWatch(
         if (now() >= deadline && timeoutMs !== 0) throw timeout();
         if (timeoutMs !== 0 && isTransientReviewPollError(err) && transientFailures < REVIEW_POLL_MAX_TRANSIENT_RETRIES) {
           transientFailures += 1;
-          opts.onTick?.(lastEnvelope);
+          opts.onTick?.(seal(lastEnvelope));
           await pause(transientRetryWaitMs({ failureCount: transientFailures, random: opts.random }));
           continue;
         }
         throw new StackWatchError(err instanceof Error ? err.message : String(err),
-          { ...lastEnvelope, status: "failed", assessment: "unavailable" }, { cause: err });
+          seal({ ...lastEnvelope, status: "failed", assessment: "unavailable" }), { cause: err });
       }
       if (response.status === 200) return response.body;
       const retryWaitMs = transientRetryWaitMs({
@@ -145,14 +168,15 @@ export async function pollStackWatch(
       if (timeoutMs !== 0 && isTransientReviewPollStatus(response.status) && transientFailures < REVIEW_POLL_MAX_TRANSIENT_RETRIES &&
         (response.status !== 429 || retryWaitMs < deadline - now())) {
         transientFailures += 1;
-        opts.onTick?.({ ...lastEnvelope, status: response.status === 429 ? "rate_limited" : lastEnvelope.status });
+        opts.onTick?.(seal({ ...lastEnvelope, status: response.status === 429 ? "rate_limited" : lastEnvelope.status },
+          response.status === 429 ? response.retryAfterSeconds : undefined));
         await pause(retryWaitMs);
         continue;
       }
-      throw new StackWatchError(`Stack poll failed (HTTP ${response.status})`, {
+      throw new StackWatchError(`Stack poll failed (HTTP ${response.status})`, seal({
         ...lastEnvelope, status: response.status === 429 ? "rate_limited" : "failed",
         assessment: "unavailable",
-      }, undefined, response.retryAfterSeconds);
+      }, response.retryAfterSeconds), undefined, response.retryAfterSeconds);
     }
     throw timeout();
   };
@@ -162,16 +186,23 @@ export async function pollStackWatch(
     const stack = snapshot && Array.isArray(snapshot.stacks)
       ? snapshot.stacks.find((candidate) => candidate.id.trim().toLowerCase() === id)
       : undefined;
-    if (!stack || !Array.isArray(stack.layers)) {
-      throw new StackWatchError("Stack snapshot missing or invalid", { ...lastEnvelope, status: "failed", assessment: "unavailable" });
+    if (snapshot && Array.isArray(snapshot.stacks) && !stack) {
+      terminal = "not_found";
+      throw new StackWatchError("Stack not found or not owned by the current user",
+        seal({ ...lastEnvelope, status: "failed", assessment: "unavailable", blocker: null, issues: [], busy: [],
+          prNumber: null, headSha: null, repair: null, agents: null, currentCandidate: null, landGatePending: null }));
     }
+    if (!stack || !Array.isArray(stack.layers)) {
+      throw new StackWatchError("Stack snapshot missing or invalid", seal({ ...lastEnvelope, status: "failed", assessment: "unavailable" }));
+    }
+    terminal = stackTerminalReason(stack);
     return stack;
   };
   const queueRoute = `/api/v1/stacks/queue?stackId=${encodeURIComponent(id)}`;
   const readQueue = async (route: string, finalSnapshot = false) => {
     const queue = await request(route, finalSnapshot) as { entries?: MergeQueueEntryDto[]; fingerprint?: unknown } | null;
     if (!queue || !Array.isArray(queue.entries)) {
-      throw new StackWatchError("Invalid merge queue response", { ...lastEnvelope, status: "failed", assessment: "unavailable" });
+      throw new StackWatchError("Invalid merge queue response", seal({ ...lastEnvelope, status: "failed", assessment: "unavailable" }));
     }
     return {
       entries: queue.entries.filter((entry) => entry.stackId.trim().toLowerCase() === id),
@@ -179,15 +210,15 @@ export async function pollStackWatch(
     };
   };
   const evaluate = (stack: StackDto, entries: MergeQueueEntryDto[]) => {
-    const { attention, issues, currentCandidate, bounce, busy, agents } = stackBlockers(stack, entries, cursor);
+    const { attention, issues, currentCandidate, bounce, busy, agents, repair, landGatePending } = stackBlockers(stack, entries, cursor);
     if (bounce) cursor = Object.freeze({ ...cursor, bounceId: bounce.id,
       ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}) });
     const held = busy[0];
-    lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available", busy, agents,
+    lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available", busy, agents, repair, landGatePending,
       blocker: attention?.blocker ?? null, bounceKind: attention?.bounceKind ?? null,
       prNumber: attention?.prNumber ?? held?.prNumber ?? currentCandidate?.prNumber ?? null,
       headSha: attention ? attention.headSha : held ? held.headSha : currentCandidate?.headSha ?? null,
-      status: attention ? "attention" : busy.length || entries.some((entry) => ["queued", "running", "waiting"].includes(entry.state))
+      status: attention ? "attention" : busy.length || landGatePending || entries.some((entry) => ["queued", "running", "waiting"].includes(entry.state))
         ? "in_progress" : "waiting" };
   };
 
@@ -201,7 +232,7 @@ export async function pollStackWatch(
     agents: layer ? layerAgents(layer) : null };
   let queue = await readQueue(queueRoute, timeoutMs === 0);
   evaluate(stack, queue.entries);
-  if (lastEnvelope.status === "attention" || timeoutMs === 0) return lastEnvelope;
+  if (lastEnvelope.status === "attention" || timeoutMs === 0 || terminal) return seal(lastEnvelope);
   while (now() < deadline) {
     const heldAt = now();
     const seconds = Math.min(lastEnvelope.busy.length ? STACK_WATCH_BUSY_RECHECK_S : 45,
@@ -218,8 +249,8 @@ export async function pollStackWatch(
       agents: refreshed ? layerAgents(refreshed) : null };
     transientFailures = 0;
     evaluate(stack, queue.entries);
-    if (lastEnvelope.status === "attention") return lastEnvelope;
-    opts.onTick?.(lastEnvelope);
+    if (lastEnvelope.status === "attention" || terminal) return seal(lastEnvelope);
+    opts.onTick?.(seal(lastEnvelope));
   }
   throw timeout();
 }

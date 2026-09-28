@@ -1,20 +1,33 @@
+import { ansi } from "./ansi.js";
+
 /**
- * Compact two-row storm mark (Fable / 0.3.14 home). Colored by the caller.
- * Block elements (U+2580..259F) are one cell each; no emoji, no gradients.
+ * The home mark: a tornado drawn as five horizontal bars and one square tail,
+ * each an upper-half band (▀). One column is one bar-height wide; half-column
+ * ends use the upper quadrants (▝ ▘) so every edge lands where the source art
+ * puts it. Same X/width as the SVG, shifted up half a cell. Painted fg 77.
  */
-export const STORM_MARK: string[] = [
-  "▟██▛",
-  " ▜▙",
+export const TORNADO_LOGO = [
+  " ▀▀▀▀▀▀▀▀▀▀▘",
+  "▀▀▀▀▀▀▀▀▀   ",
+  " ▀▀▀▀▀▀     ",
+  "  ▝▀▀▀▀▀    ",
+  "    ▝▀▀▘    ",
+  "      ▀     ",
 ];
 
-/** Widest row of the mark, in cells (every mark glyph is single-cell). */
-export const STORM_MARK_WIDTH = Math.max(
-  ...STORM_MARK.map((line) => line.length),
-);
+/** Single idle frame. Kept for callers that index frames. */
+export const TORNADO_FRAMES: string[][] = [TORNADO_LOGO];
 
-/** @deprecated Alias — the home panel uses {@link STORM_MARK}. */
-export const TORNADO_LOGO = STORM_MARK;
-/** @deprecated Alias. */
-export const TORNADO_LOGO_WIDTH = STORM_MARK_WIDTH;
-/** @deprecated Compact home is the full two-row mark. */
-export const TORNADO_LOGO_COMPACT = STORM_MARK;
+/** Every sprite glyph is one column. */
+export const TORNADO_LOGO_WIDTH = Math.max(...TORNADO_LOGO.map((line) => [...line].length));
+export const TORNADO_LOGO_COMPACT = TORNADO_LOGO;
+
+/** @deprecated Use {@link TORNADO_LOGO}. */
+export const STORM_MARK = TORNADO_LOGO;
+/** @deprecated Use {@link TORNADO_LOGO_WIDTH}. */
+export const STORM_MARK_WIDTH = TORNADO_LOGO_WIDTH;
+
+/** Paint one sprite row: each run of glyphs in brand green 77, spaces left bare. */
+export function paintSpriteRow(row: string): string {
+  return row.replace(/[^ ]+/g, (run) => ansi.brightGreen(run));
+}

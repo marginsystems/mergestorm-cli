@@ -6,6 +6,8 @@ import {
   pollStackWatch, StackWatchError, StackWatchTimeoutError,
   type PollStackWatchOptions, type StackWatchEnvelope,
 } from "./stack-watch.js";
+import { conflictLiveParent, conflictRepairSteps, landGateIsPending, stackBlockers } from "./stack-blockers.js";
+import { STACK_WATCH_NOT_DONE_SENTENCE, stackTerminalReason, stackWatchObligation } from "./stack-watch-obligation.js";
 
 const HEAD = "a".repeat(40);
 const NEXT = "b".repeat(40);
@@ -67,7 +69,12 @@ async function timedOut(options: PollStackWatchOptions): Promise<StackWatchEnvel
 
 test("attention at enrollment: CI on the current head", async () => {
   const h = harness(stack([layer({ ciStatus: "failure", checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: " lint " } })]));
-  const result = await pollStackWatch(cfg, "stack", h.options);
+  const { repair, watch, landGatePending, ...result } = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(landGatePending, null);
+  assert.equal(repair?.kind, "ci_failure");
+  assert.equal(repair?.kind === "ci_failure" ? repair.failingCheck : null, "lint");
+  assert.equal(watch.done, false);
+  assert.deepEqual(watch.next?.args, { stack_id: "stack", enrolled_head_sha: HEAD, timeout_s: 45 });
   assert.deepEqual(result, {
     schema: "mergestorm.stack_watch/v1", status: "attention", stackId: "stack",
     blocker: "CI failed — lint", bounceKind: null, prNumber: 42, headSha: HEAD,
@@ -608,6 +615,39 @@ test("degraded mid-wait snapshot invalidates the previous assessment", async () 
   });
 });
 
+test("a missing stack clears live work from the last poll", async () => {
+  const h = harness(unitStack([
+    layer({ ...redCi, cycloneStatus: "patching", agentRuns: [{ agent: "cyclone", status: "patching", sha: HEAD }] }),
+    layer({ prNumber: 43, position: 1, ciStatus: "failure" }),
+  ], { landPrNumber: 43, landingBlockReason: "ci_pending: settling idle project checks" }));
+  const live = stackBlockers(h.state.stack);
+  assert.ok(live.currentCandidate);
+  assert.ok(live.agents);
+  assert.ok(live.landGatePending);
+  let missing = false;
+  h.state.respond = (route) => {
+    if (route.includes("&wait=")) missing = true;
+    if (missing && route.includes("/enrich")) return { status: 200, body: { stacks: [] } };
+    return undefined;
+  };
+  await assert.rejects(pollStackWatch(cfg, "stack", h.options), (err: unknown) => {
+    assert.ok(err instanceof StackWatchError);
+    assert.equal(err.lastEnvelope.watch.done, true);
+    assert.equal(err.lastEnvelope.watch.reason, "not_found");
+    assert.equal(err.lastEnvelope.status, "failed");
+    assert.equal(err.lastEnvelope.assessment, "unavailable");
+    assert.equal(err.lastEnvelope.blocker, null);
+    assert.deepEqual(err.lastEnvelope.issues, []);
+    assert.deepEqual(err.lastEnvelope.busy, []);
+    assert.equal(err.lastEnvelope.prNumber, null);
+    assert.equal(err.lastEnvelope.headSha, null);
+    assert.equal(err.lastEnvelope.agents, null);
+    assert.equal(err.lastEnvelope.currentCandidate, null);
+    assert.equal(err.lastEnvelope.landGatePending, null);
+    return true;
+  });
+});
+
 test("live queue timeout retains in_progress and upstack issues", async () => {
   const h = harness(stack([layer(), layer({ prNumber: 43, position: 1, ciStatus: "failure" })]), [bounce({ state: "running" })]);
   await assert.rejects(pollStackWatch(cfg, "stack", h.options), (err: unknown) => {
@@ -837,4 +877,215 @@ test("a live seam finding outranks a seam_findings bounce without stamping the c
   const result = await pollStackWatch(cfg, "stack", h.options);
   assert.equal(result.blocker, "Seam findings");
   assert.deepEqual(result.cursor, { stackId: "stack", enrolledHeadSha: HEAD });
+});
+
+function unitStack(layers: StackLayerDto[], unit: Partial<NonNullable<StackDto["unit"]>> = {}): StackDto {
+  return {
+    ...stack(layers), trunkBranch: "mg-stack-79",
+    unit: {
+      id: "unit", uNumber: 79, state: "growing", branch: "mg-stack-79", landTarget: "main", members: [],
+      landPrNumber: null, tempestLandStatus: null, landingBlockReason: null, landPr: null, ...unit,
+    },
+  };
+}
+
+test("terminal states: only merged/closed layers with a landed, abandoned, or absent unit end the watch", () => {
+  const merged = layer({ state: "merged" });
+  const closed = layer({ state: "closed", prNumber: 43, position: 1 });
+  assert.equal(stackTerminalReason(null), "not_found");
+  assert.equal(stackTerminalReason({ ...stack(), archivedAt: "2026-09-28T00:00:00Z" }), "archived");
+  assert.equal(stackTerminalReason(stack([merged])), "landed");
+  assert.equal(stackTerminalReason(unitStack([merged], { state: "landed" })), "landed");
+  assert.equal(stackTerminalReason(stack([merged, closed])), "closed");
+  assert.equal(stackTerminalReason(unitStack([merged], { state: "abandoned" })), "closed");
+  assert.equal(stackTerminalReason(stack([layer()])), null);
+  assert.equal(stackTerminalReason(stack([layer({ prNumber: 0 })])), null);
+  assert.equal(stackTerminalReason(stack([])), null);
+  assert.equal(stackTerminalReason(stack([merged, layer({ prNumber: 43, position: 1, state: "conflict" })])), null);
+  for (const state of ["open", "growing", "stale", "landing"]) {
+    assert.equal(stackTerminalReason(unitStack([merged], { state })), null, state);
+  }
+  assert.equal(stackTerminalReason(unitStack([merged], { state: "landed", landPrNumber: 90,
+    landPr: layer({ prNumber: 90, branch: "mg-land-79" }) })), null);
+});
+
+test("the obligation: not-done sentence first, exact next call, done only for terminal reasons", () => {
+  const open = stackWatchObligation({ stackId: "stack", terminal: null,
+    cursor: { enrolledHeadSha: HEAD, afterFinishedAt: null, bounceId: "b1" }, status: "waiting" });
+  assert.equal(open.done, false);
+  assert.equal(open.until, "landed");
+  assert.equal(open.reason, "open");
+  assert.ok(open.message.startsWith(STACK_WATCH_NOT_DONE_SENTENCE));
+  assert.match(open.message, /A clean push, a submit, or one merged layer does not finish it/);
+  assert.deepEqual(open.next, { tool: "stack_wait", command: "mg stack wait stack --json",
+    args: { stack_id: "stack", enrolled_head_sha: HEAD, after_finished_at: null, bounce_id: "b1", timeout_s: 45 } });
+  const limited = stackWatchObligation({ stackId: "stack", terminal: null, status: "rate_limited", retryAfterSeconds: 9 });
+  assert.equal(limited.reason, "rate_limited");
+  assert.match(limited.message, /Wait 9s first/);
+  const failed = stackWatchObligation({ stackId: "stack", terminal: null, status: "failed" });
+  assert.equal(failed.done, false);
+  assert.match(failed.message, /does not end the task/);
+  assert.equal(stackWatchObligation({ stackId: "stack", terminal: null, unread: true }).reason, "unread");
+  assert.match(stackWatchObligation({ stackId: "stack", terminal: null, freshCursor: true }).message, /keep passing that cursor/);
+  for (const terminal of ["landed", "closed", "archived", "not_found"] as const) {
+    const done = stackWatchObligation({ stackId: "stack", terminal, status: "failed" });
+    assert.deepEqual({ done: done.done, reason: done.reason, next: done.next }, { done: true, reason: terminal, next: null });
+    assert.doesNotMatch(done.message, /Your task is not done/);
+  }
+});
+
+test("restack conflict on layer 3 after layer 2 merged into mg-stack-79 repairs against the unit, never mg-park-*", async () => {
+  const conflicted = layer({
+    branch: "feat/c", parentBranch: "mg-park-79-g1", prNumber: 2858, position: 3, state: "conflict",
+    conflictDetail: "conflict in api/src/a.ts, api/src/b.ts",
+    restackError: { kind: "rebase_conflict", detail: "conflict in api/src/a.ts, api/src/b.ts", headSha: HEAD,
+      attemptedAt: "2026-09-27T00:00:00Z", attempts: 1, backupRef: null, from: { branch: "mg-stack-79", oldSha: NEXT } },
+  });
+  const h = harness(unitStack([
+    layer({ branch: "feat/a", parentBranch: "mg-stack-79", prNumber: 2856, position: 1, state: "merged" }),
+    layer({ branch: "feat/b", parentBranch: "feat/a", prNumber: 2857, position: 2, state: "merged" }),
+    conflicted,
+  ]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.deepEqual(result.repair, {
+    kind: "restack_conflict", prNumber: 2858, headSha: HEAD, branch: "feat/c", liveParent: "mg-stack-79",
+    files: ["api/src/a.ts", "api/src/b.ts"], steps: conflictRepairSteps("feat/c", "mg-stack-79"),
+  });
+  assert.match(result.repair!.kind === "restack_conflict" ? result.repair!.steps : "", /git merge origin\/mg-stack-79/);
+  assert.equal(result.watch.done, false);
+});
+
+test("the live parent is the open sibling below, not the unit, trunk, or a park freeze", () => {
+  const bottom = layer({ branch: "feat/a", parentBranch: "mg-stack-79", prNumber: 1, position: 1 });
+  const middle = layer({ branch: "feat/b", parentBranch: "feat/a", prNumber: 2, position: 2 });
+  const top = layer({ branch: "feat/c", parentBranch: "mg-park-79-g1", prNumber: 3, position: 3, state: "conflict",
+    restackError: { kind: "rebase_conflict", detail: "x", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null,
+      from: { branch: "mg-park-79-g1", oldSha: NEXT } } });
+  const s = unitStack([bottom, middle, top]);
+  assert.equal(conflictLiveParent(s, top), "feat/b");
+  assert.equal(conflictLiveParent(s, middle), "feat/a");
+  assert.equal(conflictLiveParent(s, bottom), "mg-stack-79");
+  const promoted = unitStack([bottom, middle, top], { members: [{ prNumber: 2, branch: "feat/b", position: 2,
+    promotedHeadSha: HEAD, promotedAt: "", seamState: "approved", seamReviewedSha: null, openedAt: null, mergedAt: null,
+    closedAt: null, additions: null, deletions: null, openAdditions: null, openDeletions: null }] });
+  assert.equal(conflictLiveParent(promoted, top), "feat/a");
+  const staleFrom = unitStack([layer({ ...middle, state: "merged" }), layer({ ...top, restackError: { ...top.restackError!,
+    from: { branch: "feat/b", oldSha: NEXT } } })]);
+  assert.equal(conflictLiveParent(staleFrom, staleFrom.layers[1]!), "mg-stack-79");
+  const parkOnly = { ...stack([layer({ ...top, restackError: null })]), trunkBranch: "mg-park-1-g1" };
+  assert.equal(conflictLiveParent(parkOnly, parkOnly.layers[0]!), null);
+  assert.match(conflictRepairSteps("feat/c", null), /unknown .*stop and tell the human/);
+  for (const candidate of [s, promoted, staleFrom]) {
+    for (const l of candidate.layers) assert.doesNotMatch(conflictLiveParent(candidate, l) ?? "", /^mg-park-/);
+  }
+});
+
+test("merge-conflict and CI repairs; a busy hold carries no repair", () => {
+  const dirty = layer({ branch: "feat/b", parentBranch: "feat/a", prNumber: 2, position: 2, mergeable: false, mergeableState: "dirty" });
+  const bottom = layer({ branch: "feat/a", parentBranch: "mg-stack-79", prNumber: 1, position: 1, state: "merged" });
+  const s = unitStack([bottom, dirty]);
+  const conflict = stackBlockers(s);
+  assert.equal(conflict.repair?.kind, "merge_conflict");
+  assert.equal(conflict.repair && "liveParent" in conflict.repair ? conflict.repair.liveParent : undefined, "mg-stack-79");
+  const ci = stackBlockers(stack([layer({ ciStatus: "failure", checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: "lint" } })]));
+  assert.deepEqual(ci.repair && { kind: ci.repair.kind, branch: ci.repair.branch, failingCheck: "failingCheck" in ci.repair ? ci.repair.failingCheck : null },
+    { kind: "ci_failure", branch: "feature", failingCheck: "lint" });
+  assert.match(ci.repair!.steps, /gh run view <run-id> --log-failed/);
+  const held = stackBlockers(stack([layer({ ciStatus: "failure", cycloneStatus: "patching" })]));
+  assert.equal(held.attention, null);
+  assert.equal(held.repair, null);
+  assert.equal(stackBlockers(stack([layer({ draft: true })])).repair, null);
+});
+
+for (const reason of ["ci_pending", "tempest_pending", "tempest_running"]) {
+  test(`land gate ${reason} is a wait, not attention`, async () => {
+    const land = layer({ branch: "mg-land-79", parentBranch: "main", prNumber: 2874, position: 1 });
+    const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874,
+      landingBlockReason: `landing blocked: ${reason} on land PR #2874` }));
+    h.options.timeoutMs = 0;
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "in_progress");
+    assert.equal(result.blocker, null);
+    assert.deepEqual(result.landGatePending, { prNumber: 2874, headSha: HEAD, reason: `landing blocked: ${reason} on land PR #2874` });
+    assert.equal(result.repair, null);
+    assert.equal(result.watch.done, false);
+  });
+}
+
+test("a failed land gate is still attention", async () => {
+  const land = layer({ branch: "mg-land-79", parentBranch: "main", prNumber: 2874, position: 1 });
+  const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874,
+    landingBlockReason: "landing blocked: tempest_findings on land PR #2874" }));
+  h.options.timeoutMs = 0;
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.landGatePending, null);
+  assert.equal(landGateIsPending("landing blocked: ci_failure on land PR #1"), false);
+  assert.equal(landGateIsPending("ci_pending: settling idle project checks on abc1234"), true);
+});
+
+test("a stack that lands mid-wait ends the wait with watch done instead of timing out", async () => {
+  const h = harness();
+  let reads = 0;
+  h.state.respond = (route) => route.includes("/enrich") && ++reads > 1
+    ? { status: 200, body: { stacks: [stack([layer({ state: "merged" })])] } }
+    : undefined;
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "waiting");
+  assert.deepEqual({ done: result.watch.done, reason: result.watch.reason }, { done: true, reason: "landed" });
+});
+
+test("an archived stack and a vanished stack both end the watch", async () => {
+  const archived = await pollStackWatch(cfg, "stack", harness({ ...stack(), archivedAt: "2026-09-28T00:00:00Z" }).options);
+  assert.equal(archived.watch.reason, "archived");
+  assert.equal(archived.watch.done, true);
+  const h = harness();
+  h.state.respond = (route) => route.includes("/enrich") ? { status: 200, body: { stacks: [] } } : undefined;
+  await assert.rejects(() => pollStackWatch(cfg, "stack", h.options), (err: unknown) =>
+    err instanceof StackWatchError && err.message === "Stack not found or not owned by the current user" &&
+    err.lastEnvelope.status === "failed" && err.lastEnvelope.watch.done && err.lastEnvelope.watch.reason === "not_found");
+  const invalid = harness();
+  invalid.state.respond = (route) => route.includes("/enrich") ? { status: 200, body: { nope: true } } : undefined;
+  await assert.rejects(() => pollStackWatch(cfg, "stack", invalid.options), (err: unknown) =>
+    err instanceof StackWatchError && !err.lastEnvelope.watch.done && err.lastEnvelope.watch.reason === "failed");
+});
+
+test("timeouts and ticks carry a not-done watch with the fixed cursor", async () => {
+  const h = harness();
+  const last = await timedOut(h.options);
+  assert.equal(last.watch.done, false);
+  assert.deepEqual(last.watch.next?.args, { stack_id: "stack", enrolled_head_sha: HEAD, timeout_s: 45 });
+  assert.ok(h.ticks.length > 0 && h.ticks.every((tick) => tick.watch && !tick.watch.done));
+});
+
+test("attention tells the agent to fix the PR before calling stack_wait again", async () => {
+  const h = harness(stack([layer({ ciStatus: "failure", checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: "lint" } })]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.watch.reason, "attention");
+  assert.ok(result.watch.message.startsWith(STACK_WATCH_NOT_DONE_SENTENCE));
+  assert.match(result.watch.message, /First fix #42 \(CI failed — lint\); repair, when present, names the fix/);
+  assert.match(result.watch.message, /enrolled_head_sha set to the SHA you pushed/);
+});
+
+test("the unit land PR on the owned trunk gets no push repair", () => {
+  const land = layer({ branch: "mg-stack-7", parentBranch: "main", prNumber: 90, position: Number.MAX_SAFE_INTEGER,
+    ciStatus: "failure", checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: "ci/test" } });
+  const s = { ...unitStack([], { branch: "mg-stack-7", state: "landing", landPrNumber: 90, landPr: land }), trunkBranch: "mg-stack-7" };
+  const ci = stackBlockers(s);
+  assert.equal(ci.attention?.prNumber, 90);
+  assert.equal(ci.repair, null);
+  const dirty = stackBlockers({ ...s, unit: { ...s.unit!, landPr: { ...land, ciStatus: "success", checks: null, mergeable: false, mergeableState: "dirty" } } });
+  assert.match(dirty.attention?.blocker ?? "", /^Merge conflicts/);
+  assert.equal(dirty.repair, null);
+});
+
+test("a promoted member whose stack row reconcile dropped is never the live parent", () => {
+  const l2 = layer({ branch: "ms/l2", parentBranch: "mg-stack-7", prNumber: 2, position: 2, state: "conflict",
+    restackError: { kind: "rebase_conflict", detail: "conflict in a.ts", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null,
+      from: { branch: "ms/l1", oldSha: NEXT } } });
+  const s = unitStack([l2], { branch: "mg-stack-7", members: [{ prNumber: 1, branch: "ms/l1", position: 1,
+    promotedHeadSha: HEAD, promotedAt: "", seamState: "approved", seamReviewedSha: null, openedAt: null, mergedAt: null,
+    closedAt: null, additions: null, deletions: null, openAdditions: null, openDeletions: null }] });
+  assert.equal(conflictLiveParent(s, l2), "mg-stack-7");
 });

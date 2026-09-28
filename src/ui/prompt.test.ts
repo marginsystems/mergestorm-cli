@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import * as readline from "node:readline";
 import { test } from "node:test";
 import { visibleWidth } from "./width.js";
 import { CTRL_C_EXIT_HINT } from "./ctrl-c-exit.js";
 import {
   HEADER_REDRAW_PREFIX,
+  MOUSE_ENABLE,
+  MOUSE_DISABLE,
+  hitTestSprite,
   askLine,
   buildPromptFrame,
   dropdownMaxRows,
@@ -44,7 +48,20 @@ function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T):
   }
 }
 
-/** Minimal TTY doubles for askLine: keypresses are emitted directly. */
+/** Raw byte sequences for the named keys the tests press. */
+const KEY_BYTES: Record<string, string> = {
+  return: "\r",
+  tab: "\t",
+  backspace: "\u007f",
+  home: "\u001b[H",
+  end: "\u001b[F",
+  up: "\u001b[A",
+  down: "\u001b[B",
+  right: "\u001b[C",
+  left: "\u001b[D",
+};
+
+/** Minimal TTY doubles for askLine: keys arrive as raw `data` bytes, like a real TTY. */
 function fakeTty(columns: number, rows = 24) {
   const input = Object.assign(new EventEmitter(), {
     isTTY: true,
@@ -70,11 +87,13 @@ function fakeTty(columns: number, rows = 24) {
       return true;
     },
   });
-  const press = (name: string, extra: Partial<{ ctrl: boolean; meta: boolean; sequence: string }> = {}) =>
-    input.emit("keypress", extra.sequence ?? "", { name, ctrl: false, meta: false, shift: false, ...extra });
-  const type = (text: string) => {
-    for (const ch of text) input.emit("keypress", ch, { name: ch, ctrl: false, meta: false, shift: false });
+  const press = (name: string, extra: Partial<{ ctrl: boolean }> = {}) => {
+    const bytes = extra.ctrl
+      ? String.fromCharCode(name.toUpperCase().charCodeAt(0) - 64)
+      : KEY_BYTES[name] ?? name;
+    input.emit("data", Buffer.from(bytes));
   };
+  const type = (text: string) => input.emit("data", Buffer.from(text));
   return {
     input: input as unknown as NodeJS.ReadStream,
     output: output as unknown as NodeJS.WriteStream,
@@ -556,6 +575,36 @@ test("askLine on a short pane keeps the mark and does not overflow the frame", a
   await done;
 });
 
+test("askLine keeps the banner title visible when a nano mark exceeds the pane", async () => {
+  const tty = fakeTty(80, 6);
+  const done = askLine({
+    input: tty.input,
+    output: tty.output,
+    header: (_columns?: number, variant?: boolean | "mini" | "nano") => {
+      if (variant === "nano") return ["title", "bar2", "bar3", "bar4", "bar5", "bar6"];
+      return Array.from({ length: 9 }, () => "full");
+    },
+  });
+  const rows = lastFrameRows(tty.chunks);
+  assert.equal(rows.length, 6);
+  assert.equal(stripAnsi(rows[0]!), "title");
+  assert.equal(stripAnsi(rows[4]!), "bar5");
+  tty.press("return");
+  await done;
+});
+
+test("askLine passes complete CSI keys to readline for cursor navigation", async () => {
+  const tty = fakeTty(80);
+  const done = askLine({ input: tty.input, output: tty.output });
+  tty.type("ac");
+  tty.input.emit("data", Buffer.from("\x1b["));
+  tty.input.emit("data", Buffer.from("H"));
+  tty.press("right");
+  tty.type("b");
+  tty.press("return");
+  assert.equal(await done, "abc");
+});
+
 test("askLine with a header does not scroll the pane on enter", async () => {
   const tty = fakeTty(80, 16);
   const done = askLine({
@@ -669,4 +718,61 @@ test("askLine first Ctrl+C writes the hint on the footer without a second prompt
   assert.ok(!tty.chunks.join("").includes(`\n${CTRL_C_EXIT_HINT}\n`));
   tty.press("return");
   await done;
+});
+
+test("sprite hit test excludes borders and padding", () => {
+  const rect = { col: 3, row: 2, width: 6, height: 3 };
+  assert.ok(hitTestSprite(3, 2, rect));
+  assert.ok(hitTestSprite(8, 4, rect));
+  for (const [col, row] of [[2, 2], [9, 2], [3, 1], [3, 5]]) {
+    assert.equal(hitTestSprite(col!, row!, rect), false);
+  }
+});
+
+test("askLine ignores stdin's own keypress decoder left behind by a TUI", async () => {
+  const tty = fakeTty(80);
+  // line-tabs / tabs / select call this on process.stdin and it sticks.
+  readline.emitKeypressEvents(tty.input);
+  const done = askLine({ input: tty.input, output: tty.output, header: () => ["STORM", "x"] });
+  tty.type("a");
+  tty.input.emit("data", Buffer.from("\x1b[<0;3;1M"));
+  tty.type("b");
+  tty.press("return");
+  assert.equal(await done, "ab");
+});
+
+test("home clicks do not spin and leftover mouse reports do not type", async () => {
+  const { buildBannerRows } = await import("./banner.js");
+  const tty = fakeTty(80);
+  const frames: number[] = [];
+  const done = askLine({
+    input: tty.input, output: tty.output,
+    header: (columns, variant, frame = 0) => {
+      frames.push(frame ?? 0);
+      return buildBannerRows({ version: "0.3.19", me: null, key: undefined, keyInvalid: false }, columns,
+        { density: variant === "mini" || variant === "nano" ? variant : "full", frame });
+    },
+  });
+  assert.ok(!tty.chunks.includes(MOUSE_ENABLE));
+  const data = (text: string) => tty.input.emit("data", Buffer.from(text));
+  data("a\x1b[M");
+  data(' !"');
+  data("\x1b[<0;3;2");
+  data("x");
+  data("\x1b[<0;6;4M");
+  data("bc\r");
+  assert.equal(await done, "axbc");
+  assert.ok(frames.every((frame) => frame === 0));
+  assert.ok(!tty.chunks.includes(MOUSE_DISABLE));
+  assert.equal(tty.input.listenerCount("data"), 0);
+});
+
+test("askLine discards a mouse report split after a semicolon", async () => {
+  const tty = fakeTty(80);
+  const done = askLine({ input: tty.input, output: tty.output });
+  tty.input.emit("data", Buffer.from("\x1b[<0;"));
+  tty.input.emit("data", Buffer.from("12;5M"));
+  tty.type("a");
+  tty.press("return");
+  assert.equal(await done, "a");
 });

@@ -1,4 +1,10 @@
-import { stackBlockersSummary } from "../stack-blockers.js";
+import { stackBlockers, stackBlockersSummary, type StackRepairHint } from "../stack-blockers.js";
+import {
+  STACK_WATCH_NOT_DONE_SENTENCE,
+  stackTerminalReason,
+  stackWatchObligation,
+  type StackWatchObligation,
+} from "../stack-watch-obligation.js";
 import {
   adoptStack,
   ensureUpperPark,
@@ -63,6 +69,26 @@ import { present } from "../ui/present.js";
 import { canBrowse } from "./browse.js";
 import { openHelpBrowser } from "./help.js";
 
+export function stackRepairLine(repair: StackRepairHint | null | undefined): string[] {
+  if (!repair) return [];
+  const files = "files" in repair && repair.files.length ? ` (files: ${repair.files.join(", ")})` : "";
+  return [`Repair #${repair.prNumber} ${repair.kind}${files}: ${repair.steps}`];
+}
+
+export function stackWatchTextLines(watch: StackWatchObligation | null | undefined): string[] {
+  if (!watch) return [];
+  if (watch.done) return [watch.message];
+  const next = watch.next;
+  return [
+    ...(next ? [`Next: ${next.command} (MCP: stack_wait ${JSON.stringify(next.args)})`] : []),
+    STACK_WATCH_NOT_DONE_SENTENCE,
+  ];
+}
+
+export function openStackWatch(stackId: string, opts: { unread?: boolean } = {}): StackWatchObligation {
+  return stackWatchObligation({ stackId, terminal: null, unread: opts.unread, freshCursor: true });
+}
+
 const STACK_USAGE = `usage:
   mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
   mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--rest] [--json]
@@ -70,6 +96,8 @@ const STACK_USAGE = `usage:
   mergestorm stack list [--json]
   mergestorm stack status <stack-id> [--json]
   mergestorm stack wait <stack-id> [--json] [--timeout <s>]
+    --json writes exactly one JSON document to stdout. The timeout or error notice goes to stderr
+    (exit 5 on timeout), so do not merge the streams (2>&1) before parsing stdout.
   mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]
   mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
   mergestorm stack restack <stack-id> [--json]
@@ -1081,6 +1109,7 @@ export async function cmdStackSubmit(
           stackId: stackId ?? null,
           trunk: data.stack?.trunkBranch ?? meta.trunk,
           chain: data.chain ?? null,
+          watch: stackId ? openStackWatch(stackId) : null,
         },
         null,
         2,
@@ -1110,6 +1139,7 @@ export async function cmdStackSubmit(
     summary.push(ansi.dim("  Stack registration returned no stack ID"));
   }
   summary.push(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
+  if (stackId) summary.push(...stackWatchTextLines(openStackWatch(stackId)).map((line) => `  ${line}`));
   await present("Stack", summary);
 }
 
@@ -1187,7 +1217,11 @@ export async function cmdStackWait(
       ...envelope,
       ...(retryAfterSeconds !== undefined ? { retry_after_seconds: retryAfterSeconds } : {}),
     }, null, 2)
-    : `Stack ${envelope.stackId} · ${envelope.status}${stackBlockersSummary(envelope.blocker && envelope.prNumber != null ? { prNumber: envelope.prNumber, blocker: envelope.blocker } : null, envelope.issues, envelope.busy)}${envelope.assessment === "unavailable" ? " · assessment unavailable" : ""}`);
+    : [
+      `Stack ${envelope.stackId} · ${envelope.status}${stackBlockersSummary(envelope.blocker && envelope.prNumber != null ? { prNumber: envelope.prNumber, blocker: envelope.blocker } : null, envelope.issues, envelope.busy, envelope.landGatePending ?? null)}${envelope.assessment === "unavailable" ? " · assessment unavailable" : ""}`,
+      ...stackRepairLine(envelope.repair),
+      ...stackWatchTextLines(envelope.watch),
+    ].join("\n"));
   try {
     print(await (deps.pollStackWatch ?? pollStackWatch)(cfg, stackId, {
       timeoutMs: timeoutS * 1000,
@@ -1221,20 +1255,36 @@ export async function cmdStackStatus(
   } = {},
 ): Promise<void> {
   const usage = "usage: mergestorm stack status <stack-id> [--json]";
+  const asJson = args.includes("--json");
   const positional = args.filter((arg) => arg !== "--json");
   if (positional.length !== 1) throw new CommandError(usage, 2, "usage");
   const stackId = requireStackId(positional[0], usage);
   const cfg = await (deps.loadConfig ?? loadConfig)();
   const stack = await (deps.getEnrichedStack ?? getEnrichedStack)(stackId, cfg);
   if (!stack) {
+    const watch = stackWatchObligation({ stackId, terminal: "not_found" });
+    if (asJson) {
+      console.log(JSON.stringify({ error: { code: "not_found", stack_id: stackId }, watch }, null, 2));
+      process.exitCode = 1;
+      return;
+    }
+    console.log(watch.message);
     throw new CommandError(
       `Stack not found or not owned by the current user: ${stackId}`,
       1,
       "not_found",
     );
   }
-  if (args.includes("--json")) {
-    console.log(JSON.stringify(stack, null, 2));
+  const { attention, currentCandidate, repair } = stackBlockers(stack);
+  const watch = stackWatchObligation({
+    stackId: stack.id,
+    terminal: stackTerminalReason(stack),
+    cursor: { enrolledHeadSha: currentCandidate?.headSha ?? null },
+    attention: attention ? { prNumber: attention.prNumber, blocker: attention.blocker } : null,
+    freshCursor: true,
+  });
+  if (asJson) {
+    console.log(JSON.stringify({ ...stack, repair, watch }, null, 2));
     return;
   }
   const lines = formatStackHuman(stack, false);
@@ -1249,6 +1299,7 @@ export async function cmdStackStatus(
         (layer.tempestStatus ? `  Tempest: ${layer.tempestStatus}` : ""),
     );
   }
+  lines.push(...[...stackRepairLine(repair), ...stackWatchTextLines(watch)].map((line) => `  ${line}`));
   await present("Stack status", lines);
 }
 
@@ -1274,6 +1325,11 @@ export function stackSetSummary(parsed: StackSetArgs): string[] {
   return lines;
 }
 
+export function withWatch(body: unknown, watch: StackWatchObligation | null): unknown {
+  if (!watch || typeof body !== "object" || body === null || Array.isArray(body)) return body;
+  return { ...body, watch };
+}
+
 export async function cmdStackSet(
   args: string[],
   deps: StackSetDeps = {},
@@ -1289,15 +1345,19 @@ export async function cmdStackSet(
     },
     cfg,
   );
+  const watch = openStackWatch(parsed.stackId, { unread: true });
   if (parsed.asJson) {
-    console.log(JSON.stringify(body, null, 2));
+    console.log(JSON.stringify(withWatch(body, watch), null, 2));
     return;
   }
   await present(
     "Stack",
-    stackSetSummary(parsed).map((line) =>
-      ansi.brightGreen(`  ${line} for ${parsed.stackId}`),
-    ),
+    [
+      ...stackSetSummary(parsed).map((line) =>
+        ansi.brightGreen(`  ${line} for ${parsed.stackId}`),
+      ),
+      ...stackWatchTextLines(watch).map((line) => `  ${line}`),
+    ],
   );
 }
 
@@ -1312,8 +1372,12 @@ async function cmdStackAdopt(args: string[]): Promise<void> {
     cfg,
     openPolicyPatch({ autoLand, autoReview, autoPatch }),
   );
+  const adoptedId = typeof body === "object" && body !== null
+    ? (body as { stack?: { id?: unknown } }).stack?.id
+    : undefined;
+  const watch = typeof adoptedId === "string" && adoptedId ? openStackWatch(adoptedId, { unread: true }) : null;
   if (asJson) {
-    console.log(JSON.stringify(body, null, 2));
+    console.log(JSON.stringify(withWatch(body, watch), null, 2));
     return;
   }
   if (typeof body !== "object" || body === null) {
@@ -1333,6 +1397,7 @@ async function cmdStackAdopt(args: string[]): Promise<void> {
     imported.push(ansi.dim(`  trunk: ${stack.trunkBranch}`));
   }
   imported.push(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
+  imported.push(...stackWatchTextLines(watch).map((line) => `  ${line}`));
   await present("Stack", imported);
 }
 

@@ -85,8 +85,8 @@ export async function runShell(): Promise<void> {
           commands: COMMANDS,
           ...(banner
             ? {
-                header: (columns?: number, variant?: boolean | "mini" | "nano") =>
-                  banner!.rows(columns, variant),
+                header: (columns?: number, variant?: boolean | "mini" | "nano", frame?: number) =>
+                  banner!.rows(columns, variant, frame),
               }
             : {}),
         });

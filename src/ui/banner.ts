@@ -8,10 +8,11 @@ import {
   padVisible,
   preferBoxedUi,
   roundedBox,
+  sideBySide,
   terminalColumns,
   visibleWidth,
 } from "./box.js";
-import { STORM_MARK, STORM_MARK_WIDTH } from "./logo.js";
+import { paintSpriteRow, TORNADO_LOGO, TORNADO_LOGO_WIDTH } from "./logo.js";
 import { formatResetLabel, usageBar } from "./usage.js";
 
 const WORDMARK = `
@@ -120,6 +121,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.25": [
     "stack wait holds a PR while Cyclone or Vortex works",
   ],
+  "0.3.26": [
+    "stack results say the watch ends only at land",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */
@@ -138,7 +142,7 @@ export type BannerVariant = boolean | "mini" | "nano";
 
 /** Handle returned by {@link printBannerHeader}; `rows` reflows for a resize. */
 export type BannerHandle = {
-  rows(columns?: number, variant?: BannerVariant): string[];
+  rows(columns?: number, variant?: BannerVariant, frame?: number): string[];
 };
 
 function densityFromVariant(variant?: BannerVariant): BannerDensity {
@@ -238,7 +242,7 @@ function whatsNewLine(version: string, cells: number): string | null {
 export function buildBannerRows(
   state: BannerState,
   columns?: number,
-  opts?: { compact?: boolean; density?: BannerDensity },
+  opts?: { compact?: boolean; density?: BannerDensity; frame?: number },
 ): string[] {
   const boxed = preferBoxedUi(columns);
   const density = opts?.density ?? (opts?.compact ? "compact" : "full");
@@ -246,65 +250,32 @@ export function buildBannerRows(
   const contentCells = boxed
     ? Math.max(20, outer - 4)
     : Math.max(20, terminalColumns(80, columns) - 1);
-  const indent = STORM_MARK_WIDTH + 2;
-  const pad = " ".repeat(indent);
+  const markLines = TORNADO_LOGO;
+  const markWidth = TORNADO_LOGO_WIDTH;
+  const gap = 2;
+  const rightCells = Math.max(8, contentCells - markWidth - gap);
 
   const clip = (line: string): string =>
     visibleWidth(line) > contentCells ? padVisible(line, contentCells) : line;
-
-  const mark = (row: number): string =>
-    padVisible(ansi.brightGreen(STORM_MARK[row] ?? ""), indent);
+  const clipRight = (line: string): string =>
+    visibleWidth(line) > rightCells ? padVisible(line, rightCells) : line;
 
   const title = `${ansi.boldBrightGreen("mergestorm")} ${ansi.dim(`v${state.version}`)}`;
-
-  if (density === "nano") {
-    const one = `${mark(0)}${title}  ${statusLine(state)}`;
-    return [clip(one)];
-  }
-
-  if (density === "mini") {
-    // Short pane: mark + who you are, then the same cues as the full home.
-    const line0 = clip(`${mark(0)}${title}  ${statusLine(state)}`);
-    const line1 =
-      state.me && !state.keyInvalid
-        ? clip(`${mark(1)}${usageLine(state.me, contentCells, indent)}`)
-        : clip(mark(1));
-    const room = contentCells - indent;
-    const blurb = tagline(room);
-    const tips = tipsLine(room);
-    const fresh = whatsNewLine(state.version, room);
-    return [
-      line0,
-      line1,
-      ...(blurb ? [clip(`${pad}${blurb}`)] : []),
-      ...(tips ? [clip(`${pad}${tips}`)] : []),
-      ...(fresh ? [clip(`${pad}${fresh}`)] : []),
-    ];
-  }
-
-  const content: string[] = [
-    clip(`${pad}${title}`),
-    clip(`${mark(0)}${statusLine(state)}`),
-  ];
+  const right: string[] = [clipRight(title), clipRight(statusLine(state))];
   if (state.me && !state.keyInvalid) {
-    content.push(clip(`${mark(1)}${usageLine(state.me, contentCells, indent)}`));
-  } else {
-    content.push(clip(mark(1)));
+    right.push(clipRight(usageLine(state.me, rightCells, 0)));
   }
+  const blurb = tagline(rightCells);
+  const tips = tipsLine(rightCells);
+  const fresh = whatsNewLine(state.version, rightCells);
+  if (blurb) right.push(clipRight(blurb));
+  if (tips) right.push(clipRight(tips));
+  if (fresh) right.push(clipRight(fresh));
 
-  const room = contentCells - indent;
-  const blurb = tagline(room);
-  const tips = tipsLine(room);
-  const fresh = whatsNewLine(state.version, room);
-  if (blurb) content.push(clip(`${pad}${blurb}`));
-  if (tips) content.push(clip(`${pad}${tips}`));
-  if (fresh) content.push(clip(`${pad}${fresh}`));
+  const markCol = markLines.map((line) => padVisible(paintSpriteRow(line), markWidth));
+  const content = sideBySide(markCol, density === "nano" ? right.slice(0, 3) : right, markWidth, gap).map(clip);
 
-  if (boxed && density === "full") {
-    content.splice(3, 0, "");
-    return [...roundedBox(content, { width: outer, padding: 1 })];
-  }
-
+  if (density === "mini" || density === "nano") return content;
   if (boxed) {
     return [...roundedBox(content, { width: outer, padding: 1 })];
   }
@@ -343,8 +314,8 @@ export async function printBannerHeader(opts?: {
     }
   }
   return {
-    rows: (columns?: number, variant?: BannerVariant) =>
-      buildBannerRows(state, columns, { density: densityFromVariant(variant) }),
+    rows: (columns?: number, variant?: BannerVariant, frame?: number) =>
+      buildBannerRows(state, columns, { density: densityFromVariant(variant), frame }),
   };
 }
 

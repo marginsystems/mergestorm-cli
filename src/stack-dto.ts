@@ -5,6 +5,7 @@ export type RestackError = {
   attemptedAt: string;
   attempts: number;
   backupRef: string | null;
+  from?: { branch: string; oldSha: string };
 };
 
 const RESTACK_ATTEMPT_CAP = 3;

@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { test } from "node:test";
 import { CommandError, REVIEW_EXIT } from "../errors.js";
 import { StackWatchError, StackWatchTimeoutError, type StackWatchEnvelope } from "../stack-watch.js";
+import { STACK_WATCH_NOT_DONE_SENTENCE, stackWatchObligation } from "../stack-watch-obligation.js";
 import { cmdStack, cmdStackWait } from "./stack.js";
 
 const stackId = "11111111-1111-4111-8111-111111111111";
@@ -12,6 +13,12 @@ const envelope: StackWatchEnvelope = {
   schema: "mergestorm.stack_watch/v1", status: "attention", stackId,
   blocker: "Conflict", bounceKind: null, prNumber: 12, headSha: "head",
   cursor: { stackId, enrolledHeadSha: "enrolled" },
+  repair: {
+    kind: "restack_conflict", prNumber: 12, headSha: "head", branch: "feat/c", liveParent: "mg-stack-79",
+    files: ["src/a.ts"], steps: "Merge mg-stack-79 into feat/c",
+  },
+  landGatePending: null,
+  watch: stackWatchObligation({ stackId, terminal: null, cursor: { enrolledHeadSha: "enrolled" }, status: "attention" }),
 };
 
 test("stack wait prints one human summary and defaults to 45 seconds", async (t) => {
@@ -23,7 +30,22 @@ test("stack wait prints one human summary and defaults to 45 seconds", async (t)
     assert.equal(opts?.signal, signal);
     return envelope;
   }, signal });
-  assert.deepEqual(log.mock.calls.map(call => call.arguments), [[`Stack ${stackId} · attention · blocked: #12 Conflict`]]);
+  assert.equal(log.mock.calls.length, 1);
+  const lines = String(log.mock.calls[0]!.arguments[0]).split("\n");
+  assert.equal(lines[0], `Stack ${stackId} · attention · blocked: #12 Conflict`);
+  assert.equal(lines[1], "Repair #12 restack_conflict (files: src/a.ts): Merge mg-stack-79 into feat/c");
+  assert.equal(lines[2], `Next: mg stack wait ${stackId} --json (MCP: stack_wait {"stack_id":"${stackId}","enrolled_head_sha":"enrolled","timeout_s":45})`);
+  assert.equal(lines.at(-1), STACK_WATCH_NOT_DONE_SENTENCE);
+});
+
+test("stack wait text for a landed stack ends with the done message, not the obligation", async (t) => {
+  const log = t.mock.method(console, "log", () => {});
+  const landed = { ...envelope, status: "waiting" as const, blocker: null, repair: null,
+    watch: stackWatchObligation({ stackId, terminal: "landed" }) };
+  await cmdStackWait([stackId], { loadConfig: async () => ({}), pollStackWatch: async () => landed });
+  const lines = String(log.mock.calls[0]!.arguments[0]).split("\n");
+  assert.equal(lines.at(-1), landed.watch.message);
+  assert.doesNotMatch(lines.join("\n"), /Your task is not done/);
 });
 
 test("stack wait --json prints the envelope and forwards timeout", async (t) => {
@@ -119,4 +141,70 @@ test("CLI zero timeout reads one snapshot and exits successfully", async (t) => 
   assert.deepEqual(data.issues, []);
   assert.equal(data.stackId, stackId);
   assert.deepEqual(routes, [`/api/v1/stacks/enrich?stackId=${stackId}`, `/api/v1/stacks/queue?stackId=${stackId}`]);
+});
+
+async function runCli(port: number, args: string[]) {
+  const child = spawn(process.execPath, ["--import", "tsx/esm",
+    new URL("../cli.ts", import.meta.url).pathname, ...args], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, MERGESTORM_API_KEY: "test", MERGESTORM_API_URL: `http://127.0.0.1:${port}` },
+  });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", chunk => { stdout += chunk; });
+  child.stderr.on("data", chunk => { stderr += chunk; });
+  const status = await new Promise<number | null>((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
+  return { status, stdout, stderr };
+}
+
+async function serve(t: { after: (fn: () => void) => void }, body: (url: string) => unknown) {
+  const server = createServer((request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify(body(request.url!)));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  return address.port;
+}
+
+const openLayer = {
+  branch: "feat/a", parentBranch: "main", prNumber: 7, position: 1, state: "clean", headSha: "a".repeat(40),
+  ciStatus: "success", reviewStatus: "none", checks: null, vortexStatus: null, cycloneStatus: null, tempestStatus: null,
+  conflictDetail: null, lastRestackedSha: null, mergeable: true, mergeableState: "clean", mergeableHeadSha: "a".repeat(40),
+};
+
+test("CLI --json writes exactly one JSON document to stdout when the wait times out; the reason goes to stderr", async (t) => {
+  const port = await serve(t, url => url.includes("/queue")
+    ? { entries: [] }
+    : { stacks: [{ id: stackId, trunkBranch: "main", archivedAt: null, layers: [openLayer] }] });
+  const { status, stdout, stderr } = await runCli(port, ["stack", "wait", stackId, "--json", "--timeout", "1"]);
+  assert.equal(status, REVIEW_EXIT.timeout);
+  const data = JSON.parse(stdout);
+  assert.equal(data.status, "waiting");
+  assert.equal(data.watch.done, false);
+  assert.equal(data.watch.reason, "open");
+  assert.deepEqual(data.watch.next.args, { stack_id: stackId, enrolled_head_sha: "a".repeat(40), timeout_s: 45 });
+  assert.match(data.watch.message, /^This stack is not landed\. Your task is not done\. Call stack_wait again with this cursor\./);
+  assert.match(stderr, /Timed out waiting for stack/);
+  assert.doesNotMatch(stdout, /Timed out/);
+});
+
+test("CLI --json reports a vanished stack as one JSON document with watch done: not_found", async (t) => {
+  const port = await serve(t, url => url.includes("/queue") ? { entries: [] } : { stacks: [] });
+  const { status, stdout, stderr } = await runCli(port, ["stack", "wait", stackId, "--json", "--timeout", "0"]);
+  assert.equal(status, 1);
+  const data = JSON.parse(stdout);
+  assert.equal(data.status, "failed");
+  assert.deepEqual({ done: data.watch.done, reason: data.watch.reason, next: data.watch.next },
+    { done: true, reason: "not_found", next: null });
+  assert.match(stderr, /Stack not found or not owned by the current user/);
+});
+
+test("CLI text wait on an open stack prints the not-done sentence last", async (t) => {
+  const port = await serve(t, url => url.includes("/queue")
+    ? { entries: [] }
+    : { stacks: [{ id: stackId, trunkBranch: "main", archivedAt: null, layers: [openLayer] }] });
+  const { status, stdout } = await runCli(port, ["stack", "wait", stackId, "--timeout", "0"]);
+  assert.equal(status, 0);
+  assert.equal(stdout.trimEnd().split("\n").at(-1), STACK_WATCH_NOT_DONE_SENTENCE);
 });

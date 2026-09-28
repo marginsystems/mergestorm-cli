@@ -3,11 +3,14 @@ import { test } from "node:test";
 import type { MeResponse } from "../api.js";
 import { cliVersion } from "../version.js";
 import { buildBannerRows, shellPrompt, type BannerState } from "./banner.js";
-import { STORM_MARK } from "./logo.js";
+import { BRAND_GREEN_SGR } from "./ansi.js";
+import { paintSpriteRow, TORNADO_LOGO, TORNADO_LOGO_WIDTH } from "./logo.js";
 import { visibleWidth } from "./width.js";
 
 const STRIP_ANSI = /\u001b\[[0-9;]*m/g;
 const stripAnsi = (s: string): string => s.replace(STRIP_ANSI, "");
+/** Row carries a painted mark glyph. */
+const paintsMark = (row: string): boolean => /[▀▝▘]/.test(stripAnsi(row));
 
 const ME: MeResponse = {
   key: {
@@ -36,13 +39,13 @@ test("banner rows never exceed the frame at 120 columns", () => {
   assert.match(text, /mergestorm v0\.3\.14/);
   assert.match(text, /msk_live_abcd · maelstrom/);
   assert.match(text, /7% used/);
-  assert.ok(text.includes(STORM_MARK[0]!), "Fable mark row 1 present");
-  assert.ok(text.includes(STORM_MARK[1]!.trim()), "Fable mark row 2 present");
+  assert.ok(rows.some(paintsMark), "sprite is painted beside the copy");
   const inner = rows.filter((row) => /^[│|]/.test(stripAnsi(row)));
-  assert.ok(inner.length >= 2);
+  assert.ok(inner.length >= 5, "tornado sits beside title, status, usage, and copy");
   assert.ok(stripAnsi(inner[0]!).includes("mergestorm"), "title is the first row under the top border");
-  assert.ok(!inner[0]!.includes(STORM_MARK[0]!));
-  assert.ok(inner[1]!.includes(STORM_MARK[0]!), "mark starts one row below the title");
+  assert.ok(paintsMark(inner[0]!), "tornado starts on the title row");
+  assert.match(stripAnsi(inner[1] ?? ""), /msk_live_abcd/, "status sits beside the mark");
+  assert.match(stripAnsi(inner[2] ?? ""), /7% used/, "usage sits beside the mark");
   assert.ok(stripAnsi(rows[0]!).match(/^[╭+]/), "first emitted row is the top border");
   assert.ok(stripAnsi(rows[rows.length - 1]!).match(/^[╰+]/), "no blank row after the bottom border");
 });
@@ -75,17 +78,22 @@ test("shellPrompt is mg in the same green as the wordmark, never dim", () => {
     assert.ok(!raw.includes("\u001b[2m"), "must not be dim");
     assert.ok(!raw.includes("mergestorm"), "prompt is mg, never the word mergestorm");
     if (raw !== "mg") {
-      assert.ok(raw.includes("92"), "bright green 92, never sick 32");
-      assert.ok(!raw.includes("32"), "never dark green 32 on the prompt");
+      assert.ok(raw.includes(BRAND_GREEN_SGR), "xterm-256 muted green, never 92");
+      assert.ok(!raw.includes("92"), "never ANSI bright green 92");
+      assert.ok(!raw.includes("38;2;"), "never 24-bit — Terminal.app turns that purple");
+      assert.ok(!raw.includes("[32m") && !raw.includes("[1;32m"), "never dark green 32 on the prompt");
     }
   }
 });
 
-test("banner mark is the two-row Fable storm mark", () => {
-  assert.equal(STORM_MARK.length, 2);
-  for (const line of STORM_MARK) {
-    assert.ok(visibleWidth(line) > 0);
-    assert.ok(visibleWidth(line) <= 4, "mark stays compact");
+test("banner mark is the six-row tornado beside the copy", () => {
+  assert.equal(TORNADO_LOGO.length, 6);
+  assert.equal(TORNADO_LOGO_WIDTH, 12);
+  const rows = buildBannerRows(loggedIn(), 120).map(stripAnsi);
+  const inner = rows.filter((row) => /^[│|]/.test(row));
+  assert.ok(inner.length >= TORNADO_LOGO.length, "banner is at least as tall as the mark");
+  for (const line of TORNADO_LOGO) {
+    assert.equal(visibleWidth(line), TORNADO_LOGO_WIDTH);
   }
 });
 
@@ -111,11 +119,11 @@ test("banner invalid-key state says so and hides the bar", () => {
 test("compact banner keeps mark, tagline, tips, and what's new", () => {
   const full = buildBannerRows(loggedIn(), 120);
   const compact = buildBannerRows(loggedIn(), 120, { compact: true });
-  assert.ok(compact.length < full.length);
+  assert.equal(compact.length, full.length, "full no longer adds a spacer under the mark");
   const text = stripAnsi(compact.join("\n"));
   assert.match(text, /mergestorm v0\.3\.14/);
   assert.match(text, /msk_live_abcd · maelstrom/);
-  assert.ok(text.includes(STORM_MARK[0]!));
+  assert.ok(compact.some(paintsMark));
   assert.match(text, /local reviews \+ stacked PRs/);
   assert.match(text, /review a diff/);
   assert.match(text, /New in v/);
@@ -128,8 +136,7 @@ test("mini banner keeps the mark plus the short-pane copy", () => {
   assert.ok(mini.length < compact.length);
   const text = stripAnsi(mini.join("\n"));
   assert.match(text, /mergestorm v0\.3\.14/);
-  assert.ok(text.includes(STORM_MARK[0]!));
-  assert.ok(text.includes(STORM_MARK[1]!.trim()));
+  assert.equal(mini.filter(paintsMark).length, TORNADO_LOGO.length, "mini shows the full mark");
   assert.match(text, /local reviews \+ stacked PRs/);
   assert.match(text, /review a diff/);
   assert.match(text, /New in v/);
@@ -138,11 +145,11 @@ test("mini banner keeps the mark plus the short-pane copy", () => {
   }
 });
 
-test("nano banner is one row with the mark", () => {
+test("nano banner keeps the full sprite", () => {
   const nano = buildBannerRows(loggedIn(), 80, { density: "nano" });
-  assert.equal(nano.length, 1);
+  assert.equal(nano.length, TORNADO_LOGO.length);
+  assert.equal(nano.filter(paintsMark).length, TORNADO_LOGO.length);
   const text = stripAnsi(nano[0]!);
-  assert.ok(text.includes(STORM_MARK[0]!));
   assert.match(text, /mergestorm/);
 });
 
@@ -160,7 +167,7 @@ test("narrow short view shortens copy instead of clipping mid-word", () => {
       assert.doesNotMatch(text, /open with us$/);
     }
   }
-  const mini = stripAnsi(buildBannerRows(loggedIn(), 56, { density: "mini" }).join("\n"));
+  const mini = stripAnsi(buildBannerRows(loggedIn(), 64, { density: "mini" }).join("\n"));
   assert.match(mini, /New in v0\.3\.14: Status \/ Usage \/ Jobs tabs/);
   assert.doesNotMatch(mini, /open with usage/);
 });
@@ -171,8 +178,19 @@ test("what's new covers the shipped package version (no empty pane)", () => {
   const rows = buildBannerRows(loggedIn(cliVersion()), 120);
   const text = stripAnsi(rows.join("\n"));
   assert.match(text, new RegExp(`New in v${cliVersion().replace(/\./g, "\\.")}`));
-  assert.match(text, /stack wait holds a PR while Cyclone or Vortex works/);
+  assert.match(text, /stack results say the watch ends only at land/);
 
   const narrowText = stripAnsi(buildBannerRows(loggedIn(cliVersion()), 80).join("\n"));
-  assert.match(narrowText, /stack wait holds a PR while Cyclone or Vortex works/);
+  assert.match(narrowText, /stack results say the watch ends only at land/);
+});
+
+test("idle banner paints every tornado row verbatim", () => {
+  const raw = buildBannerRows(loggedIn(), 100);
+  const filled = raw.filter(paintsMark);
+  assert.ok(filled.length >= TORNADO_LOGO.length, "every sprite row is painted");
+  for (const sprite of TORNADO_LOGO.map(paintSpriteRow)) {
+    assert.ok(raw.some((row) => row.includes(sprite)), `mark row painted verbatim: ${stripAnsi(sprite)}`);
+  }
+  const again = buildBannerRows(loggedIn(), 100, { frame: 1 });
+  assert.deepEqual(again.map(stripAnsi), raw.map(stripAnsi));
 });

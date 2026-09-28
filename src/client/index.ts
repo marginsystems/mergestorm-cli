@@ -136,7 +136,24 @@ export {
   sameHead,
   layerAgents,
   layerAgentsBusy,
+  conflictLiveParent,
+  stackRepair,
   type StackAgentBusy,
   type StackBlocker,
+  type StackLandGatePending,
   type StackLayerAgents,
+  type StackRepairHint,
 } from "../stack-blockers.js";
+
+export {
+  STACK_WATCH_NOT_DONE_SENTENCE,
+  stackTerminalReason,
+  stackWatchNextArgs,
+  stackWatchObligation,
+  type StackWatchDoneReason,
+  type StackWatchNext,
+  type StackWatchNextArgs,
+  type StackWatchObligation,
+  type StackWatchObligationInput,
+  type StackWatchReason,
+} from "../stack-watch-obligation.js";

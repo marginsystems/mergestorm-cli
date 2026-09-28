@@ -1,3 +1,5 @@
+import { PassThrough } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import * as readline from "node:readline";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -38,7 +40,7 @@ export interface AskLineOptions {
    * resize cannot desync CUU counts. Pass `true` for compact, `"mini"` /
    * `"nano"` for a short pane that still shows the mark.
    */
-  header?: (columns?: number, variant?: boolean | "mini" | "nano") => string[];
+  header?: (columns?: number, variant?: boolean | "mini" | "nano", frame?: number) => string[];
 }
 
 /** Thrown when the user asks to close the prompt (Ctrl+D empty, or Ctrl+C twice). */
@@ -78,6 +80,17 @@ export function promptClearOverlay(boxed: boolean): string {
  * frame's row count is unknowable after the terminal rewraps.
  */
 export const HEADER_REDRAW_PREFIX = `\u001b[H${clearDown}`;
+
+export const MOUSE_ENABLE = "\u001b[?1000h\u001b[?1006h";
+export const MOUSE_DISABLE = "\u001b[?1000l\u001b[?1006l";
+
+export type SpriteRect = { col: number; row: number; width: number; height: number };
+
+/** SGR coordinates and the rectangle are both 1-based. */
+export function hitTestSprite(col: number, row: number, rect: SpriteRect): boolean {
+  return col >= rect.col && col < rect.col + rect.width &&
+    row >= rect.row && row < rect.row + rect.height;
+}
 
 export const DROPDOWN_MAX_COMMAND_ROWS = 8;
 
@@ -260,9 +273,10 @@ export function fitHomeFrame(params: {
     : params.miniHeader?.length
       ? params.miniHeader
       : [];
+  const header = fallback.slice(0, Math.max(0, rows - 1));
   return {
-    header: fallback,
-    reserve: params.dockBottom ? Math.max(0, rows - fallback.length - 1) : 0,
+    header,
+    reserve: params.dockBottom ? Math.max(0, rows - header.length - 1) : 0,
     boxed: false,
     hasPrompt: false,
     hasHint: false,
@@ -490,7 +504,73 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
     const ctrlCExit = new CtrlCExitGate();
 
     const wasRaw = Boolean(input.isRaw);
-    readline.emitKeypressEvents(input);
+    // Decode keys from a private stream after removing mouse reports. Readline
+    // otherwise emits the numeric tail of SGR reports as ordinary typing.
+    // Never listen for `keypress` on `input` itself: once any TUI has called
+    // emitKeypressEvents(stdin), stdin decodes keys too and every character
+    // (and every mouse report) would land in the buffer twice.
+    const keys = new PassThrough();
+    const decoder = new StringDecoder("utf8");
+    let pending = "";
+    let escapeTimer: ReturnType<typeof setTimeout> | undefined;
+    readline.emitKeypressEvents(keys);
+    keys.on("keypress", onKeypress);
+
+    function onData(chunk: Buffer | string): void {
+      if (finished) return;
+      if (escapeTimer) clearTimeout(escapeTimer);
+      pending += typeof chunk === "string" ? chunk : decoder.write(chunk);
+      while (pending && !finished) {
+        const start = pending.indexOf("\u001b");
+        if (start !== 0) {
+          const end = start < 0 ? pending.length : start;
+          const text = pending.slice(0, end);
+          pending = pending.slice(end);
+          keys.write(text);
+          continue;
+        }
+        if (pending.startsWith("\u001b[M")) {
+          if (pending.length < 6) return;
+          pending = pending.slice(6);
+          continue;
+        }
+        const mouse = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])/.exec(pending);
+        if (mouse) {
+          pending = pending.slice(mouse[0].length);
+          continue;
+        }
+        const partialMouse = /^\u001b\[<\d*(?:;\d*){0,2}/.exec(pending);
+        if (partialMouse && pending.length > partialMouse[0].length) {
+          pending = pending.slice(partialMouse[0].length);
+          continue;
+        }
+        const csi = /^\u001b\[[0-?]*[ -/]*[@-~]/.exec(pending);
+        const ss3 = /^\u001bO[ -~]/.exec(pending);
+        if (csi || ss3) {
+          const sequence = csi?.[0] ?? ss3![0];
+          pending = pending.slice(sequence.length);
+          keys.write(sequence);
+          continue;
+        }
+        if (
+          pending === "\u001b" ||
+          /^\u001b(?:\[[0-?]*[ -/]*|O?)$/.test(pending)
+        ) {
+          // Keep partial mouse reports across chunks. A lone Escape still works.
+          if (!pending.startsWith("\u001b[<")) {
+            escapeTimer = setTimeout(() => {
+              const text = pending;
+              pending = "";
+              keys.write(text);
+            }, 50);
+          }
+          return;
+        }
+        keys.write(pending[0]!);
+        pending = pending.slice(1);
+      }
+    }
+
     input.setRawMode(true);
     input.resume();
 
@@ -571,9 +651,8 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
       // Never write more rows than the pane — that scrolls the welcome
       // tail (tips / what's new) into view and looks like a broken frame.
       if (frame.rows.length > roomRows) {
-        const keep = frame.rows.slice(frame.rows.length - roomRows);
-        const shift = frame.rows.length - keep.length;
-        frame.rows = keep;
+        const shift = frame.rows.length - roomRows;
+        frame.rows = frame.rows.slice(shift);
         frame.inputRow = Math.max(0, frame.inputRow - shift);
       }
 
@@ -609,7 +688,10 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
     }
 
     function cleanup(): void {
-      input.removeListener("keypress", onKeypress);
+      if (escapeTimer) clearTimeout(escapeTimer);
+      input.removeListener("data", onData);
+      keys.removeListener("keypress", onKeypress);
+      keys.destroy();
       output.removeListener("resize", onResize);
       input.setRawMode(wasRaw);
       // emitKeypressEvents leaves stdin flowing; pause it so an idle shell
@@ -764,8 +846,12 @@ export async function askLine(opts: AskLineOptions): Promise<string> {
       }
     }
 
-    input.on("keypress", onKeypress);
+    input.on("data", onData);
     output.on("resize", onResize);
-    render();
+    try {
+      render();
+    } catch (err) {
+      finish(null, err);
+    }
   });
 }

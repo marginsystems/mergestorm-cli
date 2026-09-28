@@ -32,6 +32,36 @@ export type StackLayerAgents = {
   busy: { vortex: boolean; cyclone: boolean };
 };
 
+export type StackRepairHint =
+  | {
+    kind: "restack_conflict" | "merge_conflict";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    liveParent: string | null;
+    files: string[];
+    steps: string;
+  }
+  | {
+    kind: "ci_failure";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    failingCheck: string | null;
+    steps: string;
+  };
+
+export type StackLandGatePending = {
+  prNumber: number;
+  headSha: string | null;
+  reason: string;
+};
+
+export function landGateIsPending(reason: string | null | undefined): boolean {
+  const token = reason?.trim().replace(/^landing blocked:\s*/i, "").match(/^[a-z_]+/i)?.[0] ?? "";
+  return /_(?:pending|running)$/i.test(token);
+}
+
 export function layerAgentsBusy(layer: StackLayerDto): StackAgentsBusy {
   return layer.agentsBusy ?? deriveStackAgentsBusy(layer);
 }
@@ -131,7 +161,8 @@ function layerAttention(
     const seam = seamGateBlocker(stack, layer);
     if (seam) return hardBlock(seam);
     if (stack.unit?.landPrNumber === layer.prNumber) {
-      if (stack.unit.landingBlockReason?.trim()) return hardBlock(stack.unit.landingBlockReason.trim());
+      const landing = stack.unit.landingBlockReason?.trim();
+      if (landing && !landGateIsPending(landing)) return hardBlock(landing);
       if (stack.unit.tempestLandStatus?.toLowerCase() === "failed") return hardBlock("Tempest failed");
     }
   }
@@ -144,6 +175,81 @@ function layerAttention(
   return { blocker: mergeQueueBounceLabel(bounce), bounceKind: kind, bounce };
 }
 
+
+function isTerminalLayer(layer: StackLayerDto): boolean {
+  return layer.state === "merged" || layer.state === "closed";
+}
+
+export function conflictLiveParent(stack: StackDto, layer: StackLayerDto): string | null {
+  const promoted = (candidate: StackLayerDto) =>
+    !!stack.unit?.members?.some((member) => member.prNumber === candidate.prNumber && member.promotedHeadSha?.trim());
+  const sibling = stack.layers
+    .filter((candidate) => candidate.prNumber > 0 && candidate.position < layer.position &&
+      !isTerminalLayer(candidate) && !promoted(candidate))
+    .sort((a, b) => b.position - a.position)[0];
+  if (sibling) return sibling.branch;
+  const retired = new Set([
+    ...stack.layers.filter((candidate) => isTerminalLayer(candidate) || promoted(candidate)).map((candidate) => candidate.branch),
+    ...(stack.unit?.members ?? []).filter((member) => member.promotedHeadSha?.trim()).map((member) => member.branch),
+  ]);
+  const usable = (branch: string | null | undefined): branch is string =>
+    !!branch?.trim() && !isMgParkBase(branch) && !retired.has(branch) && branch !== layer.branch;
+  for (const branch of [layer.restackError?.from?.branch, layer.parentBranch, stack.unit?.branch, stack.trunkBranch]) {
+    if (usable(branch)) return branch;
+  }
+  return null;
+}
+
+function conflictFiles(layer: StackLayerDto, bounce: MergeQueueEntryDto | undefined): string[] {
+  const paths = bounce?.bounceDetail?.conflictPaths?.filter((path) => path.trim());
+  if (paths?.length) return [...paths];
+  const detail = layer.restackError?.kind === "rebase_conflict" ? layer.restackError.detail : layer.conflictDetail;
+  const listed = detail?.match(/^conflict in (.+)$/)?.[1];
+  return listed ? listed.split(", ").map((path) => path.trim()).filter(Boolean) : [];
+}
+
+export function conflictRepairSteps(branch: string, liveParent: string | null): string {
+  if (!liveParent) {
+    return `The live parent of ${branch} is unknown (it is never an mg-park-* freeze). Do not merge or rebase anything; stop and tell the human.`;
+  }
+  return `Merge ${liveParent} into ${branch}: git fetch origin, check out ${branch} at its live remote head, git merge origin/${liveParent}, resolve the conflicts, run the tests, then an ordinary git push (no force). Do not rebase onto trunk, main, or mg-park-*, and do not retarget the PR base.`;
+}
+
+export function stackRepair(
+  stack: StackDto,
+  attention: StackBlocker | null,
+  layer: StackLayerDto | undefined,
+  bounce: MergeQueueEntryDto | undefined,
+): StackRepairHint | null {
+  if (!attention || !layer || attention.prNumber !== layer.prNumber) return null;
+  if (stack.unit && layer.prNumber === stack.unit.landPrNumber && layer.branch === stack.unit.branch) return null;
+  const restackConflict = attention.blocker === "Conflict" || attention.bounceKind === "restack_conflict";
+  const mergeConflict = attention.blocker.startsWith("Merge conflicts");
+  if (restackConflict || mergeConflict) {
+    const liveParent = conflictLiveParent(stack, layer);
+    return {
+      kind: restackConflict ? "restack_conflict" : "merge_conflict",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      liveParent,
+      files: conflictFiles(layer, bounce),
+      steps: conflictRepairSteps(layer.branch, liveParent),
+    };
+  }
+  if (attention.blocker.startsWith("CI failed") || attention.bounceKind === "ci_failure") {
+    const failingCheck = bounce?.bounceDetail?.failingCheck?.trim() || layer.checks?.failingName?.trim() || null;
+    return {
+      kind: "ci_failure",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      failingCheck,
+      steps: `Read the failing ${failingCheck ? `check ${failingCheck}` : "checks"} on ${layer.branch} (gh run list --branch ${layer.branch}, then gh run view <run-id> --log-failed), fix it on ${layer.branch} with the smallest patch, run that check locally, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push. Do not retarget the PR base.`,
+    };
+  }
+  return null;
+}
 
 /** Pair-gate attention plus live hard blocks on every other open layer. */
 export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [],
@@ -183,17 +289,28 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       if (agents.busy[agent]) busy.push({ prNumber: attention.prNumber, headSha: attention.headSha, agent, blocker: attention.blocker });
     }
   }
-  if (busy.length) return { attention: null, issues, currentCandidate, bounce: undefined, busy, agents };
-  return { attention, issues, currentCandidate, bounce, busy, agents };
+  const landing = stack.unit?.landingBlockReason?.trim();
+  const landLayer = stack.unit?.landPrNumber != null && !stack.archivedAt
+    ? open.find((layer) => layer.prNumber === stack.unit?.landPrNumber)
+    : undefined;
+  const landGatePending: StackLandGatePending | null = landLayer && landing && landGateIsPending(landing)
+    ? { prNumber: landLayer.prNumber, headSha: landLayer.headSha ?? null, reason: landing }
+    : null;
+  if (busy.length) return { attention: null, issues, currentCandidate, bounce: undefined, busy, agents, repair: null, landGatePending };
+  return { attention, issues, currentCandidate, bounce, busy, agents, repair: stackRepair(stack, attention, attentionLayer, bounce), landGatePending };
 }
 
 /** Compact contract text shared by status and wait summaries. */
 export function stackBlockersSummary(attention: Pick<StackBlocker, "prNumber" | "blocker"> | null,
-  issues: StackBlocker[], busy: readonly StackAgentBusy[] = []): string {
+  issues: StackBlocker[], busy: readonly StackAgentBusy[] = [],
+  landGatePending: Pick<StackLandGatePending, "prNumber" | "reason"> | null = null): string {
   const blocked = attention ? ` · blocked: #${attention.prNumber} ${attention.blocker}` : "";
   const working = busy.length
     ? ` · held: #${busy[0]!.prNumber} ${busy[0]!.blocker} while ${busy.map((entry) => entry.agent === "cyclone" ? "Cyclone patches" : "Vortex reviews").join(" and ")}`
     : "";
   const labels = issues.slice(0, 3).map(issue => `#${issue.prNumber} ${issue.blocker}`).join("; ");
-  return blocked + working + (issues.length ? ` · issues: ${labels}${issues.length > 3 ? `; +${issues.length - 3} more` : ""}` : "");
+  const gate = landGatePending && !attention
+    ? ` · land gate: #${landGatePending.prNumber} ${landGatePending.reason} (nothing to fix; wait)`
+    : "";
+  return blocked + working + gate + (issues.length ? ` · issues: ${labels}${issues.length > 3 ? `; +${issues.length - 3} more` : ""}` : "");
 }
