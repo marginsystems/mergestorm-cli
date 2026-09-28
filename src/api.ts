@@ -1029,3 +1029,106 @@ export async function listThreads(limit = 20, cfg?: Config): Promise<ThreadListI
   const items = (body as { items?: ThreadListItem[] }).items;
   return Array.isArray(items) ? items : [];
 }
+
+export type PrFindingDismissInput = {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  headSha: string;
+  reviewId: number;
+  findingIds?: string[];
+  scope?: "findings" | "review";
+  reason?: string;
+  evidenceUrl?: string;
+  preview?: boolean;
+};
+
+export type PrDismissedFinding = {
+  finding_id: string;
+  finding_key: string;
+  path: string | null;
+  line: number | null;
+  title: string;
+};
+
+export type PrFindingDismissResult = {
+  status: "dismissed" | "preview";
+  owner: string;
+  repo: string;
+  pr_number: number;
+  head_sha: string;
+  review_id: number;
+  review_kind: "seam" | "core";
+  scope: "findings" | "review";
+  dismissed: PrDismissedFinding[];
+  already_dismissed: Array<PrDismissedFinding & { actor_login: string; dismissed_at: string }>;
+  remaining: PrDismissedFinding[];
+  all_dismissed: boolean;
+  gate: {
+    seam: {
+      state: string;
+      reviewed_sha: string | null;
+      review_id: number | null;
+      cleared: boolean;
+      blocking: boolean;
+    } | null;
+    other_gates: "unchanged";
+  };
+  stack_id: string | null;
+};
+
+export type PrFindingDismissOutcome =
+  | { ok: true; result: PrFindingDismissResult }
+  | { ok: false; status: number; error: string; message: string };
+
+export async function dismissPrFindings(
+  input: PrFindingDismissInput,
+  cfg?: Config,
+  opts?: { signal?: AbortSignal },
+): Promise<PrFindingDismissOutcome> {
+  const resolved = cfg ?? (await loadConfig());
+  const json: Record<string, unknown> = {
+    owner: input.owner.trim(),
+    repo: input.repo.trim(),
+    pr_number: input.prNumber,
+    head_sha: input.headSha.trim(),
+    review_id: input.reviewId,
+    ...(input.scope ? { scope: input.scope } : {}),
+    ...(input.findingIds && input.findingIds.length > 0 ? { finding_ids: input.findingIds } : {}),
+    ...(input.reason !== undefined ? { reason: input.reason } : {}),
+    ...(input.evidenceUrl ? { evidence_url: input.evidenceUrl } : {}),
+    ...(input.preview ? { preview: true } : {}),
+  };
+  const { status, body, retryAfterSeconds } = await apiFetch(resolved, "/api/v1/stacks/pr-review/dismiss", {
+    method: "POST",
+    json,
+    signal: opts?.signal,
+  });
+  if (status === 429) {
+    throw new CommandError(rateLimitedMessage(retryAfterSeconds), REVIEW_EXIT.rate_limited, "rate_limited", {
+      retryAfterSeconds,
+    });
+  }
+  if (status === 200) return { ok: true, result: body as PrFindingDismissResult };
+  const rejection = (body ?? {}) as { error?: unknown; message?: unknown };
+  if (status === 404 && typeof rejection.error !== "string") {
+    throw new CommandError(
+      "Finding dismissal is not available on this server yet. Deploy the API update.",
+      REVIEW_EXIT.failed,
+      "not_found",
+    );
+  }
+  if (typeof rejection.error === "string") {
+    return {
+      ok: false,
+      status,
+      error: rejection.error,
+      message: typeof rejection.message === "string" ? rejection.message : rejection.error,
+    };
+  }
+  throw new CommandError(
+    `Failed to dismiss findings (HTTP ${status}): ${JSON.stringify(body)}`,
+    REVIEW_EXIT.failed,
+    "review_failed",
+  );
+}

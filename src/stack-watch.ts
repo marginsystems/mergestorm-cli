@@ -4,6 +4,8 @@ import {
   stackBlockers,
   type StackAgentBusy,
   type StackBlocker,
+  type StackBusyAgent,
+  type StackHeldBlocker,
   type StackLayerAgents,
   type StackLandGatePending,
   type StackRepairHint,
@@ -51,6 +53,8 @@ export type StackWatchEnvelope = {
   currentCandidate: { prNumber: number; headSha: string | null } | null;
   assessment: "available" | "unavailable";
   busy: StackAgentBusy[];
+  actAfter: StackHeldBlocker["actAfter"] | null;
+  waitingOn: StackBusyAgent[];
   agents: StackLayerAgents | null;
   repair: StackRepairHint | null;
   landGatePending: StackLandGatePending | null;
@@ -119,7 +123,7 @@ export async function pollStackWatch(
   let lastEnvelope: StackWatchSnapshot = {
     schema: STACK_WATCH_SCHEMA, status: "failed", stackId: id, blocker: null,
     bounceKind: null, prNumber: null, headSha: null, cursor,
-    issues: [], currentCandidate: null, assessment: "unavailable", busy: [], agents: null, repair: null,
+    issues: [], currentCandidate: null, assessment: "unavailable", busy: [], actAfter: null, waitingOn: [], agents: null, repair: null,
     landGatePending: null,
   };
   let terminal: StackWatchDoneReason | null = null;
@@ -189,7 +193,7 @@ export async function pollStackWatch(
     if (snapshot && Array.isArray(snapshot.stacks) && !stack) {
       terminal = "not_found";
       throw new StackWatchError("Stack not found or not owned by the current user",
-        seal({ ...lastEnvelope, status: "failed", assessment: "unavailable", blocker: null, issues: [], busy: [],
+        seal({ ...lastEnvelope, status: "failed", assessment: "unavailable", blocker: null, issues: [], busy: [], actAfter: null, waitingOn: [],
           prNumber: null, headSha: null, repair: null, agents: null, currentCandidate: null, landGatePending: null }));
     }
     if (!stack || !Array.isArray(stack.layers)) {
@@ -210,14 +214,16 @@ export async function pollStackWatch(
     };
   };
   const evaluate = (stack: StackDto, entries: MergeQueueEntryDto[]) => {
-    const { attention, issues, currentCandidate, bounce, busy, agents, repair, landGatePending } = stackBlockers(stack, entries, cursor);
+    const { attention, held: named, issues, currentCandidate, bounce, busy, agents, repair, landGatePending } = stackBlockers(stack, entries, cursor);
     if (bounce) cursor = Object.freeze({ ...cursor, bounceId: bounce.id,
       ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}) });
     const held = busy[0];
+    const shown = attention ?? named;
     lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available", busy, agents, repair, landGatePending,
-      blocker: attention?.blocker ?? null, bounceKind: attention?.bounceKind ?? null,
-      prNumber: attention?.prNumber ?? held?.prNumber ?? currentCandidate?.prNumber ?? null,
-      headSha: attention ? attention.headSha : held ? held.headSha : currentCandidate?.headSha ?? null,
+      actAfter: named?.actAfter ?? null, waitingOn: named?.waitingOn ?? [],
+      blocker: shown?.blocker ?? null, bounceKind: shown?.bounceKind ?? null,
+      prNumber: shown?.prNumber ?? held?.prNumber ?? currentCandidate?.prNumber ?? null,
+      headSha: shown ? shown.headSha : held ? held.headSha : currentCandidate?.headSha ?? null,
       status: attention ? "attention" : busy.length || landGatePending || entries.some((entry) => ["queued", "running", "waiting"].includes(entry.state))
         ? "in_progress" : "waiting" };
   };

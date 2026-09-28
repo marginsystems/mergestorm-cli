@@ -6,7 +6,7 @@ import {
   pollStackWatch, StackWatchError, StackWatchTimeoutError,
   type PollStackWatchOptions, type StackWatchEnvelope,
 } from "./stack-watch.js";
-import { conflictLiveParent, conflictRepairSteps, landGateIsPending, stackBlockers } from "./stack-blockers.js";
+import { conflictLiveParent, conflictRepairSteps, landGateIsPending, stackBlockers, stackBlockersSummary } from "./stack-blockers.js";
 import { STACK_WATCH_NOT_DONE_SENTENCE, stackTerminalReason, stackWatchObligation } from "./stack-watch-obligation.js";
 
 const HEAD = "a".repeat(40);
@@ -80,6 +80,7 @@ test("attention at enrollment: CI on the current head", async () => {
     blocker: "CI failed — lint", bounceKind: null, prNumber: 42, headSha: HEAD,
     cursor: { stackId: "stack", enrolledHeadSha: HEAD },
     issues: [], currentCandidate: { prNumber: 42, headSha: HEAD }, assessment: "available", busy: [],
+    actAfter: null, waitingOn: [],
     agents: { prNumber: 42, headSha: HEAD, vortexStatus: null, cycloneStatus: null, vortexReview: null,
       busy: { vortex: false, cyclone: false } },
   });
@@ -236,6 +237,21 @@ test("Tempest findings take precedence over a failed Vortex review", async () =>
   assert.equal(result.blocker, "Tempest findings");
 });
 
+test("a Cyclone failure on the head is attention, after red CI and before Tempest", async () => {
+  const failed = { agent: "cyclone" as const, status: "failed" as const, sha: HEAD };
+  const named = harness(stack([layer({
+    agentRuns: [failed, { agent: "tempest", status: "findings", sha: HEAD }],
+  })]));
+  const result = await pollStackWatch(cfg, "stack", named.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Cyclone failed");
+  assert.equal(result.prNumber, 42);
+  const red = harness(stack([layer({ ciStatus: "failure", agentRuns: [failed] })]));
+  assert.equal((await pollStackWatch(cfg, "stack", red.options)).blocker, "CI failed");
+  const stale = harness(stack([layer({ agentRuns: [{ ...failed, sha: NEXT }] })]));
+  assert.equal((await timedOut(stale.options)).blocker, null);
+});
+
 test("unit land gate blocks the selected land PR", async () => {
   const h = harness(stack([]));
   h.state.stack.unit = {
@@ -318,6 +334,7 @@ for (const [overrides, expected] of [
   [{ draft: true }, "Draft PR"],
   [{ mergeable: false }, "Merge conflicts vs main"],
   [{ vortexStatus: "failed" }, "Review failed"],
+  [{ agentRuns: [{ agent: "cyclone", status: "failed", sha: HEAD }] }, "Cyclone failed"],
   [{ agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD }] }, "Tempest findings"],
   [{ agentRuns: [{ agent: "tempest", status: "failed", sha: HEAD }] }, "Tempest failed"],
   [{ restackError: { kind: "push_failed", detail: "failure", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null } }, "Restack failed"],
@@ -792,6 +809,80 @@ test("a busy hold never stamps the bounce into the cursor", async () => {
   assert.deepEqual(result.busy.map((entry) => entry.blocker), ["CI failed — lint"]);
 });
 
+const dirtyMain = { mergeable: false, mergeableState: "dirty" };
+const vortexBusy = { vortexStatus: "reviewing" as const, vortexReview: reviewing(HEAD),
+  agentRuns: [{ agent: "vortex" as const, status: "reviewing", sha: HEAD }] };
+
+test("a merge conflict while Vortex reviews is in_progress with the blocker named for after the agents", async () => {
+  const h = harness(stack([layer({ ...dirtyMain, ...vortexBusy })]));
+  const result = await heldInProgress(h.options);
+  assert.equal(result.blocker, "Merge conflicts vs main");
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.headSha, HEAD);
+  assert.equal(result.actAfter, "agents_idle");
+  assert.deepEqual(result.waitingOn, ["vortex"]);
+  assert.deepEqual(result.issues, [{ prNumber: 42, headSha: HEAD, blocker: "Merge conflicts vs main", bounceKind: null }]);
+  assert.deepEqual(result.busy, [{ prNumber: 42, headSha: HEAD, agent: "vortex", blocker: "Merge conflicts vs main" }]);
+  assert.equal(result.repair?.kind, "merge_conflict");
+  assert.equal(result.watch.done, false);
+});
+
+test("restack conflicts, a failed restack and Draft are named while Cyclone patches", async () => {
+  const cases: [Partial<StackLayerDto>, string][] = [
+    [{ state: "conflict" }, "Conflict"],
+    [{ restackError: { kind: "rebase_conflict", detail: "conflict in a.ts", headSha: HEAD, attemptedAt: "2026-01-01T00:00:00Z", attempts: 1, backupRef: null } }, "Conflict"],
+    [{ restackError: { kind: "push_failed", detail: "stale info", headSha: HEAD, attemptedAt: "2026-01-01T00:00:00Z", attempts: 3, backupRef: null } }, "Restack failed"],
+    [{ draft: true }, "Draft PR"],
+  ];
+  for (const [extra, blocker] of cases) {
+    const h = harness(stack([layer({ ...extra, cycloneStatus: "patching", agentRuns: [{ agent: "cyclone", status: "patching", sha: HEAD }] })]));
+    const result = await heldInProgress(h.options);
+    assert.equal(result.blocker, blocker, JSON.stringify(extra));
+    assert.equal(result.actAfter, "agents_idle");
+    assert.deepEqual(result.waitingOn, ["cyclone"]);
+  }
+});
+
+test("blockers the agents can clear keep the silent hold", async () => {
+  const h = harness(stack([layer({ ...redCi, ...vortexBusy })]));
+  const result = await heldInProgress(h.options);
+  assert.equal(result.blocker, null);
+  assert.equal(result.actAfter, null);
+  assert.deepEqual(result.waitingOn, []);
+  assert.deepEqual(result.issues, []);
+  assert.equal(result.repair, null);
+});
+
+test("a named merge conflict flips to attention on the first idle snapshot", async () => {
+  const h = harness(stack([layer({ ...dirtyMain, ...vortexBusy })]));
+  const ticks: StackWatchEnvelope[] = [];
+  h.state.respond = (route) => {
+    if (!route.includes("/queue")) return undefined;
+    const wait = new URL(route, "https://local").searchParams.get("wait");
+    if (wait !== null) {
+      h.state.advance(Number(wait) * 1000);
+      h.state.stack = stack([layer({ ...dirtyMain, vortexStatus: "findings", vortexReview: done(HEAD), agentRuns: [] })]);
+    }
+    return { status: 200, body: { entries: [], fingerprint: "fp" } };
+  };
+  const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 45_000, onTick: (tick) => ticks.push(tick) });
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Merge conflicts vs main");
+  assert.equal(result.actAfter, null);
+  assert.deepEqual(result.waitingOn, []);
+  assert.deepEqual(result.issues, []);
+  assert.equal(result.repair?.kind, "merge_conflict");
+});
+
+test("the summary tells the watcher to act on a held blocker only after the agents", () => {
+  const held = stackBlockers(stack([layer({ ...dirtyMain, ...vortexBusy, cycloneStatus: "patching",
+    agentRuns: [{ agent: "vortex", status: "reviewing", sha: HEAD }, { agent: "cyclone", status: "patching", sha: HEAD }] })]));
+  assert.equal(held.attention, null);
+  assert.deepEqual(held.held?.waitingOn, ["cyclone", "vortex"]);
+  assert.equal(stackBlockersSummary(held.held, held.issues, held.busy, null, held.held?.actAfter ?? null),
+    " · blocked after the agents: #42 Merge conflicts vs main (plan the fix; act once Cyclone patches and Vortex reviews finish and the watch returns attention)");
+});
+
 type UnitMember = NonNullable<StackDto["unit"]>["members"][number];
 function seamUnit(target: StackDto, seamState: string, seamReviewedSha: string | null,
   promoted: UnitMember[] = [{ prNumber: 41, promotedHeadSha: "promoted", promotedAt: "2026-09-27T00:28:09Z", seamState: "none", seamReviewedSha: null } as UnitMember]): StackDto {
@@ -981,6 +1072,34 @@ test("the live parent is the open sibling below, not the unit, trunk, or a park 
   }
 });
 
+test("a verdict at the current head that is not bound to the base is a pending issue, not silence", async () => {
+  const pending = layer({ mergeable: null, mergeableState: "pending", mergeableHeadSha: HEAD });
+  const live = stackBlockers(stack([pending]));
+  assert.equal(live.attention, null);
+  assert.deepEqual(live.issues, [{ prNumber: 42, headSha: HEAD, blocker: "Merge state unknown vs main", bounceKind: null }]);
+  assert.match(stackBlockersSummary(live.attention, live.issues), /issues: #42 Merge state unknown vs main/);
+
+  const envelope = await pollStackWatch(cfg, "stack", { ...harness(stack([pending])).options, timeoutMs: 0 });
+  assert.equal(envelope.status, "waiting");
+  assert.equal(envelope.issues.length, 1);
+  assert.equal(envelope.issues[0]!.blocker, "Merge state unknown vs main");
+
+  for (const quiet of [
+    layer({ mergeable: null, mergeableState: null, mergeableHeadSha: HEAD }),
+    layer({ mergeable: null, mergeableState: "pending", mergeableHeadSha: NEXT }),
+    layer({ mergeable: null, mergeableState: "pending", mergeableHeadSha: HEAD, parentBranch: "mg-park-3" }),
+  ]) {
+    assert.deepEqual(stackBlockers(stack([quiet])).issues, [], JSON.stringify(quiet));
+  }
+
+  const promoted = layer({ branch: "feat/a", prNumber: 1, position: 1, mergeable: null, mergeableState: "pending", mergeableHeadSha: HEAD });
+  const next = layer({ branch: "feat/b", parentBranch: "feat/a", prNumber: 2, position: 2 });
+  const above = unitStack([promoted, next], { members: [{ prNumber: 1, branch: "feat/a", position: 1, seamState: "approved",
+    seamReviewedSha: HEAD, promotedHeadSha: HEAD, promotedAt: "2026-01-01T00:00:00Z" }] as never });
+  assert.equal(stackBlockers(above).currentCandidate?.prNumber, 2);
+  assert.deepEqual(stackBlockers(above).issues, []);
+});
+
 test("merge-conflict and CI repairs; a busy hold carries no repair", () => {
   const dirty = layer({ branch: "feat/b", parentBranch: "feat/a", prNumber: 2, position: 2, mergeable: false, mergeableState: "dirty" });
   const bottom = layer({ branch: "feat/a", parentBranch: "mg-stack-79", prNumber: 1, position: 1, state: "merged" });
@@ -1068,16 +1187,21 @@ test("attention tells the agent to fix the PR before calling stack_wait again", 
   assert.match(result.watch.message, /enrolled_head_sha set to the SHA you pushed/);
 });
 
-test("the unit land PR on the owned trunk gets no push repair", () => {
+test("the unit land PR on the owned trunk gets the same repair as any layer, against its base", () => {
   const land = layer({ branch: "mg-stack-7", parentBranch: "main", prNumber: 90, position: Number.MAX_SAFE_INTEGER,
     ciStatus: "failure", checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: "ci/test" } });
   const s = { ...unitStack([], { branch: "mg-stack-7", state: "landing", landPrNumber: 90, landPr: land }), trunkBranch: "mg-stack-7" };
   const ci = stackBlockers(s);
   assert.equal(ci.attention?.prNumber, 90);
-  assert.equal(ci.repair, null);
+  assert.equal(ci.repair?.kind, "ci_failure");
+  assert.equal(ci.repair?.branch, "mg-stack-7");
+  assert.equal(ci.repair?.kind === "ci_failure" ? ci.repair.failingCheck : null, "ci/test");
   const dirty = stackBlockers({ ...s, unit: { ...s.unit!, landPr: { ...land, ciStatus: "success", checks: null, mergeable: false, mergeableState: "dirty" } } });
   assert.match(dirty.attention?.blocker ?? "", /^Merge conflicts/);
-  assert.equal(dirty.repair, null);
+  assert.equal(dirty.repair?.kind, "merge_conflict");
+  assert.equal(dirty.repair?.branch, "mg-stack-7");
+  assert.equal(dirty.repair?.kind === "merge_conflict" ? dirty.repair.liveParent : null, "main");
+  assert.match(dirty.repair?.steps ?? "", /^Merge main into mg-stack-7: .*ordinary git push \(no force\)/);
 });
 
 test("a promoted member whose stack row reconcile dropped is never the live parent", () => {

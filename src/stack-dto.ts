@@ -238,6 +238,16 @@ export type StackLayerConflictResolution = {
   dispatchId: string | null;
 };
 
+export type StackLayerCiFixStatus = "verified" | "unverified" | "no_changes" | "failed";
+
+export type StackLayerCiFix = {
+  status: StackLayerCiFixStatus;
+  failingCheck: string | null;
+  resultSha: string | null;
+  reason: string | null;
+  at: string;
+};
+
 export type StackLayerDto = {
   branch: string;
   parentBranch: string | null;
@@ -312,6 +322,7 @@ export type StackLayerDto = {
    * layers and when the specialist never ran.
    */
   conflictResolution?: StackLayerConflictResolution | null;
+  ciFix?: StackLayerCiFix | null;
 };
 
 export type StackUnitMemberDto = {
@@ -517,6 +528,7 @@ export type MergeQueueBounceDetail = {
   conflictDetail?: string;
   conflictPaths?: string[];
   message?: string;
+  warning?: string;
 };
 
 export type MergeQueueEntryDto = {

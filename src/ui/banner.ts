@@ -124,6 +124,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.26": [
     "stack results say the watch ends only at land",
   ],
+  "0.3.27": [
+    "mg dismiss records an audited finding dismissal",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

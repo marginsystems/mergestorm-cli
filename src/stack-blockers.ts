@@ -23,6 +23,13 @@ export type StackAgentBusy = {
   blocker: string;
 };
 
+export type StackBusyAgent = StackAgentBusy["agent"];
+
+export type StackHeldBlocker = StackBlocker & {
+  actAfter: "agents_idle";
+  waitingOn: StackBusyAgent[];
+};
+
 export type StackLayerAgents = {
   prNumber: number;
   headSha: string | null;
@@ -91,6 +98,12 @@ export function boundDirty(layer: StackLayerDto): boolean {
     (layer.mergeable === false || layer.mergeableState?.toLowerCase() === "dirty");
 }
 
+export function mergeabilityPending(layer: StackLayerDto): boolean {
+  if (isMgParkBase(layer.parentBranch)) return false;
+  return layer.mergeable == null && !!layer.headSha && layer.mergeableHeadSha === layer.headSha &&
+    layer.mergeableState?.toLowerCase() === "pending";
+}
+
 export function sameHead(a: string | null | undefined, b: string | null | undefined): boolean {
   const left = a?.trim().toLowerCase();
   const right = b?.trim().toLowerCase();
@@ -154,6 +167,8 @@ function layerAttention(
       const name = layer.checks?.failingName?.trim();
       return hardBlock(`CI failed${name ? ` — ${name}` : ""}`);
     }
+    if (layer.agentRuns?.some((run) => run.agent === "cyclone" && run.status === "failed" &&
+      sameHead(run.sha, layer.headSha))) return hardBlock("Cyclone failed");
     const tempest = layer.agentRuns?.find((run) => run.agent === "tempest" &&
       ["findings", "failed"].includes(run.status) && sameHead(run.sha, layer.headSha));
     if (tempest) return hardBlock(`Tempest ${tempest.status}`);
@@ -215,6 +230,16 @@ export function conflictRepairSteps(branch: string, liveParent: string | null): 
   return `Merge ${liveParent} into ${branch}: git fetch origin, check out ${branch} at its live remote head, git merge origin/${liveParent}, resolve the conflicts, run the tests, then an ordinary git push (no force). Do not rebase onto trunk, main, or mg-park-*, and do not retarget the PR base.`;
 }
 
+function landPrLiveParent(stack: StackDto, layer: StackLayerDto): string | null {
+  const base = stack.unit?.landTarget?.trim() || layer.parentBranch?.trim();
+  return base && !isMgParkBase(base) && base !== layer.branch ? base : null;
+}
+
+export function agentsCannotClear(blocker: string): boolean {
+  return blocker === "Conflict" || blocker === "Restack failed" || blocker === "Draft PR" ||
+    blocker.startsWith("Merge conflicts");
+}
+
 export function stackRepair(
   stack: StackDto,
   attention: StackBlocker | null,
@@ -222,11 +247,11 @@ export function stackRepair(
   bounce: MergeQueueEntryDto | undefined,
 ): StackRepairHint | null {
   if (!attention || !layer || attention.prNumber !== layer.prNumber) return null;
-  if (stack.unit && layer.prNumber === stack.unit.landPrNumber && layer.branch === stack.unit.branch) return null;
+  const landPr = !!stack.unit && layer.prNumber === stack.unit.landPrNumber && layer.branch === stack.unit.branch;
   const restackConflict = attention.blocker === "Conflict" || attention.bounceKind === "restack_conflict";
   const mergeConflict = attention.blocker.startsWith("Merge conflicts");
   if (restackConflict || mergeConflict) {
-    const liveParent = conflictLiveParent(stack, layer);
+    const liveParent = landPr ? landPrLiveParent(stack, layer) : conflictLiveParent(stack, layer);
     return {
       kind: restackConflict ? "restack_conflict" : "merge_conflict",
       prNumber: layer.prNumber,
@@ -272,7 +297,13 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   for (const layer of open) {
     const selected = layer.prNumber === candidate?.prNumber;
     const result = layerAttention(stack, layer, selected ? queue : [], cursor);
-    if (!result.blocker) continue;
+    if (!result.blocker) {
+      if (mergeabilityPending(layer) && (selected || !candidate || layer.position > candidate.position)) {
+        issues.push({ prNumber: layer.prNumber, headSha: layer.headSha ?? null,
+          blocker: `Merge state unknown${layer.parentBranch ? ` vs ${layer.parentBranch}` : ""}`, bounceKind: null });
+      }
+      continue;
+    }
     const issue = { prNumber: layer.prNumber, headSha: layer.headSha ?? null,
       blocker: result.blocker, bounceKind: result.bounceKind };
     if (selected || (!attention && layer === child)) {
@@ -296,21 +327,31 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   const landGatePending: StackLandGatePending | null = landLayer && landing && landGateIsPending(landing)
     ? { prNumber: landLayer.prNumber, headSha: landLayer.headSha ?? null, reason: landing }
     : null;
-  if (busy.length) return { attention: null, issues, currentCandidate, bounce: undefined, busy, agents, repair: null, landGatePending };
-  return { attention, issues, currentCandidate, bounce, busy, agents, repair: stackRepair(stack, attention, attentionLayer, bounce), landGatePending };
+  if (busy.length && attention && agentsCannotClear(attention.blocker)) {
+    const held: StackHeldBlocker = { ...attention, actAfter: "agents_idle", waitingOn: busy.map((entry) => entry.agent) };
+    return { attention: null, held, issues: [attention, ...issues], currentCandidate, bounce: undefined, busy, agents,
+      repair: stackRepair(stack, attention, attentionLayer, undefined), landGatePending };
+  }
+  if (busy.length) return { attention: null, held: null, issues, currentCandidate, bounce: undefined, busy, agents, repair: null, landGatePending };
+  return { attention, held: null, issues, currentCandidate, bounce, busy, agents, repair: stackRepair(stack, attention, attentionLayer, bounce), landGatePending };
 }
 
 /** Compact contract text shared by status and wait summaries. */
 export function stackBlockersSummary(attention: Pick<StackBlocker, "prNumber" | "blocker"> | null,
   issues: StackBlocker[], busy: readonly StackAgentBusy[] = [],
-  landGatePending: Pick<StackLandGatePending, "prNumber" | "reason"> | null = null): string {
-  const blocked = attention ? ` · blocked: #${attention.prNumber} ${attention.blocker}` : "";
-  const working = busy.length
-    ? ` · held: #${busy[0]!.prNumber} ${busy[0]!.blocker} while ${busy.map((entry) => entry.agent === "cyclone" ? "Cyclone patches" : "Vortex reviews").join(" and ")}`
+  landGatePending: Pick<StackLandGatePending, "prNumber" | "reason"> | null = null,
+  actAfter: StackHeldBlocker["actAfter"] | null = null): string {
+  const agentWork = (entry: StackAgentBusy) => entry.agent === "cyclone" ? "Cyclone patches" : "Vortex reviews";
+  const blocked = attention && actAfter && busy.length
+    ? ` · blocked after the agents: #${attention.prNumber} ${attention.blocker} (plan the fix; act once ${busy.map(agentWork).join(" and ")} finish and the watch returns attention)`
+    : attention ? ` · blocked: #${attention.prNumber} ${attention.blocker}` : "";
+  const working = busy.length && !actAfter
+    ? ` · held: #${busy[0]!.prNumber} ${busy[0]!.blocker} while ${busy.map(agentWork).join(" and ")}`
     : "";
-  const labels = issues.slice(0, 3).map(issue => `#${issue.prNumber} ${issue.blocker}`).join("; ");
+  const listed = actAfter && attention ? issues.filter((issue) => issue.prNumber !== attention.prNumber || issue.blocker !== attention.blocker) : issues;
+  const labels = listed.slice(0, 3).map(issue => `#${issue.prNumber} ${issue.blocker}`).join("; ");
   const gate = landGatePending && !attention
     ? ` · land gate: #${landGatePending.prNumber} ${landGatePending.reason} (nothing to fix; wait)`
     : "";
-  return blocked + working + gate + (issues.length ? ` · issues: ${labels}${issues.length > 3 ? `; +${issues.length - 3} more` : ""}` : "");
+  return blocked + working + gate + (listed.length ? ` · issues: ${labels}${listed.length > 3 ? `; +${listed.length - 3} more` : ""}` : "");
 }

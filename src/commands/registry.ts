@@ -4,6 +4,7 @@ import type { CommandSpec } from "../ui/prompt.js";
 import { cmdBranches, cmdChain } from "./branches.js";
 import { canBrowse, openTabsBrowser } from "./browse.js";
 import { cmdCredits } from "./credits.js";
+import { cmdDismiss } from "./dismiss.js";
 import { cmdJobs, cmdThread } from "./jobs.js";
 import { cmdLogin } from "./login.js";
 import { cmdLogout } from "./logout.js";
@@ -96,6 +97,21 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
         signal: ctx.signal,
         mode: ctx.mode,
       });
+    },
+  },
+  {
+    name: "dismiss",
+    summary: "Dismiss Vortex findings you verified are wrong (audited)",
+    usage: [
+      "mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --preview",
+      "  Lists the review's findings (ids) and the seam gate; writes nothing",
+      "mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --finding <id> --reason <text>",
+      "  [--finding <id>]… | --all (every finding of that review)  [--evidence <url>] [--json]",
+      "  Needs write access on GitHub; refuses a moved head, another review or an unknown id",
+      "  Clears the seam gate only when every finding of that seam review is dismissed",
+    ],
+    async run(args) {
+      await cmdDismiss(args);
     },
   },
   {

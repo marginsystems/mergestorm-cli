@@ -1,4 +1,4 @@
-import { stackBlockers, stackBlockersSummary, type StackRepairHint } from "../stack-blockers.js";
+import { stackBlockers, stackBlockersSummary, type StackHeldBlocker, type StackRepairHint } from "../stack-blockers.js";
 import {
   STACK_WATCH_NOT_DONE_SENTENCE,
   stackTerminalReason,
@@ -68,6 +68,12 @@ import { runLineTabsBrowser } from "../ui/line-tabs.js";
 import { present } from "../ui/present.js";
 import { canBrowse } from "./browse.js";
 import { openHelpBrowser } from "./help.js";
+
+export function stackHeldLine(held: StackHeldBlocker | null | undefined): string[] {
+  if (!held) return [];
+  const agents = held.waitingOn.map((agent) => agent === "cyclone" ? "Cyclone" : "Vortex").join(" and ");
+  return [`Held: #${held.prNumber} ${held.blocker}. Plan the fix; act once ${agents} ${held.waitingOn.length > 1 ? "are" : "is"} idle and the watch returns attention.`];
+}
 
 export function stackRepairLine(repair: StackRepairHint | null | undefined): string[] {
   if (!repair) return [];
@@ -1218,7 +1224,7 @@ export async function cmdStackWait(
       ...(retryAfterSeconds !== undefined ? { retry_after_seconds: retryAfterSeconds } : {}),
     }, null, 2)
     : [
-      `Stack ${envelope.stackId} · ${envelope.status}${stackBlockersSummary(envelope.blocker && envelope.prNumber != null ? { prNumber: envelope.prNumber, blocker: envelope.blocker } : null, envelope.issues, envelope.busy, envelope.landGatePending ?? null)}${envelope.assessment === "unavailable" ? " · assessment unavailable" : ""}`,
+      `Stack ${envelope.stackId} · ${envelope.status}${stackBlockersSummary(envelope.blocker && envelope.prNumber != null ? { prNumber: envelope.prNumber, blocker: envelope.blocker } : null, envelope.issues, envelope.busy, envelope.landGatePending ?? null, envelope.actAfter ?? null)}${envelope.assessment === "unavailable" ? " · assessment unavailable" : ""}`,
       ...stackRepairLine(envelope.repair),
       ...stackWatchTextLines(envelope.watch),
     ].join("\n"));
@@ -1275,7 +1281,7 @@ export async function cmdStackStatus(
       "not_found",
     );
   }
-  const { attention, currentCandidate, repair } = stackBlockers(stack);
+  const { attention, held, currentCandidate, repair } = stackBlockers(stack);
   const watch = stackWatchObligation({
     stackId: stack.id,
     terminal: stackTerminalReason(stack),
@@ -1284,7 +1290,7 @@ export async function cmdStackStatus(
     freshCursor: true,
   });
   if (asJson) {
-    console.log(JSON.stringify({ ...stack, repair, watch }, null, 2));
+    console.log(JSON.stringify({ ...stack, held, repair, watch }, null, 2));
     return;
   }
   const lines = formatStackHuman(stack, false);
@@ -1299,7 +1305,7 @@ export async function cmdStackStatus(
         (layer.tempestStatus ? `  Tempest: ${layer.tempestStatus}` : ""),
     );
   }
-  lines.push(...[...stackRepairLine(repair), ...stackWatchTextLines(watch)].map((line) => `  ${line}`));
+  lines.push(...[...stackHeldLine(held), ...stackRepairLine(repair), ...stackWatchTextLines(watch)].map((line) => `  ${line}`));
   await present("Stack status", lines);
 }
 

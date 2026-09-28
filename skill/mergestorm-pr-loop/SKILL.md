@@ -48,6 +48,11 @@ mg skill install --claude --cursor --agents
    - Prefer the smallest correct patch. Do not refactor around a finding.
    - Patch concrete bugs. A chat-only explanation is not a dismiss.
    - If you skip a finding (not reproducible, policy fork, or needs a human), post a public GitHub PR comment before you stop. First line: `mergestorm-loop: dismiss`. Then one line per skipped finding (path, severity, why). That first line is the only dismiss marker Vortex reads.
+   - If you verified a finding is wrong (not merely skipped) and it blocks the PR, for example a seam finding holding `Seam findings`, record the dismissal with `review_dismiss` (CLI: `mg dismiss`):
+     - First call it with `preview: true`, the PR's live `head_sha` and the review id (review_id) of the Vortex review that raised the finding. It lists that review's finding ids and the seam gate and writes nothing.
+     - Then call it with the `finding_ids` you checked (or `scope: "review"` when you checked every finding of that review), a `reason` that says why each is wrong, and an `evidence_url` when you have one.
+     - A refusal (stale_head, review_mismatch, unknown_finding, forbidden) means nothing was written. Re-read the pass at the live head; do not retry with another review's ids.
+     - The seam gate clears only when every finding of that seam review is dismissed. The result's `gate` says whether it did; CI, other reviews and Auto land are unchanged. For a stack PR, follow `watch.next` (the next `stack_wait` call).
 6. Patch on the PR head branch only.
 7. Push that head branch with an ordinary push. If the push is rejected because the remote branch moved, another patcher already pushed for this pass. Do not rebase, do not force, do not retry the push: stop and tell the human that a second patcher is active on this PR.
 8. Call `review_wait_pr` again with `after_sha` set to the SHA you just pushed (7+ hex) and `timeout_s` 45. If the last envelope you acted on has that same `head_sha` (no new commit, for example a re-review requested on the same head), also pass `after_pass` set to that envelope's saved `pass`, so the wait cannot hand you that attempt again. For a freshly pushed SHA omit `after_pass`; its first pass is 1. Keep `after_sha` and `after_pass` unchanged across 45s timeout retries; never replace `after_pass` with the `pass` of an in-progress envelope. `pass` reads one exact attempt; `timeout_s` 0 reads once without waiting. An envelope whose `head_sha` is an older commit is a previous pass, not yours; keep waiting.
@@ -79,7 +84,8 @@ Map these to `mergestorm.pr_review/v1` envelope fields; do not invent statuses.
 - patch a pass whose `head_sha` is not the commit you have checked out
 - wrap the CLI in a shell escape hatch
 - claim a finding is fixed without a diff that touches its path
-- claim a finding is dismissed without posting a `mergestorm-loop: dismiss` comment on the PR
+- claim a finding is dismissed without posting a `mergestorm-loop: dismiss` comment on the PR or a `review_dismiss` result that lists it
+- dismiss a finding you did not verify, one a human must decide (Decision required, policy fork), or a finding of a newer review than the one you checked
 
 ## Fallback (no MCP)
 

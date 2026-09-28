@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.26`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.27`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.26                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.27                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
 │     ▝▀▀▘      review a diff · usage for tabs · /help for all commands        │
-│       ▀       New: stack results say the watch ends only at land             │
+│       ▀       New: mg dismiss records an audited finding dismissal           │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -99,7 +99,20 @@ mergestorm stack restack <stack-id>  Restack descendants
 mergestorm stack land <stack-id>     Land / promote (into review unit when present)
 mergestorm stack wait <stack-id> [--timeout <s>]  Wait for stack attention (default 45s, max 300s; 0 = one snapshot, no wait)
 mergestorm stack reset --force  Clear local authoring state (not branches/PRs)
+mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --preview   List a Vortex review's finding ids and the seam gate
+mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --finding <id> --reason <text>  Dismiss verified-wrong findings (`--all` for the whole review, `--evidence <url>`, `--json`)
 ```
+
+### Dismissing a finding
+
+Use `mergestorm dismiss` when a Vortex finding is wrong and you have checked it against the code. It is recorded server side with your GitHub login, the reason, the evidence URL, the scope and the time. Rules:
+
+- You need write access to the repository on GitHub, and the repository must be monitored by your Mergestorm account or the PR must be in one of your stacks.
+- `--head` must be the PR's live head and `--review` a Vortex review made at that head. A moved head, another review, or a finding id that is not in that review is refused, and nothing is written.
+- Retrying the same dismissal is safe; it reports the earlier record.
+- The seam gate clears only when every finding of that integration review is dismissed and the review is still the current seam verdict. CI, other reviews and Auto land policy still apply.
+- Vortex does not raise a dismissed finding again on the same diff (the same head, or a restack with an unchanged diff).
+- With `--json`, the result carries `gate` and, for a stack PR, `watch.next` (the next `stack_wait` call).
 
 `mg` is a short alias for `mergestorm` (same binary), e.g. `mg stack create`. Happy path: **create → commit → submit → restack → land**. On review-unit stacks, `stack land` **promotes** the tip into the unit (same gates as the dashboard); otherwise it lands the bottom open PR. `stack adopt` is for importing a chain that already exists on GitHub (legacy / Graphite). Restack/land use the same login key (`/api/v1/stacks`). Unattended landing is `mg queue add`.
 
