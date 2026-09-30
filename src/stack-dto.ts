@@ -519,7 +519,11 @@ export function mergeQueueBounceLabel(entry: MergeQueueEntryDto): string {
       (detail?.conflictPaths?.length ? detail.conflictPaths.join(", ") : null) ??
       detail?.message ??
       (detail?.prNumber != null ? `PR #${detail.prNumber}` : null);
-    return specifics ? `${kindLabel} — ${specifics}` : kindLabel;
+    const withPrNumbers = detail?.batch?.withPrNumbers ?? [];
+    const batch = withPrNumbers.length
+      ? ` in a red batch with ${withPrNumbers.map((prNumber) => `#${prNumber}`).join(", ")}`
+      : "";
+    return specifics ? `${kindLabel} — ${specifics}${batch}` : `${kindLabel}${batch}`;
   }
   return entry.bounceReason?.trim() || "bounced";
 }
@@ -535,6 +539,12 @@ export type MergeQueueBounceDetail = {
   conflictPaths?: string[];
   message?: string;
   warning?: string;
+  batch?: MergeQueueBounceBatch;
+};
+
+export type MergeQueueBounceBatch = {
+  id: string;
+  withPrNumbers: number[];
 };
 
 export type MergeQueueBatchState =

@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.29`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.30`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,7 +48,7 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.29                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.30                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
@@ -117,7 +117,7 @@ mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --finding <id> --
 - `--ignore <text>` keeps it silent on the first attention whose blocker contains that text (case-insensitive), until the blocker, its PR or its head changes. Use it for a blocker a human has taken over. Repeat the flag for more than one.
 - `--until landed` keeps running after an attention, printing each new attention once, and exits only when the watch is done or reads keep failing.
 - `--max <minutes>` caps the whole watch; when it runs out it prints `MS-WATCH TIMEOUT` and exits 5. The stack is not landed then.
-- `--json` adds the full `mergestorm.stack_watch/v1` envelope as one JSON line after each marker line.
+- `--json` writes exactly one JSON document to stdout: the final `mergestorm.stack_watch/v1` envelope, or `{ stackId, outcome }` when there is none (a repeated failed read, `--max` timeout, or abort). The MS-WATCH marker lines go to stderr, so do not merge the streams (2>&1) before parsing stdout.
 
 ```bash
 mg stack watch 11111111-1111-4111-8111-111111111111 --head "$(git rev-parse HEAD)"

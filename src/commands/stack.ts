@@ -109,6 +109,7 @@ const STACK_USAGE = `usage:
     Loops stack wait with the cursor and stays silent while the stack is waiting or in progress.
     Prints one MS-WATCH ATTENTION line and exits 3 on attention or a repeated failed read; prints
     MS-WATCH LANDED and exits 0 once the watch is done. Run it as a background command.
+    --json writes exactly one JSON document to stdout and sends the MS-WATCH lines to stderr.
   mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]
   mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
   mergestorm stack restack <stack-id> [--json]

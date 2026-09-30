@@ -88,3 +88,29 @@ test("CLI stack watch prints one MS-WATCH ATTENTION line and exits 3 on a confli
   assert.equal(stdout, `MS-WATCH ATTENTION pr=7 head=${head} blocker="Conflict" repair=restack_conflict\n`);
   assert.match(stderr, /needs attention; it is not landed/);
 });
+
+test("CLI stack watch --json writes exactly one JSON document to stdout and the marker to stderr", async (t) => {
+  const server = createServer((request, response) => {
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify(request.url!.includes("/queue") ? { entries: [] } : { stacks: [] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const child = spawn(process.execPath, ["--import", "tsx/esm", new URL("../cli.ts", import.meta.url).pathname,
+    "stack", "watch", stackId, "--json"], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, MERGESTORM_API_KEY: "test", MERGESTORM_API_URL: `http://127.0.0.1:${address.port}` },
+  });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const status = await new Promise<number | null>((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
+  assert.equal(status, 0, stderr);
+  const document = JSON.parse(stdout);
+  assert.equal(document.stackId, stackId);
+  assert.equal(document.watch.done, true);
+  assert.equal(document.watch.reason, "not_found");
+  assert.doesNotMatch(stdout, /MS-WATCH/);
+  assert.match(stderr, new RegExp(`^MS-WATCH LANDED stack=${stackId} reason=not_found$`, "m"));
+});

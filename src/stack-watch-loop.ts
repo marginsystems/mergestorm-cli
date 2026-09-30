@@ -27,6 +27,7 @@ export type RunStackWatchOptions = {
   cursor?: StackWatchCursor;
   signal?: AbortSignal;
   write?: (line: string) => void;
+  writeMarker?: (line: string) => void;
   poll?: typeof pollStackWatch;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
@@ -71,13 +72,14 @@ export async function runStackWatch(
   const until = opts.until ?? "attention";
   const ignore = opts.ignore ?? [];
   const write = opts.write ?? ((line: string) => console.log(line));
+  const writeMarker = opts.json ? opts.writeMarker ?? ((line: string) => console.error(line)) : write;
   const poll = opts.poll ?? pollStackWatch;
   const now = opts.now ?? Date.now;
   const wait = opts.sleep ?? ((ms, signal) => sleep(ms, undefined, { signal }));
   const deadline = opts.maxMs !== undefined ? now() + opts.maxMs : Number.POSITIVE_INFINITY;
-  const emit = (line: string, envelope: StackWatchEnvelope | null) => {
-    write(line);
-    if (opts.json && envelope) write(JSON.stringify(envelope));
+  const emit = (line: string, envelope: StackWatchEnvelope | null, outcome: StackWatchOutcome | null) => {
+    writeMarker(line);
+    if (opts.json && outcome) write(JSON.stringify(envelope ?? { stackId: id, outcome }));
   };
   const pause = async (ms: number) => {
     const remaining = Math.min(ms, Math.max(0, deadline - now()));
@@ -90,14 +92,14 @@ export async function runStackWatch(
   let reportedKey: string | null = null;
 
   const landed = (envelope: StackWatchEnvelope): StackWatchLoopResult => {
-    emit(stackWatchLandedLine(envelope), envelope);
+    emit(stackWatchLandedLine(envelope), envelope, "landed");
     if (!opts.json) write(envelope.watch.message);
     return { outcome: "landed", exitCode: STACK_WATCH_EXIT.landed, envelope };
   };
   const failed = async (message: string, envelope: StackWatchEnvelope | null): Promise<StackWatchLoopResult | null> => {
     failures += 1;
     if (failures >= 2) {
-      emit(stackWatchFailedLine(id, message), envelope);
+      emit(stackWatchFailedLine(id, message), envelope, "failed");
       return { outcome: "failed", exitCode: STACK_WATCH_EXIT.attention, envelope };
     }
     await pause(STACK_WATCH_FAILED_RETRY_MS);
@@ -144,7 +146,7 @@ export async function runStackWatch(
         }
         const silent = [...ignoredKeys.values()].includes(key) || key === reportedKey;
         if (!silent) {
-          emit(stackWatchAttentionLine(envelope), envelope);
+          emit(stackWatchAttentionLine(envelope), envelope, until === "attention" ? "attention" : null);
           if (until === "attention") return { outcome: "attention", exitCode: STACK_WATCH_EXIT.attention, envelope };
           reportedKey = key;
         }
@@ -152,9 +154,12 @@ export async function runStackWatch(
       await pause(STACK_WATCH_RECHECK_MS);
     }
   } catch (err) {
-    if (isAbort(err, opts.signal)) return { outcome: "aborted", exitCode: 130, envelope: null };
+    if (isAbort(err, opts.signal)) {
+      if (opts.json) write(JSON.stringify({ stackId: id, outcome: "aborted" }));
+      return { outcome: "aborted", exitCode: 130, envelope: null };
+    }
     throw err;
   }
-  emit(stackWatchTimeoutLine(id, opts.maxMs ?? 0), null);
+  emit(stackWatchTimeoutLine(id, opts.maxMs ?? 0), null, "timeout");
   return { outcome: "timeout", exitCode: STACK_WATCH_EXIT.timeout, envelope: null };
 }

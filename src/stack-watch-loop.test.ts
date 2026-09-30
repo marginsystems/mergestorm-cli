@@ -142,6 +142,31 @@ test("stack watch exits 3 with MS-WATCH ATTENTION failed after a failed read and
   assert.deepEqual(lines, [`MS-WATCH ATTENTION failed stack=${stackId} error="socket hang up"`]);
 });
 
+test("stack watch --json writes one fallback outcome document after two failed reads", async () => {
+  const markers: string[] = [];
+  const { run, lines } = harness([
+    new Error("first read failed"),
+    new Error("second read failed"),
+  ], { json: true, writeMarker: (line) => markers.push(line) });
+  assert.equal((await run).outcome, "failed");
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines.join("\n")), { stackId, outcome: "failed" });
+  assert.equal(markers.length, 1);
+});
+
+test("stack watch --json writes the last envelope after a failed retry", async () => {
+  const failed = envelope({ status: "failed", assessment: "unavailable" });
+  const markers: string[] = [];
+  const { run, lines } = harness([
+    new Error("first read failed"),
+    new StackWatchError("second read failed", failed),
+  ], { json: true, writeMarker: (line) => markers.push(line) });
+  assert.equal((await run).outcome, "failed");
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines.join("\n")), failed);
+  assert.equal(markers.length, 1);
+});
+
 test("stack watch waits out a rate limit without counting it as a failure", async () => {
   const limited = envelope({ status: "rate_limited" });
   const failed = envelope({ status: "failed" });
@@ -214,13 +239,37 @@ test("stack watch --until landed prints each new attention once and exits 0 on l
   ]);
 });
 
-test("stack watch --json adds the full envelope as one JSON line after the marker", async () => {
+test("stack watch --json writes only the envelope to stdout and the marker to the marker stream", async () => {
   const attn = attention("Conflict");
-  const { run, lines } = harness([attn], { json: true });
+  const markers: string[] = [];
+  const { run, lines } = harness([attn], { json: true, writeMarker: (line) => markers.push(line) });
   await run;
-  assert.equal(lines.length, 2);
-  assert.match(lines[0]!, /^MS-WATCH ATTENTION pr=12 /);
-  assert.deepEqual(JSON.parse(lines[1]!), attn);
+  assert.deepEqual(JSON.parse(lines.join("\n")), attn);
+  assert.equal(markers.length, 1);
+  assert.match(markers[0]!, /^MS-WATCH ATTENTION pr=12 /);
+});
+
+test("stack watch --json --until landed writes one JSON document for the landed envelope", async () => {
+  const done = envelope({}, "landed");
+  const markers: string[] = [];
+  const { run, lines } = harness([attention("Conflict"), attention("CI failed"), done],
+    { json: true, until: "landed", writeMarker: (line) => markers.push(line) });
+  assert.equal((await run).exitCode, 0);
+  assert.deepEqual(JSON.parse(lines.join("\n")), done);
+  assert.deepEqual(markers, [
+    `MS-WATCH ATTENTION pr=12 head=${headA} blocker="Conflict" repair=none`,
+    `MS-WATCH ATTENTION pr=12 head=${headA} blocker="CI failed" repair=none`,
+    `MS-WATCH LANDED stack=${stackId} reason=landed`,
+  ]);
+});
+
+test("stack watch --json --max writes one outcome document on timeout", async () => {
+  const markers: string[] = [];
+  const { run, lines } = harness([new StackWatchTimeoutError(envelope()), new StackWatchTimeoutError(envelope())],
+    { json: true, maxMs: 1_500, writeMarker: (line) => markers.push(line) });
+  assert.equal((await run).exitCode, 5);
+  assert.deepEqual(JSON.parse(lines.join("\n")), { stackId, outcome: "timeout" });
+  assert.deepEqual(markers, [`MS-WATCH TIMEOUT stack=${stackId} after=0m`]);
 });
 
 test("stack watch --max stops with MS-WATCH TIMEOUT and exit 5", async () => {
@@ -247,11 +296,12 @@ test("stack watch --max clamps a failed-read retry to the remaining time", async
   assert.deepEqual(lines, [`MS-WATCH TIMEOUT stack=${stackId} after=0m`]);
 });
 
-test("stack watch returns aborted without a marker when the signal fires", async () => {
+test("stack watch --json writes one outcome document when aborted", async () => {
   const controller = new AbortController();
   const lines: string[] = [];
   const result = await runStackWatch({}, stackId, {
     signal: controller.signal,
+    json: true,
     write: (line) => lines.push(line),
     poll: async () => {
       controller.abort();
@@ -261,5 +311,6 @@ test("stack watch returns aborted without a marker when the signal fires", async
     },
   });
   assert.equal(result.outcome, "aborted");
-  assert.deepEqual(lines, []);
+  assert.deepEqual(JSON.parse(lines.join("\n")), { stackId, outcome: "aborted" });
+  assert.equal(lines.length, 1);
 });
