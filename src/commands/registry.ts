@@ -202,7 +202,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "mergestorm settings [--json]    Read the automation toggles (Config tab on a TTY)",
       "  [--auto-review on|off] [--auto-patch on|off] [--vortex-thinking on|off]",
       "  [--repo-overview on|off] [--review-unit-land on|off]",
-      "  [--cyclone-review-unit-land on|off] [--cyclone-skip-ci on|off]",
+      "  [--cyclone-skip-ci on|off]",
       "  [--cyclone-patch-unverified on|off]  Patch languages we cannot typecheck",
       "  [--vortex-seam on|off] [--vortex-skip-all-clear on|off]",
       "  [--auto-land on|off]  Auto land default for new stacks",

@@ -4,7 +4,6 @@ export const BEARER_SETTINGS = [
   { key: "vortex_show_thinking_traces", flag: "--vortex-thinking", label: "Vortex thinking traces" },
   { key: "repo_overview_enabled", flag: "--repo-overview", label: "Repo overview" },
   { key: "review_unit_land_prs_enabled", flag: "--review-unit-land", label: "Review Unit land PRs" },
-  { key: "cyclone_review_unit_land_prs_enabled", flag: "--cyclone-review-unit-land", label: "Cyclone Review Unit land PRs" },
   { key: "cyclone_skip_ci_enabled", flag: "--cyclone-skip-ci", label: "Skip CI on Cyclone commits" },
   { key: "cyclone_patch_unverified_languages", flag: "--cyclone-patch-unverified", label: "Patch languages we cannot typecheck" },
   { key: "vortex_auto_overflow_enabled", flag: "--vortex-auto-overflow", label: "Vortex auto overflow" },

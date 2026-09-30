@@ -926,12 +926,64 @@ test("seam findings on a stale head wait for the re-review", async () => {
   }
 });
 
-for (const seamState of ["approved", "none", "pending", "reviewing", "pending_rereview"]) {
+for (const seamState of ["approved", "none", "reviewing", "pending_rereview"]) {
   test(`seam ${seamState} is not a blocker`, async () => {
     const h = harness(seamUnit(stack(), seamState, HEAD));
     assert.equal((await timedOut(h.options)).blocker, null);
   });
 }
+
+test("a pending seam with no review running is attention on that member", async () => {
+  const h = harness(seamUnit(stack(), "pending", null));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Seam review pending, no review running");
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.headSha, HEAD);
+});
+
+const quotaSkipped = { status: "skipped", skip_reason: "quota_exceeded", pass: 1, head_sha: HEAD, phase: null,
+  started_at: null, stoppable: false, source: "pr_reviews" } as const;
+
+test("a quota-skipped Vortex review at the candidate head is attention no agent can clear", async () => {
+  const h = harness(stack([layer({ vortexStatus: "skipped", vortexReview: quotaSkipped })]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Review skipped, out of review quota");
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.headSha, HEAD);
+});
+
+test("a quota-skipped review stays named while Cyclone patches the PR", async () => {
+  const h = harness(stack([layer({ vortexStatus: "skipped", vortexReview: quotaSkipped, cycloneStatus: "patching",
+    agentRuns: [{ agent: "cyclone", status: "patching", sha: HEAD }] })]));
+  const result = await heldInProgress(h.options);
+  assert.equal(result.blocker, "Review skipped, out of review quota");
+  assert.equal(result.actAfter, "agents_idle");
+});
+
+test("other skip reasons and a quota skip at an older head are not blockers", () => {
+  for (const review of [{ ...quotaSkipped, skip_reason: "auto_review_off" }, { ...quotaSkipped, head_sha: NEXT },
+    { ...quotaSkipped, status: "reviewing" }] as const) {
+    assert.equal(stackBlockers(stack([layer({ vortexReview: review })])).attention, null, JSON.stringify(review));
+  }
+});
+
+test("a pending seam while its review runs is not a blocker", () => {
+  const blockers = stackBlockers(seamUnit(stack([layer(vortexBusy)]), "pending", null));
+  assert.equal(blockers.attention, null);
+  assert.equal(blockers.held, null);
+  assert.deepEqual(blockers.issues, []);
+});
+
+test("a pending seam with no review running stays named while Cyclone patches the PR", async () => {
+  const h = harness(seamUnit(stack([layer({ cycloneStatus: "patching",
+    agentRuns: [{ agent: "cyclone", status: "patching", sha: HEAD }] })]), "pending", null));
+  const result = await heldInProgress(h.options);
+  assert.equal(result.blocker, "Seam review pending, no review running");
+  assert.equal(result.actAfter, "agents_idle");
+  assert.deepEqual(result.waitingOn, ["cyclone"]);
+});
 
 test("seam findings before any member is promoted do not gate promotion", async () => {
   const h = harness(seamUnit(stack(), "findings", HEAD, []));
@@ -1144,6 +1196,82 @@ test("a failed land gate is still attention", async () => {
   assert.equal(landGateIsPending("ci_pending: settling idle project checks on abc1234"), true);
 });
 
+for (const reason of ["tempest_failed", "tempest_stopped"]) {
+  test(`land gate ${reason} names the blocker but offers no findings repair`, async () => {
+    const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
+    const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874,
+      landingBlockReason: `landing blocked: ${reason} on land PR #2874` }));
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, `landing blocked: ${reason} on land PR #2874`);
+    assert.equal(result.repair, null);
+  });
+}
+
+test("tempest findings on the land PR carry a tempest_findings repair on the land branch", async () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
+  const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874,
+    landingBlockReason: "landing blocked: tempest_findings on land PR #2874" }));
+  h.options.timeoutMs = 0;
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.repair?.kind, "tempest_findings");
+  assert.equal(result.repair?.prNumber, 2874);
+  assert.equal(result.repair?.branch, "mg-stack-79");
+  assert.equal(result.repair && "findings" in result.repair ? result.repair.findings : null,
+    "gh api repos/owner/repo/issues/2874/comments");
+  assert.match(result.repair!.steps, /ordinary git push \(no force\)/);
+  assert.match(result.repair!.steps, /verify each finding/);
+});
+
+test("a Tempest findings run on the land PR carries the same repair", () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1,
+    agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD }] });
+  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874 }));
+  assert.equal(blockers.attention?.blocker, "Tempest findings");
+  assert.equal(blockers.repair?.kind, "tempest_findings");
+});
+
+test("a failed Tempest run on the land PR has no findings to fix, so no findings repair", () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1,
+    agentRuns: [{ agent: "tempest", status: "failed", sha: HEAD }] });
+  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874 }));
+  assert.equal(blockers.attention?.blocker, "Tempest failed");
+  assert.equal(blockers.repair, null);
+});
+
+test("a land PR repair never names an undefined branch when the unit branch is unknown", () => {
+  const land = layer({ branch: undefined as unknown as string, parentBranch: "main", prNumber: 99, position: 1 });
+  const blockers = stackBlockers(unitStack([land], { state: "growing", landPrNumber: 99, branch: undefined,
+    landingBlockReason: "landing blocked: tempest_findings on land PR #99" }));
+  assert.equal(blockers.repair, null);
+});
+
+test("a tempest_findings queue bounce on the land PR carries the tempest_findings repair", () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
+  const entry = bounce({ bounceDetail: { kind: "tempest_findings", headSha: HEAD, prNumber: 2874,
+    message: "landing blocked: tempest_findings on land PR #2874" } });
+  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874 }), [entry]);
+  assert.equal(blockers.attention?.bounceKind, "tempest_findings");
+  assert.match(blockers.attention?.blocker ?? "", /^Tempest findings/);
+  assert.equal(blockers.repair?.kind, "tempest_findings");
+  assert.equal(blockers.repair?.branch, "mg-stack-79");
+});
+
+test("tempest findings on a land PR that Cyclone is patching hold in progress with no repair", () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1, cycloneStatus: "patching" });
+  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874,
+    landingBlockReason: "landing blocked: tempest_findings on land PR #2874" }));
+  assert.equal(blockers.attention, null);
+  assert.equal(blockers.repair, null);
+  assert.deepEqual(blockers.busy.map((entry) => entry.agent), ["cyclone"]);
+});
+
+test("tempest findings off the land PR get no tempest_findings repair", () => {
+  const other = layer({ branch: "feature", prNumber: 42, agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD }] });
+  assert.equal(stackBlockers(stack([other])).repair, null);
+});
+
 test("a stack that lands mid-wait ends the wait with watch done instead of timing out", async () => {
   const h = harness();
   let reads = 0;
@@ -1212,4 +1340,87 @@ test("a promoted member whose stack row reconcile dropped is never the live pare
     promotedHeadSha: HEAD, promotedAt: "", seamState: "approved", seamReviewedSha: null, openedAt: null, mergedAt: null,
     closedAt: null, additions: null, deletions: null, openAdditions: null, openDeletions: null }] });
   assert.equal(conflictLiveParent(s, l2), "mg-stack-7");
+});
+
+function disarmedStack(autoEnqueueWhenReady: boolean | undefined) {
+  return { ...stack(), ...(autoEnqueueWhenReady === undefined ? {} : { autoEnqueueWhenReady }) };
+}
+function disarmingBounce(overrides: Partial<MergeQueueEntryDto> = {}) {
+  return bounce({
+    bounceReason: "merge_failed",
+    bounceDetail: { kind: "merge_failed", prNumber: 42, headSha: NEXT, message: "merge-tree conflict at update-branch" },
+    ...overrides,
+  });
+}
+
+test("Auto land off after a merge_failed bounce returns attention with the bounce and a re-arm repair", async () => {
+  const entry = disarmingBounce();
+  const h = harness(disarmedStack(false), [entry]);
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Auto land off after merge_failed bounce");
+  assert.equal(result.bounceKind, "merge_failed");
+  assert.equal(result.prNumber, 42);
+  assert.deepEqual(result.issues.map((issue) => [issue.prNumber, issue.blocker]),
+    [[42, "merge failed — merge-tree conflict at update-branch"]]);
+  assert.equal(result.repair?.kind, "auto_land_off");
+  assert.match(result.repair?.steps ?? "", new RegExp(`mg stack set ${stack().id} --auto-land on`));
+  assert.equal(result.cursor.bounceId, entry.id);
+});
+
+test("Auto land off with no disarming bounce keeps waiting", async () => {
+  for (const entries of [[], [disarmingBounce({ bounceDetail: { kind: "ci_failure", headSha: NEXT } })],
+    ]) {
+    const result = await timedOut(harness(disarmedStack(false), entries).options);
+    assert.equal(result.blocker, null);
+    assert.deepEqual(result.issues, []);
+  }
+});
+
+test("a newer enqueue after a disarming bounce is not named as a disarm", () => {
+  const later = disarmingBounce({ id: "later", state: "queued", enqueuedAt: "2026-01-01T00:05:00Z",
+    bounceDetail: null, finishedAt: null });
+  const result = stackBlockers(disarmedStack(false), [disarmingBounce(), later]);
+  assert.equal(result.attention, null);
+  assert.deepEqual(result.issues, []);
+});
+
+test("a recorded bounced off reason names the entry it points at, not the newest bounce", () => {
+  const recorded = disarmingBounce({ id: "recorded", enqueuedAt: "2026-01-01T00:00:00Z" });
+  const newer = disarmingBounce({ id: "newer", enqueuedAt: "2026-01-01T00:05:00Z",
+    bounceReason: "ci_timeout", bounceDetail: { kind: "ci_timeout", prNumber: 42, headSha: NEXT, message: "timed out" } });
+  const result = stackBlockers({ ...disarmedStack(false),
+    autoLandOff: { reason: "bounced", entryId: "recorded", at: "2026-01-01T00:01:00Z" } }, [recorded, newer]);
+  assert.equal(result.attention?.blocker, "Auto land off after merge_failed bounce");
+  assert.equal(result.attention?.bounceKind, "merge_failed");
+});
+
+test("a recorded off reason other than bounced keeps a newest disarming bounce out of attention", () => {
+  for (const autoLandOff of [
+    { reason: "user" as const, entryId: null, at: "2026-01-01T00:10:00Z" },
+    { reason: "archive" as const, entryId: null, at: "2026-01-01T00:10:00Z" },
+    { reason: "cancelled" as const, entryId: "other", at: "2026-01-01T00:10:00Z" },
+    null,
+  ]) {
+    const result = stackBlockers({ ...disarmedStack(false), autoLandOff }, [disarmingBounce()]);
+    assert.equal(result.attention, null, JSON.stringify(autoLandOff));
+    assert.deepEqual(result.issues, []);
+  }
+});
+
+test("a recorded bounced off reason whose entry is not listed does not name another bounce", () => {
+  const entry = disarmingBounce();
+  const result = stackBlockers({ ...disarmedStack(false),
+    autoLandOff: { reason: "bounced", entryId: "gone", at: "2026-01-01T00:01:00Z" } }, [entry]);
+  assert.equal(result.attention, null);
+  assert.equal(result.repair, null);
+  assert.deepEqual(result.issues, []);
+});
+
+test("a disarming bounce with Auto land re-armed keeps waiting", async () => {
+  for (const armed of [true, undefined]) {
+    const result = await timedOut(harness(disarmedStack(armed), [disarmingBounce()]).options);
+    assert.equal(result.blocker, null);
+    assert.deepEqual(result.issues, []);
+  }
 });

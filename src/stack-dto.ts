@@ -36,6 +36,10 @@ export function restackRetryPending(
  * dependency-free and byte-for-byte aligned with the canonical wire contract.
  */
 
+export const AUTO_LAND_OFF_REASONS = ["user", "archive", "watcher", "cancelled", "landed", "bounced"] as const;
+
+export type AutoLandOffReason = (typeof AUTO_LAND_OFF_REASONS)[number];
+
 export type StackBranchState =
   | "clean"
   | "needs_restack"
@@ -195,6 +199,7 @@ export type StackLayerChecks = {
   pending: number;
   failure: number;
   failingName: string | null;
+  selfHosted?: number;
   /**
    * True when the persisted `ci_checks` carries a `namedRuns` seed (enrich
    * writes it so CI webhook deliveries fold into the snapshot). Pre-seeding
@@ -401,6 +406,7 @@ export type StackDto = {
    * Missing on older payloads is off.
    */
   autoEnqueueWhenReady?: boolean;
+  autoLandOff?: { reason: AutoLandOffReason; entryId: string | null; at: string } | null;
   /**
    * Auto land Settling certificate. The stacks watcher publishes the identity
    * of the settle clock it actually started (action, exact PR and head, server

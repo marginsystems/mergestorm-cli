@@ -299,7 +299,6 @@ const SETTINGS_BODY = {
   vortex_show_thinking_traces: true,
   repo_overview_enabled: false,
   review_unit_land_prs_enabled: true,
-  cyclone_review_unit_land_prs_enabled: false,
   cyclone_skip_ci_enabled: true,
   cyclone_patch_unverified_languages: false,
   vortex_seam_specialist_enabled: true,
