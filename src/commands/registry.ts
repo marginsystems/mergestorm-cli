@@ -264,6 +264,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "mergestorm stack list [--json]  List registered stacks",
       "mergestorm stack status <stack-id> [--json]  Enriched stack status",
       "mergestorm stack wait <stack-id> [--json] [--timeout <s>]  Wait for stack attention (default 45s, max 300s; 0 = one snapshot, no wait). --json: one document on stdout; timeout notice on stderr, exit 5",
+      "mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--json]  Background watcher: silent while waiting; MS-WATCH ATTENTION exits 3, MS-WATCH LANDED exits 0",
       "mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]  Per-stack policy",
       "mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off]  Import an open PR chain",
       "mergestorm stack restack <stack-id>   Restack stack descendants",

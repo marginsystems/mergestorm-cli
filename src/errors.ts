@@ -23,7 +23,8 @@ export type CommandErrorCode =
   | "supabase_unconfigured"
   | "cyclone_not_connected"
   | "busy"
-  | "adopt_failed";
+  | "adopt_failed"
+  | "stack_attention";
 
 /** Stable one-shot exit codes for machine callers of `mergestorm review`. */
 export const REVIEW_EXIT = {

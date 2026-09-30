@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.28`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.29`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,7 +48,7 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.28                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.29                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
@@ -98,9 +98,29 @@ mergestorm stack adopt <owner/repo>#<pr>  Import an existing open PR chain
 mergestorm stack restack <stack-id>  Restack descendants
 mergestorm stack land <stack-id>     Land / promote (into review unit when present)
 mergestorm stack wait <stack-id> [--timeout <s>]  Wait for stack attention (default 45s, max 300s; 0 = one snapshot, no wait)
+mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <text>] [--max <min>] [--head <sha>] [--json]  Background stack watcher (see below)
 mergestorm stack reset --force  Clear local authoring state (not branches/PRs)
 mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --preview   List a Vortex review's finding ids and the seam gate
 mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --finding <id> --reason <text>  Dismiss verified-wrong findings (`--all` for the whole review, `--evidence <url>`, `--json`)
+```
+
+### Watching a stack in the background
+
+`mg stack watch <stack-id>` is for agents that cannot hold a long turn open. Run it as a background command, have your host notify you on output matching `MS-WATCH (ATTENTION|LANDED)`, and end the turn. While it waits it spends no model tokens and talks only to the Mergestorm API, not GitHub.
+
+- It calls `stack wait` in slices of at most 300s and carries the cursor (`enrolled_head_sha`, `after_finished_at`, `bounce_id`) from one slice to the next.
+- It prints nothing while the stack is `waiting` or `in_progress`, including while Cyclone or Vortex holds the blocked PR (`busy[]`, `actAfter: "agents_idle"`).
+- On attention it prints `MS-WATCH ATTENTION pr=<n> head=<sha> blocker="<blocker>" repair=<kind>` and exits 3.
+- When the watch is done it prints `MS-WATCH LANDED stack=<id> reason=<reason>` and exits 0. Only `reason=landed` is a landed stack; `closed`, `archived` and `not_found` end the watch without a land.
+- A failed read is retried once. If the retry fails too, it prints `MS-WATCH ATTENTION failed stack=<id> error="<message>"` and exits 3. A rate limit is waited out.
+- `--head <sha>` enrolls the SHA you just pushed. After fixing a blocker, restart the watcher with it.
+- `--ignore <text>` keeps it silent on the first attention whose blocker contains that text (case-insensitive), until the blocker, its PR or its head changes. Use it for a blocker a human has taken over. Repeat the flag for more than one.
+- `--until landed` keeps running after an attention, printing each new attention once, and exits only when the watch is done or reads keep failing.
+- `--max <minutes>` caps the whole watch; when it runs out it prints `MS-WATCH TIMEOUT` and exits 5. The stack is not landed then.
+- `--json` adds the full `mergestorm.stack_watch/v1` envelope as one JSON line after each marker line.
+
+```bash
+mg stack watch 11111111-1111-4111-8111-111111111111 --head "$(git rev-parse HEAD)"
 ```
 
 ### Dismissing a finding

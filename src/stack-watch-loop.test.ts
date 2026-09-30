@@ -1,0 +1,265 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  runStackWatch,
+  STACK_WATCH_EXIT,
+  STACK_WATCH_SLICE_MS,
+  type RunStackWatchOptions,
+} from "./stack-watch-loop.js";
+import {
+  StackWatchError,
+  StackWatchTimeoutError,
+  type PollStackWatchOptions,
+  type StackWatchCursor,
+  type StackWatchEnvelope,
+} from "./stack-watch.js";
+import { stackWatchObligation } from "./stack-watch-obligation.js";
+
+const stackId = "11111111-1111-4111-8111-111111111111";
+const headA = "a".repeat(40);
+const headB = "b".repeat(40);
+
+function envelope(overrides: Partial<StackWatchEnvelope> = {}, terminal: "landed" | "not_found" | null = null): StackWatchEnvelope {
+  const cursor: StackWatchCursor = overrides.cursor ?? { stackId, enrolledHeadSha: headA };
+  const base: StackWatchEnvelope = {
+    schema: "mergestorm.stack_watch/v1", status: "waiting", stackId, blocker: null, bounceKind: null,
+    prNumber: 12, headSha: headA, cursor, issues: [], currentCandidate: null, assessment: "available",
+    busy: [], actAfter: null, waitingOn: [], agents: null, repair: null, landGatePending: null,
+    watch: stackWatchObligation({ stackId, terminal, cursor }),
+  };
+  return { ...base, ...overrides, cursor };
+}
+
+function attention(blocker: string, overrides: Partial<StackWatchEnvelope> = {}): StackWatchEnvelope {
+  return envelope({ status: "attention", blocker, ...overrides });
+}
+
+type Step = StackWatchEnvelope | Error;
+
+function harness(steps: Step[], opts: Partial<RunStackWatchOptions> = {}) {
+  let clock = 0;
+  const lines: string[] = [];
+  const calls: PollStackWatchOptions[] = [];
+  const sleeps: number[] = [];
+  const run = runStackWatch({}, stackId, {
+    write: (line) => lines.push(line),
+    now: () => clock,
+    sleep: async (ms) => { sleeps.push(ms); clock += ms; },
+    poll: async (_cfg, id, pollOpts = {}) => {
+      assert.equal(id, stackId);
+      calls.push(pollOpts);
+      const step = steps.shift();
+      if (!step) throw new Error("poll called more often than scripted");
+      clock += 1_000;
+      if (step instanceof Error) throw step;
+      return step;
+    },
+    ...opts,
+  });
+  return { run, lines, calls, sleeps };
+}
+
+test("stack watch stays silent across timeouts and exits 3 with one line on attention", async () => {
+  const waiting = envelope({ status: "in_progress", busy: [{ prNumber: 12, headSha: headA, agent: "cyclone", blocker: "Conflict" }] });
+  const repair = { kind: "restack_conflict" as const, prNumber: 12, headSha: headB, branch: "feat/a", liveParent: "mg-stack-9",
+    files: ["a.ts"], steps: "Merge mg-stack-9" };
+  const { run, lines, calls } = harness([
+    new StackWatchTimeoutError(waiting),
+    new StackWatchTimeoutError(envelope({ status: "waiting", actAfter: "agents_idle" })),
+    attention("Conflict", { headSha: headB, repair }),
+  ]);
+  const result = await run;
+  assert.equal(result.outcome, "attention");
+  assert.equal(result.exitCode, STACK_WATCH_EXIT.attention);
+  assert.equal(result.exitCode, 3);
+  assert.deepEqual(lines, [`MS-WATCH ATTENTION pr=12 head=${headB} blocker="Conflict" repair=restack_conflict`]);
+  assert.equal(calls.length, 3);
+  for (const call of calls) assert.equal(call.timeoutMs, STACK_WATCH_SLICE_MS);
+  assert.ok(STACK_WATCH_SLICE_MS <= 300_000);
+});
+
+test("stack watch carries the cursor from each slice into the next call", async () => {
+  const first: StackWatchCursor = { stackId, enrolledHeadSha: headA };
+  const second: StackWatchCursor = { stackId, enrolledHeadSha: headA, afterFinishedAt: "2026-09-30T10:00:00.000Z", bounceId: "bounce-1" };
+  const { run, calls } = harness([
+    new StackWatchTimeoutError(envelope({ cursor: first })),
+    new StackWatchTimeoutError(envelope({ cursor: second })),
+    envelope({ cursor: second }, "landed"),
+  ], { cursor: { stackId, enrolledHeadSha: headB } });
+  await run;
+  assert.deepEqual(calls.map((call) => call.cursor), [{ stackId, enrolledHeadSha: headB }, first, second]);
+});
+
+test("stack watch omits the cursor on the first call when none was given", async () => {
+  const { run, calls } = harness([envelope({}, "landed")]);
+  await run;
+  assert.equal(calls[0]!.cursor, undefined);
+});
+
+test("stack watch prints MS-WATCH LANDED and exits 0 when the watch is done", async () => {
+  const { run, lines } = harness([new StackWatchTimeoutError(envelope()), envelope({}, "landed")]);
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.equal(result.exitCode, 0);
+  assert.equal(lines[0], `MS-WATCH LANDED stack=${stackId} reason=landed`);
+  assert.match(lines[1]!, /This stack is landed/);
+  assert.equal(lines.length, 2);
+});
+
+test("stack watch treats a vanished stack as done with reason not_found", async () => {
+  const gone = envelope({ status: "failed", assessment: "unavailable" }, "not_found");
+  const { run, lines } = harness([new StackWatchError("Stack not found or not owned by the current user", gone)]);
+  const result = await run;
+  assert.equal(result.exitCode, 0);
+  assert.equal(lines[0], `MS-WATCH LANDED stack=${stackId} reason=not_found`);
+});
+
+test("stack watch retries one failed read, then keeps watching silently", async () => {
+  const failed = envelope({ status: "failed", assessment: "unavailable" });
+  const { run, lines, calls } = harness([
+    new StackWatchError("Stack snapshot missing or invalid", failed),
+    new StackWatchTimeoutError(envelope()),
+    new StackWatchError("Stack snapshot missing or invalid", failed),
+    envelope({}, "landed"),
+  ]);
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.equal(calls.length, 4);
+  assert.deepEqual(lines.filter((line) => line.includes("failed")), []);
+});
+
+test("stack watch exits 3 with MS-WATCH ATTENTION failed after a failed read and a failed retry", async () => {
+  const failed = envelope({ status: "failed", assessment: "unavailable" });
+  const { run, lines, calls, sleeps } = harness([
+    new StackWatchError("Stack poll failed (HTTP 500)", failed),
+    new Error("socket hang up"),
+  ]);
+  const result = await run;
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.exitCode, 3);
+  assert.equal(calls.length, 2);
+  assert.equal(sleeps.length, 1);
+  assert.deepEqual(lines, [`MS-WATCH ATTENTION failed stack=${stackId} error="socket hang up"`]);
+});
+
+test("stack watch waits out a rate limit without counting it as a failure", async () => {
+  const limited = envelope({ status: "rate_limited" });
+  const failed = envelope({ status: "failed" });
+  const { run, sleeps, lines } = harness([
+    new StackWatchError("Stack poll failed (HTTP 500)", failed),
+    new StackWatchError("Stack poll failed (HTTP 429)", limited, undefined, 12),
+    envelope({}, "landed"),
+  ]);
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.ok(sleeps.includes(12_000));
+  assert.equal(lines[0], `MS-WATCH LANDED stack=${stackId} reason=landed`);
+});
+
+test("stack watch --ignore stays silent on the handed-off blocker until it changes", async () => {
+  const { run, lines, calls } = harness([
+    attention("Tempest findings"),
+    attention("Tempest findings"),
+    new StackWatchTimeoutError(envelope()),
+    attention("Tempest findings"),
+    attention("CI failed — lint"),
+  ], { ignore: ["tempest"] });
+  const result = await run;
+  assert.equal(result.outcome, "attention");
+  assert.equal(calls.length, 5);
+  assert.deepEqual(lines, [`MS-WATCH ATTENTION pr=12 head=${headA} blocker="CI failed — lint" repair=none`]);
+});
+
+test("stack watch --ignore silences a distinct blocker for each repeated flag", async () => {
+  const { run, lines } = harness([
+    attention("Tempest findings"),
+    attention("Draft PR", { prNumber: 13 }),
+    envelope({}, "landed"),
+  ], { ignore: ["Tempest", "Draft"] });
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.deepEqual(lines, [`MS-WATCH LANDED stack=${stackId} reason=landed`, "This stack is landed. The watch is done; stop calling stack_wait for it."]);
+});
+
+test("stack watch --ignore stops ignoring once the same blocker moves to a new head", async () => {
+  const { run, lines } = harness([
+    attention("Conflict"),
+    attention("Conflict", { headSha: headB }),
+  ], { ignore: ["Conflict"] });
+  const result = await run;
+  assert.equal(result.exitCode, 3);
+  assert.deepEqual(lines, [`MS-WATCH ATTENTION pr=12 head=${headB} blocker="Conflict" repair=none`]);
+});
+
+test("stack watch pauses between polls while an ignored attention persists", async () => {
+  const { run, sleeps } = harness([attention("Draft PR"), attention("Draft PR"), envelope({}, "landed")], { ignore: ["draft"] });
+  await run;
+  assert.equal(sleeps.length, 2);
+  for (const ms of sleeps) assert.ok(ms >= 30_000);
+});
+
+test("stack watch --until landed prints each new attention once and exits 0 on landed", async () => {
+  const { run, lines } = harness([
+    attention("Conflict"),
+    attention("Conflict"),
+    attention("CI failed"),
+    envelope({}, "landed"),
+  ], { until: "landed" });
+  const result = await run;
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(lines.filter((line) => line.startsWith("MS-WATCH")), [
+    `MS-WATCH ATTENTION pr=12 head=${headA} blocker="Conflict" repair=none`,
+    `MS-WATCH ATTENTION pr=12 head=${headA} blocker="CI failed" repair=none`,
+    `MS-WATCH LANDED stack=${stackId} reason=landed`,
+  ]);
+});
+
+test("stack watch --json adds the full envelope as one JSON line after the marker", async () => {
+  const attn = attention("Conflict");
+  const { run, lines } = harness([attn], { json: true });
+  await run;
+  assert.equal(lines.length, 2);
+  assert.match(lines[0]!, /^MS-WATCH ATTENTION pr=12 /);
+  assert.deepEqual(JSON.parse(lines[1]!), attn);
+});
+
+test("stack watch --max stops with MS-WATCH TIMEOUT and exit 5", async () => {
+  const { run, lines, calls } = harness([
+    new StackWatchTimeoutError(envelope()),
+    new StackWatchTimeoutError(envelope()),
+  ], { maxMs: 1_500 });
+  const result = await run;
+  assert.equal(result.outcome, "timeout");
+  assert.equal(result.exitCode, 5);
+  assert.equal(calls[0]!.timeoutMs, 1_500);
+  assert.deepEqual(lines, [`MS-WATCH TIMEOUT stack=${stackId} after=0m`]);
+});
+
+test("stack watch --max clamps a failed-read retry to the remaining time", async () => {
+  const failed = envelope({ status: "failed", assessment: "unavailable" });
+  const { run, lines, sleeps } = harness([
+    new StackWatchError("Stack poll failed (HTTP 500)", failed),
+  ], { maxMs: 10_000 });
+  const result = await run;
+  assert.equal(result.outcome, "timeout");
+  assert.equal(result.exitCode, 5);
+  assert.deepEqual(sleeps, [9_000]);
+  assert.deepEqual(lines, [`MS-WATCH TIMEOUT stack=${stackId} after=0m`]);
+});
+
+test("stack watch returns aborted without a marker when the signal fires", async () => {
+  const controller = new AbortController();
+  const lines: string[] = [];
+  const result = await runStackWatch({}, stackId, {
+    signal: controller.signal,
+    write: (line) => lines.push(line),
+    poll: async () => {
+      controller.abort();
+      const err = new Error("aborted");
+      err.name = "AbortError";
+      throw err;
+    },
+  });
+  assert.equal(result.outcome, "aborted");
+  assert.deepEqual(lines, []);
+});

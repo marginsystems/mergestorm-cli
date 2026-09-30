@@ -537,6 +537,22 @@ export type MergeQueueBounceDetail = {
   warning?: string;
 };
 
+export type MergeQueueBatchState =
+  | "verifying"
+  | "landing"
+  | "landed"
+  | "stopped"
+  | "bounced"
+  | "abandoned";
+
+export type MergeQueueEntryBatchDto = {
+  id: string;
+  position: number;
+  size: number;
+  state: MergeQueueBatchState;
+  landedCount: number;
+};
+
 export type MergeQueueEntryDto = {
   id: string;
   stackId: string;
@@ -558,5 +574,6 @@ export type MergeQueueEntryDto = {
   /** Target tip included in the verified PR head. Null until recorded. */
   verifyBaseSha: string | null;
   cancelRequestedAt?: string | null;
+  batch?: MergeQueueEntryBatchDto | null;
   finishedAt: string | null;
 };

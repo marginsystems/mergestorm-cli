@@ -62,6 +62,7 @@ import {
   StackWatchTimeoutError,
   type StackWatchEnvelope,
 } from "../stack-watch.js";
+import { runStackWatch, STACK_WATCH_EXIT, type StackWatchUntil } from "../stack-watch-loop.js";
 import { isMgParkBranch, planSubmitLayerBases } from "../submit-pr-base.js";
 import { ansi } from "../ui/ansi.js";
 import { runLineTabsBrowser } from "../ui/line-tabs.js";
@@ -104,6 +105,10 @@ const STACK_USAGE = `usage:
   mergestorm stack wait <stack-id> [--json] [--timeout <s>]
     --json writes exactly one JSON document to stdout. The timeout or error notice goes to stderr
     (exit 5 on timeout), so do not merge the streams (2>&1) before parsing stdout.
+  mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--json]
+    Loops stack wait with the cursor and stays silent while the stack is waiting or in progress.
+    Prints one MS-WATCH ATTENTION line and exits 3 on attention or a repeated failed read; prints
+    MS-WATCH LANDED and exits 0 once the watch is done. Run it as a background command.
   mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]
   mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
   mergestorm stack restack <stack-id> [--json]
@@ -1253,6 +1258,65 @@ export async function cmdStackWait(
   }
 }
 
+export async function cmdStackWatch(
+  args: string[],
+  deps: {
+    loadConfig?: typeof loadConfig;
+    runStackWatch?: typeof runStackWatch;
+    signal?: AbortSignal;
+  } = {},
+): Promise<void> {
+  const usage = "usage: mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--json]";
+  const fail = (detail?: string) => new CommandError(detail ? `${usage}\n${detail}` : usage, REVIEW_EXIT.usage, "usage");
+  const positional: string[] = [];
+  const ignore: string[] = [];
+  let until: StackWatchUntil = "attention";
+  let maxMinutes: number | undefined;
+  let head: string | undefined;
+  let json = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const flag = arg.startsWith("--") && arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    const value = () => {
+      const raw = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[++i];
+      if (raw === undefined || !raw.trim()) throw fail(`${flag} needs a value`);
+      return raw.trim();
+    };
+    if (arg === "--json") json = true;
+    else if (flag === "--until") {
+      const picked = value();
+      if (picked !== "attention" && picked !== "landed") throw fail("--until must be attention or landed");
+      until = picked;
+    } else if (flag === "--ignore") ignore.push(value());
+    else if (flag === "--max") {
+      maxMinutes = Number(value());
+      if (!Number.isFinite(maxMinutes) || maxMinutes <= 0) throw fail("--max must be a positive number of minutes");
+    } else if (flag === "--head") {
+      head = value();
+      if (!/^[0-9a-f]{7,40}$/i.test(head)) throw fail("--head must be a commit SHA");
+    } else if (arg.startsWith("-")) throw fail();
+    else positional.push(arg);
+  }
+  if (positional.length !== 1) throw fail();
+  const stackId = requireStackId(positional[0], usage);
+  const cfg = await (deps.loadConfig ?? loadConfig)();
+  const result = await (deps.runStackWatch ?? runStackWatch)(cfg, stackId, {
+    until,
+    ignore,
+    json,
+    signal: deps.signal,
+    ...(maxMinutes !== undefined ? { maxMs: maxMinutes * 60_000 } : {}),
+    ...(head ? { cursor: { stackId: stackId.trim().toLowerCase(), enrolledHeadSha: head.toLowerCase() } } : {}),
+  });
+  if (result.exitCode === STACK_WATCH_EXIT.landed) return;
+  const reason = result.outcome === "timeout"
+    ? `Stopped watching stack ${stackId} after --max; it is not landed.`
+    : result.outcome === "aborted"
+      ? `Stopped watching stack ${stackId}; it is not landed.`
+      : `Stack ${stackId} needs attention; it is not landed.`;
+  throw new CommandError(reason, result.exitCode, result.outcome === "timeout" ? "review_timeout" : "stack_attention");
+}
+
 export async function cmdStackStatus(
   args: string[],
   deps: {
@@ -1481,6 +1545,7 @@ export async function cmdStack(args: string[], options: { signal?: AbortSignal }
   if (sub === "list" || sub === "ls") return cmdStackList(rest);
   if (sub === "status") return cmdStackStatus(rest);
   if (sub === "wait") return cmdStackWait(rest, { signal: options.signal });
+  if (sub === "watch") return cmdStackWatch(rest, { signal: options.signal });
   if (sub === "set") return cmdStackSet(rest);
   if (sub === "adopt") return cmdStackAdopt(rest);
   if (sub === "restack") return cmdStackRestack(rest);

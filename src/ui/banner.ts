@@ -130,6 +130,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.28": [
     "stack watch reads the Auto land off reason",
   ],
+  "0.3.29": [
+    "mg stack watch waits in the background",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */
