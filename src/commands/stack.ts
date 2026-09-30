@@ -1,6 +1,7 @@
 import { stackBlockers, stackBlockersSummary, type StackHeldBlocker, type StackRepairHint } from "../stack-blockers.js";
 import {
   STACK_WATCH_NOT_DONE_SENTENCE,
+  STACK_WATCH_NOTIFY_PATTERN,
   stackTerminalReason,
   stackWatchObligation,
   type StackWatchObligation,
@@ -87,7 +88,10 @@ export function stackWatchTextLines(watch: StackWatchObligation | null | undefin
   if (watch.done) return [watch.message];
   const next = watch.next;
   return [
-    ...(next ? [`Next: ${next.command} (MCP: stack_wait ${JSON.stringify(next.args)})`] : []),
+    ...(next ? [
+      `Next: ${next.background} as a background command (notify on ${STACK_WATCH_NOTIFY_PATTERN}, then end your turn)`,
+      `Or poll: ${next.command} (MCP: stack_wait ${JSON.stringify(next.args)})`,
+    ] : []),
     STACK_WATCH_NOT_DONE_SENTENCE,
   ];
 }

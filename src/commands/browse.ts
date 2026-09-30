@@ -251,6 +251,7 @@ export async function openTabsBrowser(initial: TabId): Promise<void> {
           used: me.usage.standard.used,
           limit: me.usage.standard.limit,
           bonusRemaining: me.usage.bonus?.remaining,
+          surge: me.usage.surge,
           resetsAt: me.resets_at,
           jobs: jobs.slice(0, 5).map(toPanelJob),
           jobsError: jobsError ?? undefined,

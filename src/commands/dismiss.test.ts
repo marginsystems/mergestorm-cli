@@ -141,8 +141,8 @@ test("formatDismissResult names the gate and the next command", () => {
     until: "landed",
     reason: "unread",
     message: "",
-    next: { tool: "stack_wait", args: { stack_id: "s", timeout_s: 45 }, command: "mg stack wait s --json" },
+    next: { tool: "stack_wait", args: { stack_id: "s", timeout_s: 45 }, command: "mg stack wait s --json", background: "mg stack watch s" },
   });
   assert.match(text, /Seam gate: cleared/);
-  assert.match(text, /Next: mg stack wait s --json/);
+  assert.match(text, /Next: mg stack watch s as a background command, or mg stack wait s --json/);
 });

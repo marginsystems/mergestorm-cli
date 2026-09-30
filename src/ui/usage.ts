@@ -103,6 +103,25 @@ export function usageBarWidth(columns: number): number {
   return Math.max(8, frameWidth(80, columns) - 13);
 }
 
+export type SurgeUsageSummary = {
+  includedMinutes: number;
+  usedMinutes: number;
+  walletMinutes: number;
+};
+
+function formatMinutes(value: number): string {
+  return value.toLocaleString("en-US", { maximumFractionDigits: 1 });
+}
+
+export function formatSurgeSummary(surge: SurgeUsageSummary): string {
+  const wallet = `wallet ${formatMinutes(surge.walletMinutes)} min`;
+  if (surge.includedMinutes <= 0) return `Surge: ${wallet}`;
+  return (
+    `Surge: ${formatMinutes(surge.usedMinutes)} of ${formatMinutes(surge.includedMinutes)} included min this period` +
+    ` · ${wallet}`
+  );
+}
+
 export type UsagePanelJob = {
   job: string;
   verdict: string;
@@ -117,6 +136,7 @@ export type UsagePanelInput = {
   used: number;
   limit: number | null;
   bonusRemaining?: number;
+  surge?: SurgeUsageSummary;
   resetsAt: string | null | undefined;
   jobs: UsagePanelJob[];
   /** When the jobs fetch failed, show this instead of "No review jobs yet." */
@@ -149,6 +169,7 @@ export function formatUsagePanel(input: UsagePanelInput): string[] {
     ...(input.bonusRemaining == null
       ? []
       : [`  Bonus credits: ${input.bonusRemaining} remaining`]),
+    ...(input.surge ? [`  ${formatSurgeSummary(input.surge)}`] : []),
     "",
   ];
 

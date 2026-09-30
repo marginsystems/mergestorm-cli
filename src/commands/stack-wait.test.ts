@@ -34,7 +34,8 @@ test("stack wait prints one human summary and defaults to 45 seconds", async (t)
   const lines = String(log.mock.calls[0]!.arguments[0]).split("\n");
   assert.equal(lines[0], `Stack ${stackId} · attention · blocked: #12 Conflict`);
   assert.equal(lines[1], "Repair #12 restack_conflict (files: src/a.ts): Merge mg-stack-79 into feat/c");
-  assert.equal(lines[2], `Next: mg stack wait ${stackId} --json (MCP: stack_wait {"stack_id":"${stackId}","enrolled_head_sha":"enrolled","timeout_s":45})`);
+  assert.equal(lines[2], `Next: mg stack watch ${stackId} as a background command (notify on MS-WATCH (ATTENTION|LANDED), then end your turn)`);
+  assert.equal(lines[3], `Or poll: mg stack wait ${stackId} --json (MCP: stack_wait {"stack_id":"${stackId}","enrolled_head_sha":"enrolled","timeout_s":45})`);
   assert.equal(lines.at(-1), STACK_WATCH_NOT_DONE_SENTENCE);
 });
 

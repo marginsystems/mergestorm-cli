@@ -1016,6 +1016,7 @@ test("cmdStackSubmit --json stdout is one JSON value without park/push progress 
   assert.equal(body.watch.done, false);
   assert.deepEqual(body.watch.next, {
     tool: "stack_wait", args: { stack_id: STACK_A, timeout_s: 45 }, command: `mg stack wait ${STACK_A} --json`,
+    background: `mg stack watch ${STACK_A}`,
   });
   assert.match(captured.stderr.join("\n"), /Pushing /);
   assert.match(captured.stderr.join("\n"), /Ensuring upper-park/);

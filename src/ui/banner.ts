@@ -136,6 +136,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.30": [
     "stack watch --json prints one JSON document",
   ],
+  "0.3.31": [
+    "every stack Next line offers mg stack watch",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

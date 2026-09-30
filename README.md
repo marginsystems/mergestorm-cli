@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.30`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.31`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,7 +48,7 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.30                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.31                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
@@ -132,7 +132,7 @@ Use `mergestorm dismiss` when a Vortex finding is wrong and you have checked it 
 - Retrying the same dismissal is safe; it reports the earlier record.
 - The seam gate clears only when every finding of that integration review is dismissed and the review is still the current seam verdict. CI, other reviews and Auto land policy still apply.
 - Vortex does not raise a dismissed finding again on the same diff (the same head, or a restack with an unchanged diff).
-- With `--json`, the result carries `gate` and, for a stack PR, `watch.next` (the next `stack_wait` call).
+- With `--json`, the result carries `gate` and, for a stack PR, `watch.next` (the next `stack_wait` call, plus `watch.next.background`, the `mg stack watch` command to run in the background instead).
 
 `mg` is a short alias for `mergestorm` (same binary), e.g. `mg stack create`. Happy path: **create → commit → submit → restack → land**. On review-unit stacks, `stack land` **promotes** the tip into the unit (same gates as the dashboard); otherwise it lands the bottom open PR. `stack adopt` is for importing a chain that already exists on GitHub (legacy / Graphite). Restack/land use the same login key (`/api/v1/stacks`). Unattended landing is `mg queue add`.
 

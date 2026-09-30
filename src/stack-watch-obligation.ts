@@ -3,6 +3,12 @@ import type { StackDto } from "./stack-dto.js";
 export const STACK_WATCH_NOT_DONE_SENTENCE =
   "This stack is not landed. Your task is not done. Call stack_wait again with this cursor.";
 
+export const STACK_WATCH_NOTIFY_PATTERN = "MS-WATCH (ATTENTION|LANDED)";
+
+export function stackWatchBackgroundCommand(stackId: string): string {
+  return `mg stack watch ${stackId}`;
+}
+
 export type StackWatchDoneReason = "landed" | "closed" | "archived" | "not_found";
 
 export type StackWatchReason = StackWatchDoneReason | "open" | "attention" | "unread" | "rate_limited" | "failed";
@@ -19,6 +25,7 @@ export type StackWatchNext = {
   tool: "stack_wait";
   args: StackWatchNextArgs;
   command: string;
+  background: string;
 };
 
 export type StackWatchObligation = {
@@ -99,8 +106,10 @@ export function stackWatchObligation(input: StackWatchObligationInput): StackWat
     : input.status === "failed"
       ? "failed"
       : input.attention ? "attention" : input.unread ? "unread" : "open";
+  const background = stackWatchBackgroundCommand(input.stackId);
   const parts = [
     STACK_WATCH_NOT_DONE_SENTENCE,
+    `If you cannot hold a long turn open, run \`${background}\` as a background command instead, notify on output matching ${STACK_WATCH_NOTIFY_PATTERN}, and end your turn: it keeps calling stack_wait for you, stays silent while the stack waits, and wakes you on attention or when the watch is done.`,
     `Watch stack ${input.stackId} as a whole until it lands or the human takes it back. A clean push, a submit, or one merged layer does not finish it: merging a lower layer can break a layer above it.`,
   ];
   if (reason === "rate_limited") {
@@ -108,7 +117,7 @@ export function stackWatchObligation(input: StackWatchObligationInput): StackWat
   } else if (reason === "failed") {
     parts.push(`This read failed, which does not end the task. Call stack_wait once more with the same cursor; if that fails too, tell the human that stack ${input.stackId} is not landed and is no longer being watched.`);
   } else if (reason === "attention" && input.attention) {
-    parts.push(`First fix #${input.attention.prNumber} (${input.attention.blocker}); repair, when present, names the fix. Calling stack_wait again before fixing it returns the same attention. After your push, call stack_wait with this cursor and enrolled_head_sha set to the SHA you pushed.`);
+    parts.push(`First fix #${input.attention.prNumber} (${input.attention.blocker}); repair, when present, names the fix. Calling stack_wait again before fixing it returns the same attention. After your push, call stack_wait with this cursor and enrolled_head_sha set to the SHA you pushed, or start \`${background} --head <pushed-sha>\` in the background.`);
   } else if (reason === "unread") {
     parts.push("This tool did not read the stack's state; stack_wait will.");
   }
@@ -120,7 +129,7 @@ export function stackWatchObligation(input: StackWatchObligationInput): StackWat
     done: false,
     until: "landed",
     reason,
-    next: { tool: "stack_wait", args, command: `mg stack wait ${input.stackId} --json` },
+    next: { tool: "stack_wait", args, command: `mg stack wait ${input.stackId} --json`, background },
     message: parts.join(" "),
   };
 }

@@ -223,6 +223,14 @@ export async function devicePost(
   return { status: res.status, body: parsed };
 }
 
+export type SurgeUsage = {
+  includedMinutes: number;
+  usedMinutes: number;
+  walletMinutes: number;
+  windowStart: string;
+  pricePerMinuteUsd: number;
+};
+
 export type MeResponse = {
   key: { prefix: string; name: string; created_at: string; last_used_at: string | null };
   plan_key: string;
@@ -233,6 +241,7 @@ export type MeResponse = {
     standard: { used: number; limit: number | null; remaining: number | null };
     /** Non-expiring credits spent after the monthly standard pool. */
     bonus?: { remaining: number };
+    surge?: SurgeUsage;
   };
 };
 

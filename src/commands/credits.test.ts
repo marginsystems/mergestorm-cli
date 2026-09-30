@@ -29,7 +29,7 @@ function setColumns(columns: number): void {
   Object.defineProperty(process.stdout, "columns", { value: columns, configurable: true });
 }
 
-function mockCreditsFetch(): void {
+function mockCreditsFetch(surge?: Record<string, unknown>): void {
   originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const url = String(input);
@@ -42,6 +42,7 @@ function mockCreditsFetch(): void {
           usage: {
             standard: { used: 7, limit: 100, remaining: 93 },
             bonus: { remaining: 12 },
+            ...(surge ? { surge } : {}),
           },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
@@ -102,4 +103,40 @@ test("credits pretty panel includes key, plan, and last jobs", async () => {
   assert.match(out, /Bonus credits: 12 remaining/);
   assert.match(out, /job_rece/);
   assert.match(out, /request_changes/);
+});
+
+test("credits pretty panel prints the surge meter when the API sends one", async () => {
+  withApiKey();
+  mockCreditsFetch({
+    includedMinutes: 300,
+    usedMinutes: 120,
+    walletMinutes: 1000,
+    windowStart: "2026-08-14T10:20:00.000Z",
+    pricePerMinuteUsd: 0.005,
+  });
+  setColumns(80);
+  const out = await capture(() => cmdCredits([]));
+  assert.match(out, /Surge: 120 of 300 included min this period · wallet 1,000 min/);
+});
+
+test("credits pretty panel has no surge line without a surge block", async () => {
+  withApiKey();
+  mockCreditsFetch();
+  setColumns(80);
+  const out = await capture(() => cmdCredits([]));
+  assert.doesNotMatch(out, /Surge/);
+});
+
+test("credits --json passes the surge block through", async () => {
+  withApiKey();
+  mockCreditsFetch({
+    includedMinutes: 0,
+    usedMinutes: 0,
+    walletMinutes: 500,
+    windowStart: "2026-08-14T10:20:00.000Z",
+    pricePerMinuteUsd: 0.005,
+  });
+  const out = await capture(() => cmdCredits(["--json"]));
+  const body = JSON.parse(out) as { usage: { surge: { walletMinutes: number } } };
+  assert.equal(body.usage.surge.walletMinutes, 500);
 });

@@ -155,6 +155,8 @@ export {
 
 export {
   STACK_WATCH_NOT_DONE_SENTENCE,
+  STACK_WATCH_NOTIFY_PATTERN,
+  stackWatchBackgroundCommand,
   stackTerminalReason,
   stackWatchNextArgs,
   stackWatchObligation,

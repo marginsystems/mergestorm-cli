@@ -115,7 +115,7 @@ export function formatDismissResult(result: PrFindingDismissResult, watch: Stack
           : `Seam gate: not blocking (seam_state=${seam.state}).`,
     );
   }
-  if (watch?.next) lines.push(`Next: ${watch.next.command}`);
+  if (watch?.next) lines.push(`Next: ${watch.next.background} as a background command, or ${watch.next.command}`);
   return lines.join("\n");
 }
 

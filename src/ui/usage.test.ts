@@ -4,6 +4,7 @@ import { visibleWidth } from "./width.js";
 import {
   formatDaysLeft,
   formatResetLabel,
+  formatSurgeSummary,
   formatUsagePanel,
   nextUtcMonthStart,
   usageBar,
@@ -133,4 +134,35 @@ test("usage panel snapshot at 120 columns keeps identity and five-job table", ()
   for (const line of lines) {
     assert.ok(visibleWidth(line) <= 120, `"${line}" is ${visibleWidth(line)} cells`);
   }
+});
+
+test("formatSurgeSummary reads used of included plus the wallet", () => {
+  assert.equal(
+    formatSurgeSummary({ includedMinutes: 300, usedMinutes: 120, walletMinutes: 1000 }),
+    "Surge: 120 of 300 included min this period · wallet 1,000 min",
+  );
+  assert.equal(
+    formatSurgeSummary({ includedMinutes: 0, usedMinutes: 0, walletMinutes: 12.25 }),
+    "Surge: wallet 12.3 min",
+  );
+});
+
+test("usage panel shows the surge line only when a surge block is given", () => {
+  const base = {
+    keyPrefix: "msk_live_abcd",
+    plan: "scale",
+    used: 7,
+    limit: 100,
+    resetsAt: "2026-09-01T00:00:00.000Z",
+    jobs: [],
+    columns: 80,
+    color: false,
+  };
+  const without = formatUsagePanel(base).join("\n");
+  assert.doesNotMatch(without, /Surge/);
+  const withSurge = formatUsagePanel({
+    ...base,
+    surge: { includedMinutes: 300, usedMinutes: 120, walletMinutes: 1000 },
+  }).join("\n");
+  assert.match(withSurge, /Surge: 120 of 300 included min this period · wallet 1,000 min/);
 });
