@@ -207,6 +207,21 @@ describe("queue commands", { concurrency: false }, () => {
     );
   });
 
+  test("mg queue add prints the refusal for an unchanged conflict", async () => {
+    configureApi();
+    const message =
+      "Not queued: #3267 still conflicts with main. The last queue attempt bounced: #3267 conflicts with main at f721498 in 4 files — merge main into mg-stack-86 (or Fix with Cyclone), push, then enqueue again. Neither #3267 (1287927) nor main (f721498) has moved since.";
+    globalThis.fetch = async () =>
+      Response.json(
+        { error: "conflict_unchanged", message, conflict: { prNumber: 3267 } },
+        { status: 409 },
+      );
+    await assert.rejects(
+      () => cmdQueue(["add", stackId]),
+      (err: unknown) => err instanceof CommandError && err.message === message,
+    );
+  });
+
   test("mg queue rm surfaces a 409 already_finished cancel", async () => {
     configureApi();
     globalThis.fetch = async (input, init) => {

@@ -992,6 +992,12 @@ async function queueMutation(
       "Merge queue API is not available on this server yet. Deploy the API update or use the dashboard.",
     );
   }
+  if (status === 409) {
+    const refusal = body as { error?: unknown; message?: unknown } | null;
+    if (refusal?.error === "conflict_unchanged" && typeof refusal.message === "string") {
+      throw new CommandError(refusal.message);
+    }
+  }
   if (status < 200 || status >= 300) {
     throw new CommandError(`${failLabel} (HTTP ${status}): ${JSON.stringify(body)}`);
   }

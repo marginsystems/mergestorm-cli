@@ -139,6 +139,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.31": [
     "every stack Next line offers mg stack watch",
   ],
+  "0.3.32": [
+    "queue add explains a held merge conflict",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

@@ -537,6 +537,8 @@ export type MergeQueueBounceDetail = {
   conflictBranch?: string;
   conflictDetail?: string;
   conflictPaths?: string[];
+  baseBranch?: string;
+  baseSha?: string;
   message?: string;
   warning?: string;
   batch?: MergeQueueBounceBatch;
