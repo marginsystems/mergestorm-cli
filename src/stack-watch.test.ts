@@ -135,6 +135,31 @@ test("stale bounce uses current head, not verify or enrolled head", async () => 
   assert.equal(attention.bounceKind, "ci_failure");
 });
 
+test("a ci_failure bounce clears once the failed check is rerun green on the same head", async () => {
+  const red = { total: 2, success: 1, pending: 0, failure: 1, failingName: "Workspace tests" };
+  const rerun = { total: 2, success: 1, pending: 1, failure: 0, failingName: null };
+  const green = { total: 2, success: 2, pending: 0, failure: 0, failingName: null };
+  const ciBounce = bounce({ bounceDetail: { kind: "ci_failure", headSha: HEAD, failingCheck: "Workspace tests" }, verifyHeadSha: HEAD });
+  const atRed = stackBlockers(stack([layer({ ciStatus: "failure", checks: red })]), [ciBounce]);
+  assert.equal(atRed.attention?.blocker, "CI failed — Workspace tests");
+  const atRerun = stackBlockers(stack([layer({ ciStatus: "pending", checks: rerun })]), [ciBounce]);
+  assert.equal(atRerun.attention?.blocker, "CI failed — Workspace tests");
+  const atGreen = stackBlockers(stack([layer({ ciStatus: "success", checks: green })]), [ciBounce]);
+  assert.equal(atGreen.attention, null);
+  assert.equal(atGreen.repair, null);
+  const h = harness(stack([layer({ ciStatus: "success", checks: green })]), [ciBounce]);
+  const watched = await timedOut(h.options);
+  assert.equal(watched.blocker, null);
+  assert.equal(watched.repair, null);
+  const batchBounce = bounce({ bounceDetail: { kind: "ci_failure", headSha: HEAD, failingCheck: "Workspace tests",
+    batch: { id: "batch", withPrNumbers: [43] } }, verifyHeadSha: HEAD });
+  const batched = stackBlockers(stack([layer({ ciStatus: "success", checks: green })]), [batchBounce]);
+  assert.equal(batched.attention?.bounceKind, "ci_failure");
+  const otherHead = stackBlockers(stack([layer({ ciStatus: "success", checks: green })]),
+    [bounce({ bounceDetail: { kind: "ci_failure", headSha: NEXT, failingCheck: "lint" } })]);
+  assert.equal(otherHead.attention, null);
+});
+
 test("surfaced bounce is added to the cursor for the next watch cycle", async () => {
   const h = harness(stack(), [bounce()]);
   const first = await pollStackWatch(cfg, "stack", h.options);

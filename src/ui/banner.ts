@@ -142,6 +142,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.32": [
     "queue add explains a held merge conflict",
   ],
+  "0.3.33": [
+    "stack watch clears a CI failure rerun green",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

@@ -164,6 +164,12 @@ function seamGateBlocker(stack: StackDto, layer: StackLayerDto): string | null {
   return null;
 }
 
+function headChecksAllGreen(layer: StackLayerDto): boolean {
+  const checks = layer.checks;
+  return layer.ciStatus === "success" && !!checks && checks.total > 0 &&
+    checks.failure === 0 && checks.pending === 0 && checks.success > 0;
+}
+
 /** Shared live-fact precedence; bounce history is only passed for the candidate. */
 function layerAttention(
   stack: StackDto,
@@ -215,6 +221,7 @@ function layerAttention(
   // Compare with the observed promote/land head, never the enrollment or verify head.
   if (!sameHead(bounce.bounceDetail?.headSha ?? bounce.verifyHeadSha, layer.headSha) ||
     (bounce.bounceDetail?.prNumber != null && bounce.bounceDetail.prNumber !== layer.prNumber)) return none;
+  if (kind === "ci_failure" && !bounce.bounceDetail?.batch && headChecksAllGreen(layer)) return none;
   return { blocker: mergeQueueBounceLabel(bounce), bounceKind: kind, bounce };
 }
 
