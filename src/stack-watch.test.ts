@@ -1452,3 +1452,89 @@ test("a disarming bounce with Auto land re-armed keeps waiting", async () => {
     assert.deepEqual(result.issues, []);
   }
 });
+
+function mergeabilitySettle(prNumber: number, headSha: string): NonNullable<StackDto["autoEnqueueSettle"]> {
+  return { action: "mergeability", prNumber, headSha, startedAt: "2026-10-02T00:00:00Z" };
+}
+
+test("Auto land's mergeability settle at a layer's head is a Merge state unknown issue (#3020)", () => {
+  const s = { ...stack([layer({ mergeable: null, mergeableState: null, mergeableHeadSha: null })]), autoEnqueueSettle: mergeabilitySettle(42, HEAD) };
+  const result = stackBlockers(s);
+  assert.equal(result.attention, null);
+  assert.deepEqual(result.issues, [{
+    prNumber: 42, headSha: HEAD, bounceKind: null,
+    blocker: "Merge state unknown vs main; Auto land is waiting for a mergeability verdict",
+  }]);
+  assert.match(stackBlockersSummary(result.attention, result.issues), /issues: #42 Merge state unknown vs main; Auto land is waiting/);
+});
+
+test("the mergeability settle adds nothing for an older head, an already pending layer, or another action (#3020)", () => {
+  const unknown = layer({ mergeable: null, mergeableState: null, mergeableHeadSha: null });
+  assert.deepEqual(stackBlockers({ ...stack([unknown]), autoEnqueueSettle: mergeabilitySettle(42, NEXT) }).issues, []);
+  const pending = layer({ mergeable: null, mergeableState: "pending", mergeableHeadSha: HEAD });
+  assert.deepEqual(stackBlockers({ ...stack([pending]), autoEnqueueSettle: mergeabilitySettle(42, HEAD) }).issues.map((issue) => issue.blocker),
+    ["Merge state unknown vs main"]);
+  assert.deepEqual(stackBlockers({ ...stack([unknown]), autoEnqueueSettle: { ...mergeabilitySettle(42, HEAD), action: "ready" } }).issues, []);
+});
+
+test("an abandoned unit under two open PRs is attention on the bottom PR with a unit_abandoned repair", () => {
+  const bottom = layer({ prNumber: 42, position: 1, branch: "feat/a", parentBranch: "main" });
+  const top = layer({ prNumber: 43, position: 2, branch: "feat/b", parentBranch: "feat/a", headSha: NEXT });
+  const result = stackBlockers({ ...unitStack([bottom, top], { state: "abandoned" }), trunkBranch: "main" });
+  assert.equal(result.attention?.prNumber, 42);
+  assert.equal(result.attention?.blocker, "Review unit abandoned: based on main");
+  assert.equal(result.repair?.kind, "unit_abandoned");
+  assert.match(result.repair?.steps ?? "", /mg stack adopt owner\/repo#42/);
+  assert.match(result.repair?.steps ?? "", /Ask the human/);
+  assert.match(result.repair?.steps ?? "", /tell the human that mg stack adopt/);
+});
+
+test("an abandoned bottom remains attention when the next layer is the promote candidate", () => {
+  const bottom = layer({ prNumber: 42, position: 1, branch: "feat/a", parentBranch: "main" });
+  const top = layer({ prNumber: 43, position: 2, branch: "feat/b", parentBranch: "feat/a", headSha: NEXT });
+  const result = stackBlockers(unitStack([bottom, top], {
+    state: "abandoned",
+    members: [{
+      prNumber: 42, openedAt: null, mergedAt: null, closedAt: null, additions: null, deletions: null,
+      openAdditions: null, openDeletions: null, branch: "feat/a", position: 1, seamState: "none",
+      seamReviewedSha: null, promotedHeadSha: HEAD, promotedAt: "2026-10-02T00:00:00Z",
+    }],
+  }));
+  assert.equal(result.currentCandidate?.prNumber, 43);
+  assert.equal(result.attention?.prNumber, 42);
+  assert.equal(result.attention?.blocker, "Review unit abandoned: based on main");
+  assert.equal(result.repair?.kind, "unit_abandoned");
+});
+
+test("an abandoned unit with one open PR left is a unit_abandoned blocker", () => {
+  const bottom = layer({ prNumber: 42, position: 1, branch: "feat/a", parentBranch: "main" });
+  const result = stackBlockers(unitStack([bottom], { state: "abandoned" }));
+  assert.equal(result.attention?.prNumber, 42);
+  assert.equal(result.repair?.kind, "unit_abandoned");
+  assert.match(result.repair?.steps ?? "", /close and resubmit it/);
+  assert.doesNotMatch(result.repair?.steps ?? "", /mg stack adopt/);
+});
+
+test("an abandoned unit remains named while Vortex reviews its bottom PR", async () => {
+  const h = harness(unitStack([layer({ ...vortexBusy })], { state: "abandoned" }));
+  const result = await heldInProgress(h.options);
+  assert.equal(result.blocker, "Review unit abandoned: based on main");
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.actAfter, "agents_idle");
+  assert.deepEqual(result.waitingOn, ["vortex"]);
+  assert.equal(result.repair?.kind, "unit_abandoned");
+});
+
+test("a PR-less child does not hide an abandoned unit repair", () => {
+  const bottom = layer({ prNumber: 42, position: 1, branch: "feat/a", parentBranch: "main" });
+  const child = layer({ prNumber: 0, position: 2, branch: "feat/b", parentBranch: "feat/a", headSha: NEXT });
+  const result = stackBlockers(unitStack([bottom, child], { state: "abandoned" }));
+  assert.equal(result.attention?.prNumber, 42);
+  assert.equal(result.repair?.kind, "unit_abandoned");
+});
+
+test("a live unit does not get a unit_abandoned blocker", () => {
+  const bottom = layer({ prNumber: 42, position: 1, branch: "feat/a", parentBranch: "main" });
+  const top = layer({ prNumber: 43, position: 2, branch: "feat/b", parentBranch: "feat/a", headSha: NEXT });
+  assert.equal(stackBlockers(unitStack([bottom, top], { state: "growing" })).repair?.kind, undefined);
+});

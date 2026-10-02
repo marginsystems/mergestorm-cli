@@ -145,6 +145,10 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.33": [
     "stack watch clears a CI failure rerun green",
   ],
+  "0.3.34": [
+    "stack watch names an abandoned review unit",
+    "stack watch names Auto land's mergeability wait",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

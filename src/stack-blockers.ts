@@ -66,6 +66,13 @@ export type StackRepairHint =
     steps: string;
   }
   | {
+    kind: "unit_abandoned";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    steps: string;
+  }
+  | {
     kind: "auto_land_off";
     prNumber: number;
     headSha: string | null;
@@ -209,6 +216,9 @@ function layerAttention(
     if (quotaSkippedReview(layer)) return hardBlock(VORTEX_REVIEW_OUT_OF_QUOTA);
     const seam = seamGateBlocker(stack, layer);
     if (seam) return hardBlock(seam);
+    if (unitAbandonedUnder(stack, layer)) {
+      return hardBlock(`${UNIT_ABANDONED_BLOCKER_PREFIX}${layer.parentBranch?.trim() || stack.trunkBranch}`);
+    }
     if (stack.unit?.landPrNumber === layer.prNumber) {
       const landing = stack.unit.landingBlockReason?.trim();
       if (landing && !landGateIsPending(landing)) return hardBlock(landing);
@@ -225,6 +235,14 @@ function layerAttention(
   return { blocker: mergeQueueBounceLabel(bounce), bounceKind: kind, bounce };
 }
 
+const UNIT_ABANDONED_BLOCKER_PREFIX = "Review unit abandoned: based on ";
+
+function unitAbandonedUnder(stack: StackDto, layer: StackLayerDto): boolean {
+  if (stack.unit?.state !== "abandoned") return false;
+  const open = stack.layers.filter((candidate) => candidate.prNumber > 0 && !isTerminalLayer(candidate))
+    .sort((a, b) => a.position - b.position);
+  return open.length > 0 && open[0]!.prNumber === layer.prNumber;
+}
 
 const AUTO_LAND_DISARMING_BOUNCE_KINDS: readonly string[] = ["merge_failed", "gh_error", "ci_timeout"];
 const AUTO_LAND_OFF_BLOCKER_PREFIX = "Auto land off after ";
@@ -294,7 +312,8 @@ function landPrLiveParent(stack: StackDto, layer: StackLayerDto): string | null 
 
 export function agentsCannotClear(blocker: string): boolean {
   return blocker === "Conflict" || blocker === "Restack failed" || blocker === "Draft PR" ||
-    blocker === SEAM_REVIEW_NOT_RUNNING || blocker === VORTEX_REVIEW_OUT_OF_QUOTA || blocker.startsWith("Merge conflicts");
+    blocker === SEAM_REVIEW_NOT_RUNNING || blocker === VORTEX_REVIEW_OUT_OF_QUOTA ||
+    blocker.startsWith("Merge conflicts") || blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX);
 }
 
 function isTempestFindingsBlocker(attention: StackBlocker): boolean {
@@ -323,6 +342,18 @@ export function stackRepair(
       liveParent,
       files: conflictFiles(layer, bounce),
       steps: conflictRepairSteps(layer.branch, liveParent),
+    };
+  }
+  if (attention.blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX)) {
+    const openPrCount = stack.layers.filter((candidate) =>
+      candidate.prNumber > 0 && !isTerminalLayer(candidate),
+    ).length;
+    return {
+      kind: "unit_abandoned",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      steps: `The stack's review unit was abandoned when #${layer.prNumber}'s base on GitHub was changed off its mg-stack trunk, so Auto land cannot promote or land this stack. Ask the human whether to re-root it. ${openPrCount < 2 ? `With only one open PR, re-adopting #${layer.prNumber} will not create a review unit; close and resubmit it to create a fresh stack.` : `If yes, tell the human that mg stack adopt ${stack.owner}/${stack.repo}#${layer.prNumber} re-roots it on a new review unit.`} Do not retarget the PR base yourself.`,
     };
   }
   if (attention.blocker.startsWith(AUTO_LAND_OFF_BLOCKER_PREFIX) && attention.bounceKind) {
@@ -398,7 +429,11 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
     }
     const issue = { prNumber: layer.prNumber, headSha: layer.headSha ?? null,
       blocker: result.blocker, bounceKind: result.bounceKind };
-    if (selected || (!attention && layer === child)) {
+    if (
+      selected ||
+      result.blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX) ||
+      (!attention && layer === child)
+    ) {
       attention = issue;
       attentionLayer = layer;
       bounce = result.bounce;
@@ -406,6 +441,8 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
         headSha: disarmed.bounceDetail?.headSha ?? null, blocker: mergeQueueBounceLabel(disarmed), bounceKind: result.bounceKind });
     } else if (!candidate || layer.position > candidate.position) issues.push(issue);
   }
+  const settleIssue = mergeabilitySettleIssue(stack, open, issues, attention);
+  if (settleIssue) issues.push(settleIssue);
   const focus = attentionLayer ?? candidate;
   const agents = focus ? layerAgents(focus) : null;
   const busy: StackAgentBusy[] = [];
@@ -428,6 +465,23 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   }
   if (busy.length) return { attention: null, held: null, issues, currentCandidate, bounce: undefined, busy, agents, repair: null, landGatePending };
   return { attention, held: null, issues, currentCandidate, bounce, busy, agents, repair: stackRepair(stack, attention, attentionLayer, bounce), landGatePending };
+}
+
+function mergeabilitySettleIssue(
+  stack: StackDto,
+  open: readonly StackLayerDto[],
+  issues: readonly StackBlocker[],
+  attention: StackBlocker | null,
+): StackBlocker | null {
+  const settle = stack.autoEnqueueSettle;
+  if (stack.archivedAt || settle?.action !== "mergeability") return null;
+  if (attention?.prNumber === settle.prNumber) return null;
+  if (issues.some((issue) => issue.prNumber === settle.prNumber && issue.blocker.startsWith("Merge state unknown"))) return null;
+  const layer = open.find((candidate) => candidate.prNumber === settle.prNumber);
+  if (layer && !sameHead(layer.headSha, settle.headSha)) return null;
+  const vs = layer?.parentBranch ? ` vs ${layer.parentBranch}` : "";
+  return { prNumber: settle.prNumber, headSha: settle.headSha,
+    blocker: `Merge state unknown${vs}; Auto land is waiting for a mergeability verdict`, bounceKind: null };
 }
 
 /** Compact contract text shared by status and wait summaries. */
