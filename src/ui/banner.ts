@@ -149,6 +149,11 @@ const WHATS_NEW: Record<string, string[]> = {
     "stack watch names an abandoned review unit",
     "stack watch names Auto land's mergeability wait",
   ],
+  "0.3.35": [
+    "stack watch names why Auto land is waiting",
+    "stack watch names a stuck seam review",
+    "stack watch names findings Cyclone left for you",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

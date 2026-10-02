@@ -942,17 +942,66 @@ test("a failed seam review is attention whatever head it last reviewed", async (
   }
 });
 
-test("seam findings on a stale head wait for the re-review", async () => {
+test("seam findings on a stale head wait while the re-review runs", () => {
   for (const reviewed of [NEXT, null]) {
-    const h = harness(seamUnit(stack(), "findings", reviewed));
-    const result = await timedOut(h.options);
-    assert.equal(result.blocker, null);
-    assert.deepEqual(result.issues, []);
+    const blockers = stackBlockers(seamUnit(stack([layer(vortexBusy)]), "findings", reviewed));
+    assert.equal(blockers.attention, null);
+    assert.equal(blockers.held, null);
+    assert.deepEqual(blockers.issues, []);
   }
 });
 
-for (const seamState of ["approved", "none", "reviewing", "pending_rereview"]) {
-  test(`seam ${seamState} is not a blocker`, async () => {
+test("a seam verdict for an older head with no review running is attention with a Continue repair", async () => {
+  for (const [seamState, reviewed] of [["findings", NEXT], ["findings", null], ["approved", NEXT]] as const) {
+    const h = harness(seamUnit(stack(), seamState, reviewed));
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention", seamState);
+    assert.equal(result.blocker, "Seam verdict is for an older head, no review running");
+    assert.equal(result.prNumber, 42);
+    assert.equal(result.repair?.kind, "seam_review_stuck");
+    assert.match(result.repair?.steps ?? "", /click Continue on the stack/);
+  }
+});
+
+test("a stale approved seam is not a blocker once a Vortex review finished at the head", () => {
+  const done = { status: "done", skip_reason: null, pass: 1, head_sha: HEAD, phase: null,
+    started_at: null, stoppable: false, source: "pr_reviews" } as const;
+  assert.equal(stackBlockers(seamUnit(stack([layer({ vortexReview: done })]), "approved", NEXT)).attention, null);
+});
+
+for (const [seamState, blocker] of [
+  ["reviewing", "Seam review stuck in reviewing, no review running"],
+  ["pending_rereview", "Seam re-review pending, no review running"],
+] as const) {
+  test(`seam ${seamState} with no review running is attention with a Continue repair`, async () => {
+    const h = harness(seamUnit(stack(), seamState, NEXT));
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, blocker);
+    assert.equal(result.prNumber, 42);
+    assert.equal(result.headSha, HEAD);
+    assert.equal(result.repair?.kind, "seam_review_stuck");
+    assert.match(result.repair?.steps ?? "", new RegExp(`is ${seamState} but no seam review is queued or running`));
+  });
+
+  test(`seam ${seamState} while its review runs is not a blocker`, () => {
+    const blockers = stackBlockers(seamUnit(stack([layer(vortexBusy)]), seamState, NEXT));
+    assert.equal(blockers.attention, null);
+    assert.equal(blockers.held, null);
+    assert.deepEqual(blockers.issues, []);
+  });
+
+  test(`seam ${seamState} with no review running stays named while Cyclone patches the PR`, async () => {
+    const h = harness(seamUnit(stack([layer({ cycloneStatus: "patching",
+      agentRuns: [{ agent: "cyclone", status: "patching", sha: HEAD }] })]), seamState, NEXT));
+    const result = await heldInProgress(h.options);
+    assert.equal(result.blocker, blocker);
+    assert.equal(result.actAfter, "agents_idle");
+  });
+}
+
+for (const seamState of ["approved", "none"]) {
+  test(`seam ${seamState} at the head is not a blocker`, async () => {
     const h = harness(seamUnit(stack(), seamState, HEAD));
     assert.equal((await timedOut(h.options)).blocker, null);
   });
@@ -1537,4 +1586,143 @@ test("a live unit does not get a unit_abandoned blocker", () => {
   const bottom = layer({ prNumber: 42, position: 1, branch: "feat/a", parentBranch: "main" });
   const top = layer({ prNumber: 43, position: 2, branch: "feat/b", parentBranch: "feat/a", headSha: NEXT });
   assert.equal(stackBlockers(unitStack([bottom, top], { state: "growing" })).repair?.kind, undefined);
+});
+
+const MINUTE = 60_000;
+
+function waiting(
+  reason: string,
+  overrides: Partial<NonNullable<StackDto["autoLandWait"]>> = {},
+  layers = [layer()],
+): StackDto {
+  return {
+    ...stack(layers),
+    autoEnqueueWhenReady: true,
+    autoLandWait: { reason, prNumber: 42, headSha: HEAD, since: new Date(0).toISOString(), attempts: null, detail: null, ...overrides },
+  };
+}
+
+test("Auto land's live ci_failure is attention while the ledger shows CI green (#3453)", async () => {
+  const h = harness(waiting("ci_failure"));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "CI failed — Auto land reads a failing check on GitHub at this head");
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.headSha, HEAD);
+  assert.equal(result.repair?.kind, "ci_failure");
+  assert.match(result.repair?.steps ?? "", /gh run list --branch feature/);
+});
+
+test("Auto land's ci_pending is named only after a long wait (#3453)", () => {
+  const s = waiting("ci_pending");
+  assert.equal(stackBlockers(s, [], {}, 10 * MINUTE).attention, null);
+  assert.deepEqual(stackBlockers(s, [], {}, 10 * MINUTE).issues, []);
+  const late = stackBlockers(s, [], {}, 50 * MINUTE);
+  assert.deepEqual(late.attention, {
+    prNumber: 42, headSha: HEAD, bounceKind: null,
+    blocker: "CI pending for 50m — a check on this head has not finished, so Auto land will not queue it",
+  });
+  assert.equal(late.repair?.kind, "ci_pending");
+  assert.match(late.repair?.steps ?? "", /gh run rerun/);
+});
+
+test("Auto land's vortex_not_green is held while Vortex reviews and attention once it is idle (#3453)", () => {
+  const s = waiting("vortex_not_green");
+  assert.equal(stackBlockers(s, [], {}, 20 * MINUTE).attention, null);
+  const reviewing = waiting("vortex_not_green", {}, [layer({ vortexStatus: "reviewing" })]);
+  const held = stackBlockers(reviewing, [], {}, 40 * MINUTE);
+  assert.equal(held.attention, null);
+  assert.deepEqual(held.busy.map((entry) => entry.agent), ["vortex"]);
+  const idle = stackBlockers(s, [], {}, 40 * MINUTE);
+  assert.equal(idle.attention?.blocker,
+    "No green Vortex review for 40m — Auto land is waiting for an approving Vortex review at this head");
+  assert.equal(idle.repair?.kind, "vortex_not_green");
+});
+
+test("a promote Auto land stopped retrying is attention with a promote_failed repair (#3453)", () => {
+  const twice = waiting("promote_merge_failed", { attempts: 2, detail: "Base branch was modified" });
+  assert.equal(stackBlockers(twice, [], {}, MINUTE).attention, null);
+  const stopped = stackBlockers(
+    waiting("promote_merge_failed", { attempts: 3, detail: "Base branch was modified" }), [], {}, MINUTE);
+  assert.equal(stopped.attention?.blocker,
+    "Promote failed 3 times (merge_failed) — Auto land stopped retrying this head: Base branch was modified");
+  assert.equal(stopped.repair?.kind, "promote_failed");
+  assert.equal(stopped.repair?.kind === "promote_failed" ? stopped.repair.attempts : null, 3);
+  assert.match(stopped.repair?.steps ?? "", /mg stack set stack --auto-land off/);
+  assert.match(stackBlockersSummary(stopped.attention, stopped.issues), /blocked: #42 Promote failed 3 times/);
+});
+
+test("Auto land's wait names nothing for another head, an unarmed or archived stack, or an unnamed reason (#3453)", () => {
+  const late = 120 * MINUTE;
+  assert.equal(stackBlockers(waiting("ci_failure", { headSha: NEXT }), [], {}, late).attention, null);
+  assert.equal(stackBlockers({ ...waiting("ci_failure"), autoEnqueueWhenReady: false }, [], {}, late).attention, null);
+  assert.equal(stackBlockers({ ...waiting("ci_failure"), archivedAt: "2026-10-02T00:00:00Z" }, [], {}, late).attention, null);
+  assert.equal(stackBlockers(waiting("stack_dirty"), [], {}, late).attention, null);
+  assert.equal(stackBlockers({ ...stack(), autoEnqueueWhenReady: true }, [], {}, late).attention, null);
+});
+
+test("a more specific ledger blocker wins over Auto land's wait (#3453)", () => {
+  const conflicted = waiting("ci_failure", {}, [layer({ state: "conflict" })]);
+  assert.equal(stackBlockers(conflicted, [], {}, MINUTE).attention?.blocker, "Conflict");
+  const red = waiting("ci_failure", {}, [layer({ ciStatus: "failure", checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: "lint" } })]);
+  assert.equal(stackBlockers(red, [], {}, MINUTE).attention?.blocker, "CI failed — lint");
+});
+
+test("Auto land's wait on the child of a clean bottom is attention on the child (#3453)", () => {
+  const child = layer({ branch: "child", parentBranch: "feature", prNumber: 43, position: 1, headSha: NEXT, mergeableHeadSha: NEXT });
+  const s = waiting("ci_failure", { prNumber: 43, headSha: NEXT }, [layer(), child]);
+  const result = stackBlockers(s, [], {}, MINUTE);
+  assert.deepEqual(result.attention, {
+    prNumber: 43, headSha: NEXT, bounceKind: null, blocker: "CI failed — Auto land reads a failing check on GitHub at this head",
+  });
+  assert.deepEqual(result.currentCandidate, { prNumber: 42, headSha: HEAD });
+  assert.equal(result.repair?.kind, "ci_failure");
+  assert.equal(result.repair?.prNumber, 43);
+});
+
+const changesRequested = (extra: Partial<StackLayerDto> = {}) => layer({
+  vortexStatus: "findings", reviewStatus: "changes_requested", vortexReview: done(HEAD), ...extra,
+});
+
+for (const reason of ["vortex_patch_cap", "hold", "auto_patch_off", "no_billing", "pr_state_unavailable"]) {
+  test(`Vortex findings Cyclone left for a person (${reason}) are attention with a repair hint`, async () => {
+    const h = harness(stack([changesRequested({ cycloneHandoff: { headSha: HEAD, reason, at: null } })]));
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, "Vortex findings need a person");
+    assert.equal(result.prNumber, 42);
+    assert.equal(result.repair?.kind, "vortex_findings");
+    assert.equal(result.repair?.kind === "vortex_findings" ? result.repair.handoff : null, reason);
+    assert.match(result.repair?.steps ?? "", /repos\/owner\/repo\/pulls\/42\/reviews/);
+  });
+}
+
+test("a stack with auto-patch off names Vortex findings at the head with no Cyclone row", () => {
+  const off = { ...stack([changesRequested()]), autoPatchOverride: false };
+  assert.equal(stackBlockers(off).attention?.blocker, "Vortex findings need a person");
+  assert.equal(stackBlockers(stack([changesRequested()])).attention, null);
+});
+
+test("Vortex findings are not named while Cyclone may still patch them", () => {
+  const handoff = { headSha: HEAD, reason: "vortex_patch_cap", at: null };
+  for (const candidate of [
+    changesRequested({ cycloneHandoff: { ...handoff, headSha: NEXT } }),
+    changesRequested({ cycloneHandoff: null }),
+    changesRequested({ cycloneHandoff: handoff, reviewStatus: "approved" }),
+    changesRequested({ cycloneHandoff: handoff, vortexStatus: "all_clear" }),
+    changesRequested({ cycloneHandoff: handoff, vortexReview: done(NEXT) }),
+    changesRequested({ cycloneHandoff: handoff, vortexReview: reviewing(HEAD) }),
+  ]) {
+    assert.equal(stackBlockers(stack([candidate])).attention, null, JSON.stringify(candidate));
+  }
+  const patching = stackBlockers(stack([changesRequested({ cycloneHandoff: handoff, cycloneStatus: "patching" })]));
+  assert.equal(patching.attention, null);
+});
+
+test("a more specific blocker on the head wins over Vortex findings left for a person", () => {
+  const handoff = { headSha: HEAD, reason: "hold", at: null };
+  assert.equal(stackBlockers(stack([changesRequested({ cycloneHandoff: handoff, ...redCi })])).attention?.blocker, "CI failed — lint");
+  assert.equal(stackBlockers(stack([changesRequested({
+    cycloneHandoff: handoff, agentRuns: [{ agent: "cyclone", status: "failed", sha: HEAD }],
+  })])).attention?.blocker, "Cyclone failed");
 });

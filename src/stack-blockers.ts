@@ -66,10 +66,27 @@ export type StackRepairHint =
     steps: string;
   }
   | {
+    kind: "vortex_findings";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    handoff: string | null;
+    findings: string;
+    steps: string;
+  }
+  | {
     kind: "unit_abandoned";
     prNumber: number;
     headSha: string | null;
     branch: string;
+    steps: string;
+  }
+  | {
+    kind: "seam_review_stuck";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    seamState: string;
     steps: string;
   }
   | {
@@ -78,6 +95,23 @@ export type StackRepairHint =
     headSha: string | null;
     branch: string;
     bounceKind: string;
+    steps: string;
+  }
+  | {
+    kind: "ci_pending" | "vortex_not_green";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    since: string;
+    steps: string;
+  }
+  | {
+    kind: "promote_failed";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    attempts: number;
+    message: string | null;
     steps: string;
   };
 
@@ -152,6 +186,37 @@ export const SEAM_REVIEW_NOT_RUNNING = "Seam review pending, no review running";
 
 export const VORTEX_REVIEW_OUT_OF_QUOTA = "Review skipped, out of review quota";
 
+export const SEAM_REVIEW_STUCK = "Seam review stuck in reviewing, no review running";
+
+export const SEAM_REREVIEW_NOT_RUNNING = "Seam re-review pending, no review running";
+
+export const SEAM_VERDICT_STALE = "Seam verdict is for an older head, no review running";
+
+const STUCK_SEAM_BLOCKERS: readonly string[] = [SEAM_REVIEW_STUCK, SEAM_REREVIEW_NOT_RUNNING, SEAM_VERDICT_STALE];
+
+function coreReviewDoneAtHead(layer: StackLayerDto): boolean {
+  const review = layer.vortexReview;
+  return review?.status === "done" && sameHead(review.head_sha, layer.headSha);
+}
+
+export const VORTEX_FINDINGS_NEED_PERSON = "Vortex findings need a person";
+
+function vortexChangesRequestedAtHead(layer: StackLayerDto): boolean {
+  const review = layer.vortexReview;
+  if (review && !(review.status === "done" && sameHead(review.head_sha, layer.headSha))) return false;
+  return layer.vortexStatus === "findings" && layer.reviewStatus === "changes_requested";
+}
+
+function cycloneHandoffAtHead(stack: StackDto, layer: StackLayerDto): string | null {
+  if (sameHead(layer.cycloneHandoff?.headSha, layer.headSha)) return layer.cycloneHandoff!.reason;
+  return stack.autoPatchOverride === false ? "auto_patch_off" : null;
+}
+
+function vortexFindingsLeftForPerson(stack: StackDto, layer: StackLayerDto): boolean {
+  return vortexChangesRequestedAtHead(layer) && !layerAgentsBusy(layer).cyclone &&
+    cycloneHandoffAtHead(stack, layer) !== null;
+}
+
 function quotaSkippedReview(layer: StackLayerDto): boolean {
   const review = layer.vortexReview;
   return review?.status === "skipped" && review.skip_reason === "quota_exceeded" &&
@@ -167,7 +232,13 @@ function seamGateBlocker(stack: StackDto, layer: StackLayerDto): string | null {
   const seamState = member.seamState?.trim().toLowerCase();
   if (seamState === "failed") return "Seam review failed";
   if (seamState === "findings" && sameHead(member.seamReviewedSha, layer.headSha)) return "Seam findings";
-  if (seamState === "pending" && !layerAgentsBusy(layer).vortex) return SEAM_REVIEW_NOT_RUNNING;
+  if (layerAgentsBusy(layer).vortex) return null;
+  if (seamState === "pending") return SEAM_REVIEW_NOT_RUNNING;
+  if (seamState === "reviewing") return SEAM_REVIEW_STUCK;
+  if (seamState === "pending_rereview") return SEAM_REREVIEW_NOT_RUNNING;
+  if (!layer.headSha?.trim() || sameHead(member.seamReviewedSha, layer.headSha)) return null;
+  if (seamState === "findings") return SEAM_VERDICT_STALE;
+  if (seamState === "approved" && !coreReviewDoneAtHead(layer)) return SEAM_VERDICT_STALE;
   return null;
 }
 
@@ -224,6 +295,7 @@ function layerAttention(
       if (landing && !landGateIsPending(landing)) return hardBlock(landing);
       if (stack.unit.tempestLandStatus?.toLowerCase() === "failed") return hardBlock("Tempest failed");
     }
+    if (vortexFindingsLeftForPerson(stack, layer)) return hardBlock(VORTEX_FINDINGS_NEED_PERSON);
   }
   if (!bounce || !kind || recoverable || !layer || queue.some((entry) => ["queued", "running", "waiting"].includes(entry.state))) return none;
   if ((cursor.bounceId != null && cursor.bounceId === bounce.id) || (cursor.afterFinishedAt &&
@@ -264,6 +336,54 @@ function disarmingBounce(stack: StackDto, queue: MergeQueueEntryDto[]): MergeQue
   const recorded = queue.find((entry) => entry.id === stack.autoLandOff?.entryId);
   if (isDisarmingBounce(recorded)) return recorded;
   return undefined;
+}
+
+export const AUTO_LAND_CI_PENDING_ATTENTION_MS = 45 * 60_000;
+export const AUTO_LAND_VORTEX_WAIT_ATTENTION_MS = 30 * 60_000;
+export const AUTO_LAND_PROMOTE_FAILED_ATTEMPTS = 3;
+export const AUTO_LAND_CI_FAILED_BLOCKER = "CI failed — Auto land reads a failing check on GitHub at this head";
+const AUTO_LAND_CI_PENDING_PREFIX = "CI pending for ";
+const AUTO_LAND_VORTEX_WAIT_PREFIX = "No green Vortex review for ";
+const AUTO_LAND_PROMOTE_FAILED_PREFIX = "Promote failed ";
+
+type AutoLandWaitDto = NonNullable<StackDto["autoLandWait"]>;
+
+function waitedMs(since: string, nowMs: number): number | null {
+  const sinceMs = Date.parse(since);
+  return Number.isFinite(sinceMs) ? Math.max(0, nowMs - sinceMs) : null;
+}
+
+function autoLandWaitOn(stack: StackDto, layer: StackLayerDto): AutoLandWaitDto | null {
+  const wait = stack.autoLandWait;
+  if (!wait || stack.archivedAt || stack.autoEnqueueWhenReady !== true) return null;
+  if (wait.prNumber !== layer.prNumber || !sameHead(wait.headSha, layer.headSha)) return null;
+  return wait;
+}
+
+export function autoLandWaitBlocker(stack: StackDto, layer: StackLayerDto, nowMs: number): string | null {
+  const wait = autoLandWaitOn(stack, layer);
+  if (!wait) return null;
+  const waited = waitedMs(wait.since, nowMs);
+  if (waited == null) return null;
+  const minutes = Math.floor(waited / 60_000);
+  switch (wait.reason) {
+    case "ci_failure":
+      return AUTO_LAND_CI_FAILED_BLOCKER;
+    case "ci_pending":
+      return waited >= AUTO_LAND_CI_PENDING_ATTENTION_MS
+        ? `${AUTO_LAND_CI_PENDING_PREFIX}${minutes}m — a check on this head has not finished, so Auto land will not queue it`
+        : null;
+    case "vortex_not_green":
+      return waited >= AUTO_LAND_VORTEX_WAIT_ATTENTION_MS
+        ? `${AUTO_LAND_VORTEX_WAIT_PREFIX}${minutes}m — Auto land is waiting for an approving Vortex review at this head`
+        : null;
+    case "promote_merge_failed":
+      return (wait.attempts ?? 0) >= AUTO_LAND_PROMOTE_FAILED_ATTEMPTS
+        ? `${AUTO_LAND_PROMOTE_FAILED_PREFIX}${wait.attempts} times (merge_failed) — Auto land stopped retrying this head${wait.detail ? `: ${wait.detail}` : ""}`
+        : null;
+    default:
+      return null;
+  }
 }
 
 function isTerminalLayer(layer: StackLayerDto): boolean {
@@ -313,6 +433,7 @@ function landPrLiveParent(stack: StackDto, layer: StackLayerDto): string | null 
 export function agentsCannotClear(blocker: string): boolean {
   return blocker === "Conflict" || blocker === "Restack failed" || blocker === "Draft PR" ||
     blocker === SEAM_REVIEW_NOT_RUNNING || blocker === VORTEX_REVIEW_OUT_OF_QUOTA ||
+    STUCK_SEAM_BLOCKERS.includes(blocker) ||
     blocker.startsWith("Merge conflicts") || blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX);
 }
 
@@ -356,6 +477,22 @@ export function stackRepair(
       steps: `The stack's review unit was abandoned when #${layer.prNumber}'s base on GitHub was changed off its mg-stack trunk, so Auto land cannot promote or land this stack. Ask the human whether to re-root it. ${openPrCount < 2 ? `With only one open PR, re-adopting #${layer.prNumber} will not create a review unit; close and resubmit it to create a fresh stack.` : `If yes, tell the human that mg stack adopt ${stack.owner}/${stack.repo}#${layer.prNumber} re-roots it on a new review unit.`} Do not retarget the PR base yourself.`,
     };
   }
+  if (STUCK_SEAM_BLOCKERS.includes(attention.blocker)) {
+    const member = stack.unit?.members?.find((entry) => entry.prNumber === layer.prNumber);
+    const seamState = member?.seamState?.trim().toLowerCase() || "unknown";
+    const reviewed = member?.seamReviewedSha?.trim();
+    const what = attention.blocker === SEAM_VERDICT_STALE
+      ? `The seam (integration) review verdict on #${layer.prNumber} (${seamState}) was made at ${reviewed ? reviewed.slice(0, 7) : "an older head"}, not the live head ${layer.headSha ?? "(unknown)"}, and no seam review is queued or running to replace it`
+      : `The seam (integration) review of #${layer.prNumber} is ${seamState} but no seam review is queued or running at ${layer.headSha ?? "the live head"}`;
+    return {
+      kind: "seam_review_stuck",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      seamState,
+      steps: `${what}, so Auto land cannot promote it. Do not patch or push for this. Tell the human to click Continue on the stack in the Mergestorm dashboard, which re-queues the seam review at the live head of ${layer.branch}; a new commit pushed to ${layer.branch} also queues one. Then keep watching.`,
+    };
+  }
   if (attention.blocker.startsWith(AUTO_LAND_OFF_BLOCKER_PREFIX) && attention.bounceKind) {
     return {
       kind: "auto_land_off",
@@ -377,6 +514,52 @@ export function stackRepair(
       steps: `Tempest never patches, and Cyclone is not patching this land PR. Read the Tempest report on it (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch on ${layer.branch}, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). Do not retarget the PR base.`,
     };
   }
+  const wait = autoLandWaitOn(stack, layer);
+  if (wait && attention.blocker.startsWith(AUTO_LAND_CI_PENDING_PREFIX)) {
+    return {
+      kind: "ci_pending",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      since: wait.since,
+      steps: `A check on ${layer.branch} at ${layer.headSha ?? "its head"} has been pending since ${wait.since}, and Auto land will not queue an unfinished head. List the head's checks (gh api repos/${stack.owner}/${stack.repo}/commits/${layer.headSha ?? "<sha>"}/check-runs, and gh run list --branch ${layer.branch}) and find the one that never finished. Re-run it (gh run rerun <run-id>) if it is stuck or was never picked up. If it is a required check that no workflow reports, or it fails again, tell the human. Push a fix only when the check is red for a reason in the code. Do not retarget the PR base.`,
+    };
+  }
+  if (wait && attention.blocker.startsWith(AUTO_LAND_VORTEX_WAIT_PREFIX)) {
+    return {
+      kind: "vortex_not_green",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      since: wait.since,
+      steps: `Auto land has waited since ${wait.since} for an approving Vortex review of ${layer.branch} at ${layer.headSha ?? "its head"}, and no Vortex run is working on it. Read the PR's latest Vortex review (gh api repos/${stack.owner}/${stack.repo}/pulls/${layer.prNumber}/reviews). If it has findings, verify and fix the real ones on ${layer.branch} with an ordinary push, or record a wrong one with mg dismiss as mergestorm-pr-loop describes. If no review exists at this head, or it failed or was skipped, tell the human: nothing re-reviews this head until they re-run the review or push a new head.`,
+    };
+  }
+  if (wait && attention.blocker.startsWith(AUTO_LAND_PROMOTE_FAILED_PREFIX)) {
+    const attempts = wait.attempts ?? AUTO_LAND_PROMOTE_FAILED_ATTEMPTS;
+    return {
+      kind: "promote_failed",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      attempts,
+      message: wait.detail,
+      steps: `Auto land tried to promote #${layer.prNumber} at ${layer.headSha ?? "its head"} ${attempts} times and GitHub refused the merge each time${wait.detail ? ` (${wait.detail})` : ""}, so it stopped retrying this head. Read why: gh api repos/${stack.owner}/${stack.repo}/pulls/${layer.prNumber} --jq '{mergeable, mergeable_state, base: .base.ref}', and the branch protection on that base. If the cause is in ${layer.branch}, fix it and push with an ordinary push: a new head is retried. If it is outside the PR (branch protection, permissions, a required review), tell the human, and that once it is fixed they can retry the promote by turning Auto land off and on (mg stack set ${stack.id} --auto-land off, then --auto-land on). Do not toggle Auto land yourself, and do not retarget the PR base.`,
+    };
+  }
+  if (attention.blocker === VORTEX_FINDINGS_NEED_PERSON) {
+    const findings = `gh api repos/${stack.owner}/${stack.repo}/pulls/${layer.prNumber}/reviews`;
+    const handoff = cycloneHandoffAtHead(stack, layer);
+    return {
+      kind: "vortex_findings",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      handoff,
+      findings,
+      steps: `Vortex requested changes on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them for a person${handoff ? ` (${handoff.replaceAll("_", " ")})` : ""}, so nothing will patch them and Auto land waits. Read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). If a finding is wrong, tell the human; mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> dismisses that review. Do not retarget the PR base.`,
+    };
+  }
   if (attention.blocker.startsWith("CI failed") || attention.bounceKind === "ci_failure") {
     const failingCheck = bounce?.bounceDetail?.failingCheck?.trim() || layer.checks?.failingName?.trim() || null;
     return {
@@ -393,7 +576,7 @@ export function stackRepair(
 
 /** Pair-gate attention plus live hard blocks on every other open layer. */
 export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [],
-  cursor: Pick<StackWatchCursor, "bounceId" | "afterFinishedAt"> = {}) {
+  cursor: Pick<StackWatchCursor, "bounceId" | "afterFinishedAt"> = {}, nowMs: number = Date.now()) {
   const candidate = currentLayer(stack);
   const currentCandidate = candidate ? { prNumber: candidate.prNumber, headSha: candidate.headSha ?? null } : null;
   const queue = entries.filter((entry) => entry.stackId.trim().toLowerCase() === stack.id.trim().toLowerCase());
@@ -420,6 +603,14 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
         result = { blocker: `${AUTO_LAND_OFF_BLOCKER_PREFIX}${kind} bounce`, bounceKind: kind, bounce: disarmed };
       }
     }
+    let waitNamed = false;
+    if (!result.blocker) {
+      const waiting = autoLandWaitBlocker(stack, layer, nowMs);
+      if (waiting) {
+        result = { blocker: waiting, bounceKind: null };
+        waitNamed = true;
+      }
+    }
     if (!result.blocker) {
       if (mergeabilityPending(layer) && (selected || !candidate || layer.position > candidate.position)) {
         issues.push({ prNumber: layer.prNumber, headSha: layer.headSha ?? null,
@@ -432,7 +623,7 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
     if (
       selected ||
       result.blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX) ||
-      (!attention && layer === child)
+      (!attention && (layer === child || waitNamed))
     ) {
       attention = issue;
       attentionLayer = layer;

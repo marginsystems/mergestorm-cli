@@ -115,6 +115,12 @@ export type StackVortexReviewView = {
 
 export type StackCycloneStatus = "patching" | "awaiting_fix" | "failed";
 
+export type StackCycloneHandoff = {
+  headSha: string;
+  reason: string;
+  at: string | null;
+};
+
 export type StackTempestStatus = "reviewing" | "findings" | "clear" | "failed" | "stale";
 
 export type StackAgentName = "vortex" | "cyclone" | "tempest";
@@ -292,6 +298,7 @@ export type StackLayerDto = {
    */
   vortexReview?: StackVortexReviewView;
   agentsBusy?: StackAgentsBusy | null;
+  cycloneHandoff?: StackCycloneHandoff | null;
   conflictDetail: string | null;
   restackError?: RestackError | null;
   lastRestackedSha: string | null;
@@ -422,6 +429,14 @@ export type StackDto = {
     /** ISO timestamp of the watcher's clock start. */
     startedAt: string;
     windowSeconds?: number;
+  } | null;
+  autoLandWait?: {
+    reason: string;
+    prNumber: number | null;
+    headSha: string | null;
+    since: string;
+    attempts: number | null;
+    detail: string | null;
   } | null;
   /**
    * Per-stack Vortex auto-review override. `null` (or missing) follows the

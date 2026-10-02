@@ -214,7 +214,7 @@ export async function pollStackWatch(
     };
   };
   const evaluate = (stack: StackDto, entries: MergeQueueEntryDto[]) => {
-    const { attention, held: named, issues, currentCandidate, bounce, busy, agents, repair, landGatePending } = stackBlockers(stack, entries, cursor);
+    const { attention, held: named, issues, currentCandidate, bounce, busy, agents, repair, landGatePending } = stackBlockers(stack, entries, cursor, now());
     if (bounce) cursor = Object.freeze({ ...cursor, bounceId: bounce.id,
       ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}) });
     const held = busy[0];
