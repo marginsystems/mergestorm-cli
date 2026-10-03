@@ -1893,7 +1893,7 @@ test("a queued entry behind another user's entry does not show that user's stack
 });
 
 for (const [skipReason, blocker, step] of [
-  ["auto_review_off", "Vortex auto-review is off, so this head was not reviewed", /mg stack set stack --auto-review on/],
+  ["auto_review_off", "Vortex auto-review is off, so this head was not reviewed", /turning auto-review on \(mg stack set stack --auto-review on, or the account setting in the dashboard\) queues a review of this head by itself\. To review only this head and leave auto-review off, comment @mergestorm-vortex review on #42/],
   ["billing_blocked", "Vortex skipped this head: it could not confirm billing", /check the plan and billing/],
   ["billing_unavailable", "Vortex skipped this head: it could not confirm billing", /comment @mergestorm-vortex review on #42/],
 ] as const) {

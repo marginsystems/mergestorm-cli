@@ -159,6 +159,9 @@ const WHATS_NEW: Record<string, string[]> = {
     "stack watch names why Vortex skipped a head",
     "stack watch says how to re-run Tempest",
   ],
+  "0.3.37": [
+    "turning auto-review on reviews skipped heads",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

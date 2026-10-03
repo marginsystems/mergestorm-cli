@@ -300,7 +300,7 @@ function vortexSkippedSteps(stack: StackDto, layer: StackLayerDto, skipReason: s
   const head = layer.headSha ?? "its live head";
   const mention = `comment @mergestorm-vortex review on #${layer.prNumber}`;
   if (skipReason === "auto_review_off") {
-    return `Vortex auto-review is off for ${stack.owner}/${stack.repo} or for this stack, so it skipped #${layer.prNumber} at ${head} and Auto land waits for a review that will not come. Do not patch or push for this. Tell the human: they can turn auto-review on (mg stack set ${stack.id} --auto-review on, or the repo setting in the dashboard), which does not review this head by itself, and then ${mention} to review it now.`;
+    return `Vortex auto-review is off for ${stack.owner}/${stack.repo} or for this stack, so it skipped #${layer.prNumber} at ${head} and Auto land waits for a review that will not come. Do not patch or push for this. Tell the human: turning auto-review on (mg stack set ${stack.id} --auto-review on, or the account setting in the dashboard) queues a review of this head by itself. To review only this head and leave auto-review off, ${mention}.`;
   }
   if (skipReason === "incomplete") {
     return `Vortex reviewed only some of the files in #${layer.prNumber} at ${head} and left the rest unreviewed, so Auto land waits for full coverage. Do not patch or push for this. To review the remaining files, ${mention} (the Continue button on the stack is unrelated), or tell the human to do it; turning on automatic overflow reviews in the dashboard settings covers this for later heads.`;
