@@ -154,6 +154,11 @@ const WHATS_NEW: Record<string, string[]> = {
     "stack watch names a stuck seam review",
     "stack watch names findings Cyclone left for you",
   ],
+  "0.3.36": [
+    "stack watch names what the merge queue waits on",
+    "stack watch names why Vortex skipped a head",
+    "stack watch says how to re-run Tempest",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

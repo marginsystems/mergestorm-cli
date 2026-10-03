@@ -6,7 +6,7 @@ import {
   pollStackWatch, StackWatchError, StackWatchTimeoutError,
   type PollStackWatchOptions, type StackWatchEnvelope,
 } from "./stack-watch.js";
-import { conflictLiveParent, conflictRepairSteps, landGateIsPending, stackBlockers, stackBlockersSummary } from "./stack-blockers.js";
+import { conflictLiveParent, conflictRepairSteps, landGateIsPending, mergeQueueWait, stackBlockers, stackBlockersSummary } from "./stack-blockers.js";
 import { STACK_WATCH_NOT_DONE_SENTENCE, stackTerminalReason, stackWatchObligation } from "./stack-watch-obligation.js";
 
 const HEAD = "a".repeat(40);
@@ -69,8 +69,9 @@ async function timedOut(options: PollStackWatchOptions): Promise<StackWatchEnvel
 
 test("attention at enrollment: CI on the current head", async () => {
   const h = harness(stack([layer({ ciStatus: "failure", checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: " lint " } })]));
-  const { repair, watch, landGatePending, ...result } = await pollStackWatch(cfg, "stack", h.options);
+  const { repair, watch, landGatePending, queueWait, ...result } = await pollStackWatch(cfg, "stack", h.options);
   assert.equal(landGatePending, null);
+  assert.equal(queueWait, null);
   assert.equal(repair?.kind, "ci_failure");
   assert.equal(repair?.kind === "ci_failure" ? repair.failingCheck : null, "lint");
   assert.equal(watch.done, false);
@@ -361,7 +362,6 @@ for (const [overrides, expected] of [
   [{ vortexStatus: "failed" }, "Review failed"],
   [{ agentRuns: [{ agent: "cyclone", status: "failed", sha: HEAD }] }, "Cyclone failed"],
   [{ agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD }] }, "Tempest findings"],
-  [{ agentRuns: [{ agent: "tempest", status: "failed", sha: HEAD }] }, "Tempest failed"],
   [{ restackError: { kind: "push_failed", detail: "failure", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null } }, "Restack failed"],
   [{ restackError: { kind: "push_failed", detail: "force-push failed: ! [remote rejected] b -> b (failure)", headSha: HEAD, attemptedAt: "", attempts: 3, backupRef: null } }, "Restack failed"],
   [{ restackError: { kind: "checkout_failed", detail: "failure", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null } }, "Restack failed"],
@@ -370,6 +370,23 @@ for (const [overrides, expected] of [
   test(`matches MCP label: ${expected}`, async () => {
     const h = harness(stack([layer(overrides)]));
     assert.equal((await pollStackWatch(cfg, "stack", h.options)).blocker, expected);
+  });
+}
+
+for (const kind of ["checkout_failed", "head_unresolved", "retarget_failed"] as const) {
+  test(`Restack failed (${kind}) carries a merge-the-parent repair`, async () => {
+    const h = harness(stack([
+      layer({ state: "needs_restack",
+        restackError: { kind, detail: "boom", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null } }),
+    ]));
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.blocker, "Restack failed");
+    assert.equal(result.repair?.kind, "restack_failed");
+    assert.equal(result.repair?.kind === "restack_failed" ? result.repair.liveParent : null, "main");
+    assert.equal(result.repair?.kind === "restack_failed" ? result.repair.restackKind : null, kind);
+    assert.match(result.repair?.steps ?? "", new RegExp(`\\(${kind}: boom\\)`));
+    assert.match(result.repair?.steps ?? "", /git merge origin\/main/);
+    assert.match(result.repair?.steps ?? "", /clears Restack failed once the pushed head contains the tip of main/);
   });
 }
 
@@ -659,13 +676,15 @@ test("degraded mid-wait snapshot invalidates the previous assessment", async () 
 
 test("a missing stack clears live work from the last poll", async () => {
   const h = harness(unitStack([
-    layer({ ...redCi, cycloneStatus: "patching", agentRuns: [{ agent: "cyclone", status: "patching", sha: HEAD }] }),
+    layer(),
     layer({ prNumber: 43, position: 1, ciStatus: "failure" }),
-  ], { landPrNumber: 43, landingBlockReason: "ci_pending: settling idle project checks" }));
-  const live = stackBlockers(h.state.stack);
+  ], { state: "landing", landPrNumber: 43, landingBlockReason: "ci_pending: settling idle project checks on abc1234" }),
+    [bounce({ state: "running", bounceDetail: null, finishedAt: null, claimedAt: null })]);
+  const live = stackBlockers(h.state.stack, h.state.entries);
+  assert.deepEqual(live.issues.map((issue) => issue.prNumber), [43]);
   assert.ok(live.currentCandidate);
-  assert.ok(live.agents);
   assert.ok(live.landGatePending);
+  assert.ok(live.queueWait);
   let missing = false;
   h.state.respond = (route) => {
     if (route.includes("&wait=")) missing = true;
@@ -686,6 +705,7 @@ test("a missing stack clears live work from the last poll", async () => {
     assert.equal(err.lastEnvelope.agents, null);
     assert.equal(err.lastEnvelope.currentCandidate, null);
     assert.equal(err.lastEnvelope.landGatePending, null);
+    assert.equal(err.lastEnvelope.queueWait, null);
     return true;
   });
 });
@@ -1037,7 +1057,7 @@ test("a quota-skipped review stays named while Cyclone patches the PR", async ()
 });
 
 test("other skip reasons and a quota skip at an older head are not blockers", () => {
-  for (const review of [{ ...quotaSkipped, skip_reason: "auto_review_off" }, { ...quotaSkipped, head_sha: NEXT },
+  for (const review of [{ ...quotaSkipped, skip_reason: "head_superseded" }, { ...quotaSkipped, head_sha: NEXT },
     { ...quotaSkipped, status: "reviewing" }] as const) {
     assert.equal(stackBlockers(stack([layer({ vortexReview: review })])).attention, null, JSON.stringify(review));
   }
@@ -1273,17 +1293,33 @@ test("a failed land gate is still attention", async () => {
   assert.equal(landGateIsPending("ci_pending: settling idle project checks on abc1234"), true);
 });
 
-for (const reason of ["tempest_failed", "tempest_stopped"]) {
-  test(`land gate ${reason} names the blocker but offers no findings repair`, async () => {
-    const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
-    const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874,
-      landingBlockReason: `landing blocked: ${reason} on land PR #2874` }));
-    const result = await pollStackWatch(cfg, "stack", h.options);
-    assert.equal(result.status, "attention");
-    assert.equal(result.blocker, `landing blocked: ${reason} on land PR #2874`);
-    assert.equal(result.repair, null);
-  });
-}
+test("land gate tempest_failed after the automatic re-runs names a Tempest re-run, not a findings fix", async () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
+  const reason = "landing blocked: tempest_failed on land PR #2874: Tempest's review broke 3 times at this head without a result";
+  const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874, landingBlockReason: reason }));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, reason);
+  assert.equal(result.repair?.kind, "tempest_rerun");
+  assert.equal(result.repair?.prNumber, 2874);
+  assert.equal(result.repair && "stoppedByPerson" in result.repair ? result.repair.stoppedByPerson : null, false);
+  assert.match(result.repair!.steps, /gh pr comment 2874 --repo owner\/repo --body "@mergestorm-tempest review"/);
+  assert.match(result.repair!.steps, /do not patch or push/);
+  assert.doesNotMatch(result.repair!.steps, /--force/);
+});
+
+test("land gate tempest_stopped asks the human before a forced Tempest re-run", async () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
+  const reason = "landing blocked: tempest_stopped on land PR #2874: a person stopped Tempest's review at this head";
+  const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874, landingBlockReason: reason }));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, reason);
+  assert.equal(result.repair?.kind, "tempest_rerun");
+  assert.equal(result.repair && "stoppedByPerson" in result.repair ? result.repair.stoppedByPerson : null, true);
+  assert.match(result.repair!.steps, /Ask the human whether to run Tempest again/);
+  assert.match(result.repair!.steps, /@mergestorm-tempest review --force/);
+});
 
 test("tempest findings on the land PR carry a tempest_findings repair on the land branch", async () => {
   const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
@@ -1309,12 +1345,15 @@ test("a Tempest findings run on the land PR carries the same repair", () => {
   assert.equal(blockers.repair?.kind, "tempest_findings");
 });
 
-test("a failed Tempest run on the land PR has no findings to fix, so no findings repair", () => {
+test("a broken Tempest run is not a hard block while Mergestorm re-runs it", () => {
   const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1,
     agentRuns: [{ agent: "tempest", status: "failed", sha: HEAD }] });
-  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874 }));
-  assert.equal(blockers.attention?.blocker, "Tempest failed");
+  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874,
+    landingBlockReason: "landing blocked: tempest_pending on land PR #2874" }));
+  assert.equal(blockers.attention, null);
   assert.equal(blockers.repair, null);
+  const layerRun = stackBlockers(stack([layer({ agentRuns: [{ agent: "tempest", status: "failed", sha: HEAD }] })]));
+  assert.equal(layerRun.attention, null);
 });
 
 test("a land PR repair never names an undefined branch when the unit branch is unknown", () => {
@@ -1333,6 +1372,17 @@ test("a tempest_findings queue bounce on the land PR carries the tempest_finding
   assert.match(blockers.attention?.blocker ?? "", /^Tempest findings/);
   assert.equal(blockers.repair?.kind, "tempest_findings");
   assert.equal(blockers.repair?.branch, "mg-stack-79");
+});
+
+test("a broken Tempest queue bounce uses its reason instead of the findings label", () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
+  const reason = "landing blocked: tempest_failed on land PR #2874: Tempest's review broke 3 times";
+  const entry = bounce({ bounceDetail: { kind: "tempest_findings", headSha: HEAD, prNumber: 2874, message: reason } });
+  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874 }), [entry]);
+  assert.equal(blockers.attention?.bounceKind, "tempest_findings");
+  assert.equal(blockers.repair?.kind, "tempest_rerun");
+  assert.equal(blockers.repair && "stoppedByPerson" in blockers.repair ? blockers.repair.stoppedByPerson : null, false);
+  assert.match(blockers.repair!.steps, /do not patch or push/);
 });
 
 test("tempest findings on a land PR that Cyclone is patching hold in progress with no repair", () => {
@@ -1457,7 +1507,7 @@ test("Auto land off with no disarming bounce keeps waiting", async () => {
 test("a newer enqueue after a disarming bounce is not named as a disarm", () => {
   const later = disarmingBounce({ id: "later", state: "queued", enqueuedAt: "2026-01-01T00:05:00Z",
     bounceDetail: null, finishedAt: null });
-  const result = stackBlockers(disarmedStack(false), [disarmingBounce(), later]);
+  const result = stackBlockers(disarmedStack(false), [disarmingBounce(), later], {}, Date.parse("2026-01-01T00:06:00Z"));
   assert.equal(result.attention, null);
   assert.deepEqual(result.issues, []);
 });
@@ -1703,6 +1753,27 @@ test("a stack with auto-patch off names Vortex findings at the head with no Cycl
   assert.equal(stackBlockers(stack([changesRequested()])).attention, null);
 });
 
+for (const [reason, words] of [
+  ["account_auto_patch_off", /auto-patch is off for the account/],
+  ["cyclone_not_connected", /Cyclone is not connected to this repo/],
+  ["stack_auto_patch_off", /auto-patch is off for this stack/],
+] as const) {
+  test(`Vortex findings at the head with no Cyclone row are named when Cyclone will not patch (${reason})`, async () => {
+    const h = harness({ ...stack([changesRequested()]), cyclonePatchOff: reason });
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, "Vortex findings need a person");
+    assert.equal(result.repair?.kind, "vortex_findings");
+    assert.equal(result.repair?.kind === "vortex_findings" ? result.repair.handoff : null, reason);
+    assert.match(result.repair?.steps ?? "", words);
+  });
+}
+
+test("Vortex findings are not named when Cyclone will not patch but Cyclone is working the PR", () => {
+  const off = { ...stack([changesRequested({ cycloneStatus: "patching" })]), cyclonePatchOff: "account_auto_patch_off" as const };
+  assert.equal(stackBlockers(off).attention, null);
+});
+
 test("Vortex findings are not named while Cyclone may still patch them", () => {
   const handoff = { headSha: HEAD, reason: "vortex_patch_cap", at: null };
   for (const candidate of [
@@ -1725,4 +1796,162 @@ test("a more specific blocker on the head wins over Vortex findings left for a p
   assert.equal(stackBlockers(stack([changesRequested({
     cycloneHandoff: handoff, agentRuns: [{ agent: "cyclone", status: "failed", sha: HEAD }],
   })])).attention?.blocker, "Cyclone failed");
+});
+
+const QUEUE_NOW = Date.parse("2026-01-01T02:00:00Z");
+function minutesBefore(minutes: number): string {
+  return new Date(QUEUE_NOW - minutes * 60_000).toISOString();
+}
+
+test("a live queue entry names its wait reason and how long it has been held", async () => {
+  const live = bounce({ state: "waiting", bounceDetail: null, finishedAt: null, waitReason: "CI pending on abc1234 (Tests)",
+    claimedAt: minutesBefore(12) });
+  const h = harness(stack(), [live]);
+  h.options.now = () => QUEUE_NOW;
+  h.options.timeoutMs = 0;
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "in_progress");
+  assert.deepEqual(result.queueWait, {
+    prNumber: 42, headSha: HEAD, text: "Merge queue waiting for 12m: CI pending on abc1234 (Tests)",
+    since: minutesBefore(12), waitReason: "CI pending on abc1234 (Tests)",
+  });
+  assert.equal(stackBlockersSummary(null, [], [], null, null, result.queueWait),
+    " · queue: #42 Merge queue waiting for 12m: CI pending on abc1234 (Tests)");
+});
+
+test("a fresh queued entry with no live entry ahead is not stalled", () => {
+  const queued = bounce({ state: "queued", bounceDetail: null, finishedAt: null, enqueuedAt: minutesBefore(10) });
+  const wait = mergeQueueWait([queued], QUEUE_NOW);
+  const result = stackBlockers(stack(), [queued], {}, QUEUE_NOW);
+  assert.equal(wait?.text, "Queued 10m in the merge queue, not picked up yet");
+  assert.equal(wait?.stalled, false);
+  assert.equal(result.attention, null);
+});
+
+test("a queue entry held past the stall threshold is attention with a plain repair", () => {
+  const live = bounce({ state: "running", bounceDetail: null, finishedAt: null, waitReason: "gh_error: Server Error, retry 2/3",
+    claimedAt: minutesBefore(50) });
+  const result = stackBlockers(stack(), [live], {}, QUEUE_NOW);
+  assert.equal(result.attention?.blocker, "Merge queue stuck: Merge queue running for 50m: gh_error: Server Error, retry 2/3");
+  assert.equal(result.repair?.kind, "queue_stalled");
+  assert.match(result.repair?.steps ?? "", /mg queue rm stack, then mg queue add stack/);
+  assert.equal(result.queueWait, null);
+});
+
+test("a queued entry with nothing live ahead is named but never stalled, since a release leaves it so until the next claim", async () => {
+  const queued = bounce({ state: "queued", bounceDetail: null, finishedAt: null, enqueuedAt: minutesBefore(50) });
+  const h = harness(stack(), [queued]);
+  h.options.now = () => QUEUE_NOW;
+  h.options.timeoutMs = 0;
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "in_progress");
+  assert.equal(result.blocker, null);
+  assert.equal(result.queueWait?.text, "Queued 50m in the merge queue, not picked up yet");
+});
+
+test("a running entry without a claim timestamp has an unknown age", () => {
+  const live = bounce({ state: "running", bounceDetail: null, finishedAt: null, enqueuedAt: minutesBefore(90), claimedAt: null });
+  const result = stackBlockers(stack(), [live], {}, QUEUE_NOW);
+  assert.equal(result.attention, null);
+  assert.deepEqual(result.queueWait, {
+    prNumber: 42, headSha: HEAD, text: "Merge queue running for an unknown duration: no reason recorded",
+    since: null, waitReason: null,
+  });
+
+  const queued = bounce({ state: "queued", bounceDetail: null, finishedAt: null, enqueuedAt: minutesBefore(90),
+    aheadInRepo: { stackId: null, state: "running", claimedAt: null, waitReason: null } });
+  const behind = stackBlockers(stack(), [queued], {}, QUEUE_NOW);
+  assert.equal(behind.attention, null);
+  assert.equal(behind.queueWait?.text,
+    "Queued 90m behind another user's stack, which has been running in the merge queue for an unknown duration");
+  assert.equal(behind.queueWait?.since, null);
+});
+
+test("a queued entry names the stack ahead of it and wakes the watch once that entry stalls", async () => {
+  const queued = (claimedMinutes: number) => bounce({ state: "queued", bounceDetail: null, finishedAt: null, position: 1,
+    enqueuedAt: minutesBefore(55), aheadInRepo: { stackId: "other-stack", state: "waiting", claimedAt: minutesBefore(claimedMinutes),
+      waitReason: "CI pending on def5678" } });
+  const fresh = stackBlockers(stack(), [queued(20)], {}, QUEUE_NOW);
+  assert.equal(fresh.attention, null);
+  assert.equal(fresh.queueWait?.text,
+    "Queued 55m behind stack other-stack, which has been waiting in the merge queue for 20m: CI pending on def5678");
+
+  const h = harness(stack(), [queued(46)]);
+  h.options.now = () => QUEUE_NOW;
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.match(result.blocker ?? "", /^Merge queue stuck: Queued 55m behind stack other-stack/);
+  assert.equal(result.repair?.kind, "queue_stalled");
+  assert.match(result.repair?.steps ?? "", /mg stack status other-stack/);
+});
+
+test("a queued entry behind another user's entry does not show that user's stack or reason", () => {
+  const queued = bounce({ state: "queued", bounceDetail: null, finishedAt: null, enqueuedAt: minutesBefore(5),
+    aheadInRepo: { stackId: null, state: "running", claimedAt: minutesBefore(3), waitReason: null } });
+  const result = stackBlockers(stack(), [queued], {}, QUEUE_NOW);
+  assert.equal(result.queueWait?.text, "Queued 5m behind another user's stack, which has been running in the merge queue for 3m");
+});
+
+for (const [skipReason, blocker, step] of [
+  ["auto_review_off", "Vortex auto-review is off, so this head was not reviewed", /mg stack set stack --auto-review on/],
+  ["billing_blocked", "Vortex skipped this head: it could not confirm billing", /check the plan and billing/],
+  ["billing_unavailable", "Vortex skipped this head: it could not confirm billing", /comment @mergestorm-vortex review on #42/],
+] as const) {
+  test(`a Vortex review skipped for ${skipReason} at the head is attention at once, without Auto land`, async () => {
+    const h = harness(stack([layer({ vortexStatus: "skipped", vortexReview: { ...quotaSkipped, skip_reason: skipReason } })]));
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, blocker);
+    assert.equal(result.repair?.kind, "vortex_skipped");
+    assert.equal(result.repair?.kind === "vortex_skipped" ? result.repair.skipReason : null, skipReason);
+    assert.match(result.repair?.steps ?? "", step);
+  });
+}
+
+test("a Vortex review that covered only part of the PR is attention with the mention that continues it", async () => {
+  const h = harness(stack([layer({ vortexStatus: "incomplete",
+    vortexReview: { ...quotaSkipped, status: "done", skip_reason: null } })]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Vortex reviewed only part of this PR");
+  assert.equal(result.repair?.kind, "vortex_skipped");
+  assert.equal(result.repair?.kind === "vortex_skipped" ? result.repair.skipReason : null, "incomplete");
+  assert.match(result.repair?.steps ?? "", /left the rest unreviewed/);
+});
+
+for (const [vortexStatus, review, blocker] of [
+  ["skipped", { ...quotaSkipped, skip_reason: "auto_review_off" }, "Vortex auto-review is off, so this head was not reviewed"],
+  ["skipped", { ...quotaSkipped, skip_reason: "billing_blocked" }, "Vortex skipped this head: it could not confirm billing"],
+  ["incomplete", { ...quotaSkipped, status: "done", skip_reason: null }, "Vortex reviewed only part of this PR"],
+] as const) {
+  test(`${blocker} stays named while Cyclone patches the PR`, async () => {
+    const h = harness(stack([layer({ vortexStatus, vortexReview: review, cycloneStatus: "patching",
+      agentRuns: [{ agent: "cyclone", status: "patching", sha: HEAD }] })]));
+    const result = await heldInProgress(h.options);
+    assert.equal(result.blocker, blocker);
+    assert.equal(result.actAfter, "agents_idle");
+    assert.deepEqual(result.waitingOn, ["cyclone"]);
+  });
+}
+
+test("an incomplete Vortex review at an older head is not named at the live head", () => {
+  const review = { ...quotaSkipped, status: "done" as const, skip_reason: null, head_sha: NEXT };
+  assert.equal(stackBlockers(stack([layer({ vortexStatus: "incomplete", vortexReview: review })])).attention, null);
+});
+
+test("a skipped or partial Vortex review is not named while a Vortex run works on the head", () => {
+  for (const overrides of [
+    { vortexStatus: "skipped", vortexReview: { ...quotaSkipped, skip_reason: "auto_review_off" },
+      agentRuns: [{ agent: "vortex", status: "reviewing", sha: HEAD }] },
+    { vortexStatus: "incomplete", vortexReview: { ...quotaSkipped, status: "reviewing", skip_reason: null } },
+  ] as const) {
+    const blockers = stackBlockers(stack([layer(overrides as Partial<StackLayerDto>)]));
+    assert.equal(blockers.attention, null, JSON.stringify(overrides));
+    if (overrides.vortexStatus === "incomplete") assert.deepEqual(blockers.busy, []);
+  }
+});
+
+test("an auto_review_off skip at an older head is not named at the live head", () => {
+  const review = { ...quotaSkipped, skip_reason: "auto_review_off", head_sha: NEXT };
+  assert.equal(stackBlockers(stack([layer({ vortexStatus: "skipped", vortexReview: review })])).attention, null);
 });

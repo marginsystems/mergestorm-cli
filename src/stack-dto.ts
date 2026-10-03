@@ -396,6 +396,8 @@ export type StackUnitDto = {
 
 export type CycloneOwnerMatch = "same" | "different" | "none" | "lookup_failed";
 
+export type CyclonePatchOffReason = "stack_auto_patch_off" | "account_auto_patch_off" | "cyclone_not_connected";
+
 export type StackDto = {
   id: string;
   owner: string;
@@ -468,6 +470,7 @@ export type StackDto = {
    * `lookup_failed`: the comparison could not be loaded. Fail closed.
    */
   cycloneOwnerMatch?: CycloneOwnerMatch;
+  cyclonePatchOff?: CyclonePatchOffReason;
   layers: StackLayerDto[];
   /** Present when a review-unit row exists for this stack. */
   unit?: StackUnitDto;
@@ -580,6 +583,13 @@ export type MergeQueueEntryBatchDto = {
   landedCount: number;
 };
 
+export type MergeQueueAheadDto = {
+  stackId: string | null;
+  state: "running" | "waiting";
+  claimedAt: string | null;
+  waitReason: string | null;
+};
+
 export type MergeQueueEntryDto = {
   id: string;
   stackId: string;
@@ -603,4 +613,6 @@ export type MergeQueueEntryDto = {
   cancelRequestedAt?: string | null;
   batch?: MergeQueueEntryBatchDto | null;
   finishedAt: string | null;
+  claimedAt?: string | null;
+  aheadInRepo?: MergeQueueAheadDto | null;
 };

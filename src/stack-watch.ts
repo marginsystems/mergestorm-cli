@@ -8,6 +8,7 @@ import {
   type StackHeldBlocker,
   type StackLayerAgents,
   type StackLandGatePending,
+  type StackQueueWait,
   type StackRepairHint,
 } from "./stack-blockers.js";
 import {
@@ -58,6 +59,7 @@ export type StackWatchEnvelope = {
   agents: StackLayerAgents | null;
   repair: StackRepairHint | null;
   landGatePending: StackLandGatePending | null;
+  queueWait?: StackQueueWait | null;
   watch: StackWatchObligation;
 };
 
@@ -194,7 +196,7 @@ export async function pollStackWatch(
       terminal = "not_found";
       throw new StackWatchError("Stack not found or not owned by the current user",
         seal({ ...lastEnvelope, status: "failed", assessment: "unavailable", blocker: null, issues: [], busy: [], actAfter: null, waitingOn: [],
-          prNumber: null, headSha: null, repair: null, agents: null, currentCandidate: null, landGatePending: null }));
+          prNumber: null, headSha: null, repair: null, agents: null, currentCandidate: null, landGatePending: null, queueWait: null }));
     }
     if (!stack || !Array.isArray(stack.layers)) {
       throw new StackWatchError("Stack snapshot missing or invalid", seal({ ...lastEnvelope, status: "failed", assessment: "unavailable" }));
@@ -214,12 +216,13 @@ export async function pollStackWatch(
     };
   };
   const evaluate = (stack: StackDto, entries: MergeQueueEntryDto[]) => {
-    const { attention, held: named, issues, currentCandidate, bounce, busy, agents, repair, landGatePending } = stackBlockers(stack, entries, cursor, now());
+    const { attention, held: named, issues, currentCandidate, bounce, busy, agents, repair, landGatePending, queueWait } =
+      stackBlockers(stack, entries, cursor, now());
     if (bounce) cursor = Object.freeze({ ...cursor, bounceId: bounce.id,
       ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}) });
     const held = busy[0];
     const shown = attention ?? named;
-    lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available", busy, agents, repair, landGatePending,
+    lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available", busy, agents, repair, landGatePending, queueWait,
       actAfter: named?.actAfter ?? null, waitingOn: named?.waitingOn ?? [],
       blocker: shown?.blocker ?? null, bounceKind: shown?.bounceKind ?? null,
       prNumber: shown?.prNumber ?? held?.prNumber ?? currentCandidate?.prNumber ?? null,

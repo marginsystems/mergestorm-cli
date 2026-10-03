@@ -12,10 +12,12 @@ import {
   findStackPull,
   getEnrichedStack,
   landNextStack,
+  listMergeQueueEntries,
   listStacks,
   openStackPull,
   restackStack,
   setStackPolicy,
+  type MergeQueueEntryDto,
   type StackDto,
   type StackPolicyPatch,
 } from "../api.js";
@@ -1234,7 +1236,7 @@ export async function cmdStackWait(
       ...(retryAfterSeconds !== undefined ? { retry_after_seconds: retryAfterSeconds } : {}),
     }, null, 2)
     : [
-      `Stack ${envelope.stackId} · ${envelope.status}${stackBlockersSummary(envelope.blocker && envelope.prNumber != null ? { prNumber: envelope.prNumber, blocker: envelope.blocker } : null, envelope.issues, envelope.busy, envelope.landGatePending ?? null, envelope.actAfter ?? null)}${envelope.assessment === "unavailable" ? " · assessment unavailable" : ""}`,
+      `Stack ${envelope.stackId} · ${envelope.status}${stackBlockersSummary(envelope.blocker && envelope.prNumber != null ? { prNumber: envelope.prNumber, blocker: envelope.blocker } : null, envelope.issues, envelope.busy, envelope.landGatePending ?? null, envelope.actAfter ?? null, envelope.queueWait ?? null)}${envelope.assessment === "unavailable" ? " · assessment unavailable" : ""}`,
       ...stackRepairLine(envelope.repair),
       ...stackWatchTextLines(envelope.watch),
     ].join("\n"));
@@ -1327,6 +1329,7 @@ export async function cmdStackStatus(
   deps: {
     loadConfig?: typeof loadConfig;
     getEnrichedStack?: typeof getEnrichedStack;
+    listMergeQueueEntries?: typeof listMergeQueueEntries;
   } = {},
 ): Promise<void> {
   const usage = "usage: mergestorm stack status <stack-id> [--json]";
@@ -1350,7 +1353,10 @@ export async function cmdStackStatus(
       "not_found",
     );
   }
-  const { attention, held, currentCandidate, repair } = stackBlockers(stack);
+  const entries: MergeQueueEntryDto[] = await (deps.listMergeQueueEntries ?? listMergeQueueEntries)(cfg, {
+    stackId: stack.id,
+  });
+  const { attention, held, currentCandidate, repair, queueWait } = stackBlockers(stack, entries);
   const watch = stackWatchObligation({
     stackId: stack.id,
     terminal: stackTerminalReason(stack),
@@ -1359,7 +1365,7 @@ export async function cmdStackStatus(
     freshCursor: true,
   });
   if (asJson) {
-    console.log(JSON.stringify({ ...stack, held, repair, watch }, null, 2));
+    console.log(JSON.stringify({ ...stack, held, repair, queueWait, watch }, null, 2));
     return;
   }
   const lines = formatStackHuman(stack, false);
@@ -1374,6 +1380,7 @@ export async function cmdStackStatus(
         (layer.tempestStatus ? `  Tempest: ${layer.tempestStatus}` : ""),
     );
   }
+  if (queueWait && !attention) lines.push(`  Queue: #${queueWait.prNumber} ${queueWait.text}`);
   lines.push(...[...stackHeldLine(held), ...stackRepairLine(repair), ...stackWatchTextLines(watch)].map((line) => `  ${line}`));
   await present("Stack status", lines);
 }

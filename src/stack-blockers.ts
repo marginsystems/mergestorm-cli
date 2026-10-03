@@ -66,6 +66,14 @@ export type StackRepairHint =
     steps: string;
   }
   | {
+    kind: "tempest_rerun";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    stoppedByPerson: boolean;
+    steps: string;
+  }
+  | {
     kind: "vortex_findings";
     prNumber: number;
     headSha: string | null;
@@ -79,6 +87,15 @@ export type StackRepairHint =
     prNumber: number;
     headSha: string | null;
     branch: string;
+    steps: string;
+  }
+  | {
+    kind: "restack_failed";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    liveParent: string | null;
+    restackKind: string;
     steps: string;
   }
   | {
@@ -103,6 +120,23 @@ export type StackRepairHint =
     headSha: string | null;
     branch: string;
     since: string;
+    steps: string;
+  }
+  | {
+    kind: "queue_stalled";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    since: string | null;
+    waitReason: string | null;
+    steps: string;
+  }
+  | {
+    kind: "vortex_skipped";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    skipReason: string;
     steps: string;
   }
   | {
@@ -182,6 +216,8 @@ export function currentLayer(stack: StackDto): StackLayerDto | undefined {
     (land && land.prNumber > 0 && land.state !== "merged" && land.state !== "closed" ? land : undefined);
 }
 
+export const RESTACK_FAILED = "Restack failed";
+
 export const SEAM_REVIEW_NOT_RUNNING = "Seam review pending, no review running";
 
 export const VORTEX_REVIEW_OUT_OF_QUOTA = "Review skipped, out of review quota";
@@ -209,7 +245,18 @@ function vortexChangesRequestedAtHead(layer: StackLayerDto): boolean {
 
 function cycloneHandoffAtHead(stack: StackDto, layer: StackLayerDto): string | null {
   if (sameHead(layer.cycloneHandoff?.headSha, layer.headSha)) return layer.cycloneHandoff!.reason;
-  return stack.autoPatchOverride === false ? "auto_patch_off" : null;
+  return stack.cyclonePatchOff ?? (stack.autoPatchOverride === false ? "auto_patch_off" : null);
+}
+
+const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
+  auto_patch_off: "auto-patch is off for this stack",
+  stack_auto_patch_off: "auto-patch is off for this stack",
+  account_auto_patch_off: "auto-patch is off for the account and this stack does not turn it on",
+  cyclone_not_connected: "Cyclone is not connected to this repo",
+};
+
+function cycloneHandoffWords(reason: string): string {
+  return CYCLONE_HANDOFF_WORDS[reason] ?? reason.replaceAll("_", " ");
 }
 
 function vortexFindingsLeftForPerson(stack: StackDto, layer: StackLayerDto): boolean {
@@ -221,6 +268,44 @@ function quotaSkippedReview(layer: StackLayerDto): boolean {
   const review = layer.vortexReview;
   return review?.status === "skipped" && review.skip_reason === "quota_exceeded" &&
     sameHead(review.head_sha, layer.headSha);
+}
+
+export const VORTEX_AUTO_REVIEW_OFF = "Vortex auto-review is off, so this head was not reviewed";
+
+export const VORTEX_BILLING_SKIPPED = "Vortex skipped this head: it could not confirm billing";
+
+export const VORTEX_REVIEW_INCOMPLETE = "Vortex reviewed only part of this PR";
+
+const VORTEX_SKIP_BLOCKERS: Readonly<Record<string, string>> = {
+  auto_review_off: VORTEX_AUTO_REVIEW_OFF,
+  billing_blocked: VORTEX_BILLING_SKIPPED,
+  billing_unavailable: VORTEX_BILLING_SKIPPED,
+};
+
+function vortexIdleSkipBlocker(layer: StackLayerDto): { blocker: string; skipReason: string } | null {
+  if (layerAgentsBusy(layer).vortex) return null;
+  const review = layer.vortexReview;
+  if (review?.status === "skipped" && sameHead(review.head_sha, layer.headSha)) {
+    const reason = review.skip_reason?.trim() ?? "";
+    const blocker = VORTEX_SKIP_BLOCKERS[reason];
+    if (blocker) return { blocker, skipReason: reason };
+  }
+  if (layer.vortexStatus === "incomplete" && sameHead(review?.head_sha, layer.headSha)) {
+    return { blocker: VORTEX_REVIEW_INCOMPLETE, skipReason: "incomplete" };
+  }
+  return null;
+}
+
+function vortexSkippedSteps(stack: StackDto, layer: StackLayerDto, skipReason: string): string {
+  const head = layer.headSha ?? "its live head";
+  const mention = `comment @mergestorm-vortex review on #${layer.prNumber}`;
+  if (skipReason === "auto_review_off") {
+    return `Vortex auto-review is off for ${stack.owner}/${stack.repo} or for this stack, so it skipped #${layer.prNumber} at ${head} and Auto land waits for a review that will not come. Do not patch or push for this. Tell the human: they can turn auto-review on (mg stack set ${stack.id} --auto-review on, or the repo setting in the dashboard), which does not review this head by itself, and then ${mention} to review it now.`;
+  }
+  if (skipReason === "incomplete") {
+    return `Vortex reviewed only some of the files in #${layer.prNumber} at ${head} and left the rest unreviewed, so Auto land waits for full coverage. Do not patch or push for this. To review the remaining files, ${mention} (the Continue button on the stack is unrelated), or tell the human to do it; turning on automatic overflow reviews in the dashboard settings covers this for later heads.`;
+  }
+  return `Vortex skipped #${layer.prNumber} at ${head} because it could not confirm billing for this account, so Auto land waits for a review that will not come. Do not patch or push for this. Re-run the review: ${mention}. If it is skipped again, tell the human to check the plan and billing in the Mergestorm dashboard.`;
 }
 
 function seamGateBlocker(stack: StackDto, layer: StackLayerDto): string | null {
@@ -265,7 +350,7 @@ function layerAttention(
   if (layer) {
     if (layer.restackError && layer.state !== "restacking") {
       if (layer.restackError.kind === "rebase_conflict") return hardBlock("Conflict");
-      if (!restackRetryPending(layer.restackError, layer)) return hardBlock("Restack failed");
+      if (!restackRetryPending(layer.restackError, layer)) return hardBlock(RESTACK_FAILED);
     }
     if (layer.state === "conflict") return hardBlock("Conflict");
     if (layer.draft) return {
@@ -281,10 +366,12 @@ function layerAttention(
     if (layer.agentRuns?.some((run) => run.agent === "cyclone" && run.status === "failed" &&
       sameHead(run.sha, layer.headSha))) return hardBlock("Cyclone failed");
     const tempest = layer.agentRuns?.find((run) => run.agent === "tempest" &&
-      ["findings", "failed"].includes(run.status) && sameHead(run.sha, layer.headSha));
+      run.status === "findings" && sameHead(run.sha, layer.headSha));
     if (tempest) return hardBlock(`Tempest ${tempest.status}`);
     if (layer.vortexStatus === "failed") return hardBlock("Review failed");
     if (quotaSkippedReview(layer)) return hardBlock(VORTEX_REVIEW_OUT_OF_QUOTA);
+    const vortexSkip = vortexIdleSkipBlocker(layer);
+    if (vortexSkip) return hardBlock(vortexSkip.blocker);
     const seam = seamGateBlocker(stack, layer);
     if (seam) return hardBlock(seam);
     if (unitAbandonedUnder(stack, layer)) {
@@ -386,6 +473,75 @@ export function autoLandWaitBlocker(stack: StackDto, layer: StackLayerDto, nowMs
   }
 }
 
+export const MERGE_QUEUE_STALL_ATTENTION_MS = 45 * 60_000;
+const MERGE_QUEUE_STALLED_PREFIX = "Merge queue stuck: ";
+const LIVE_QUEUE_STATES: readonly string[] = ["queued", "running", "waiting"];
+
+export type StackQueueWait = {
+  prNumber: number;
+  headSha: string | null;
+  text: string;
+  since: string | null;
+  waitReason: string | null;
+};
+
+export type MergeQueueWait = {
+  text: string;
+  stalled: boolean;
+  since: string | null;
+  waitReason: string | null;
+  aheadStackId: string | null;
+  aheadOther: boolean;
+};
+
+function minutesOf(ms: number | null): number {
+  return ms == null ? 0 : Math.floor(ms / 60_000);
+}
+
+export function mergeQueueWait(queue: readonly MergeQueueEntryDto[], nowMs: number): MergeQueueWait | null {
+  const entry = queue.find((candidate) => LIVE_QUEUE_STATES.includes(candidate.state));
+  if (!entry) return null;
+  const reason = entry.waitReason?.trim() || null;
+  if (entry.state === "queued") {
+    const queuedFor = minutesOf(waitedMs(entry.enqueuedAt, nowMs));
+    const ahead = entry.aheadInRepo;
+    if (!ahead) {
+      return {
+        text: `Queued ${queuedFor}m in the merge queue, not picked up yet${reason ? ` (last note: ${reason})` : ""}`,
+        stalled: false,
+        since: entry.enqueuedAt, waitReason: reason, aheadStackId: null, aheadOther: false,
+      };
+    }
+    const aheadMs = ahead.claimedAt ? waitedMs(ahead.claimedAt, nowMs) : null;
+    const aheadReason = ahead.waitReason?.trim() || null;
+    const who = ahead.stackId ? `stack ${ahead.stackId}` : "another user's stack";
+    const aheadFor = aheadMs == null ? "an unknown duration" : `${minutesOf(aheadMs)}m`;
+    return {
+      text: `Queued ${queuedFor}m behind ${who}, which has been ${ahead.state} in the merge queue for ${aheadFor}${aheadReason ? `: ${aheadReason}` : ""}`,
+      stalled: aheadMs != null && aheadMs >= MERGE_QUEUE_STALL_ATTENTION_MS,
+      since: ahead.claimedAt, waitReason: aheadReason, aheadStackId: ahead.stackId, aheadOther: !ahead.stackId,
+    };
+  }
+  const since = entry.claimedAt ?? null;
+  const liveMs = since === null ? null : waitedMs(since, nowMs);
+  const liveFor = liveMs == null ? "an unknown duration" : `${minutesOf(liveMs)}m`;
+  return {
+    text: `Merge queue ${entry.state === "waiting" ? "waiting" : "running"} for ${liveFor}: ${reason ?? "no reason recorded"}`,
+    stalled: liveMs != null && liveMs >= MERGE_QUEUE_STALL_ATTENTION_MS,
+    since, waitReason: reason, aheadStackId: null, aheadOther: false,
+  };
+}
+
+function queueStalledSteps(stack: StackDto, layer: StackLayerDto, wait: MergeQueueWait): string {
+  if (wait.aheadStackId || wait.aheadOther) {
+    const ahead = wait.aheadStackId
+      ? `Run mg stack status ${wait.aheadStackId} and fix what it names there; this stack moves once that entry lands or bounces.`
+      : "That entry belongs to another Mergestorm user, so you cannot fix it from here.";
+    return `#${layer.prNumber} is waiting in the merge queue behind another entry in ${stack.owner}/${stack.repo} that has made no progress since ${wait.since ?? "it was claimed"}. Nothing on ${layer.branch} needs a change. ${ahead} If it stays stuck, tell the human: the queue for this repo is held by that entry.`;
+  }
+  return `The merge queue has held #${layer.prNumber} at ${layer.headSha ?? "its head"} since ${wait.since ?? "it was claimed"} without landing or bouncing it${wait.waitReason ? `; its last note is: ${wait.waitReason}` : ", and it recorded no reason"}. If the note names a failing check or a conflict on ${layer.branch}, fix that with an ordinary push. If it waits on CI, list the head's checks (gh run list --branch ${layer.branch}) and re-run the one that never finished (gh run rerun <run-id>). If nothing moves after that, tell the human: they can take the stack out of the queue and enqueue it again (mg queue rm ${stack.id}, then mg queue add ${stack.id}). Do not retarget the PR base.`;
+}
+
 function isTerminalLayer(layer: StackLayerDto): boolean {
   return layer.state === "merged" || layer.state === "closed";
 }
@@ -425,20 +581,38 @@ export function conflictRepairSteps(branch: string, liveParent: string | null): 
   return `Merge ${liveParent} into ${branch}: git fetch origin, check out ${branch} at its live remote head, git merge origin/${liveParent}, resolve the conflicts, run the tests, then an ordinary git push (no force). Do not rebase onto trunk, main, or mg-park-*, and do not retarget the PR base.`;
 }
 
+export function restackFailedRepairSteps(
+  branch: string,
+  liveParent: string | null,
+  failure: { kind: string; detail?: string | null },
+): string {
+  const why = `Mergestorm could not restack ${branch}${liveParent ? ` onto ${liveParent}` : ""} (${failure.kind}${failure.detail?.trim() ? `: ${failure.detail.trim()}` : ""}) and will not try this head again.`;
+  if (!liveParent) {
+    return `${why} The live parent of ${branch} is unknown (it is never an mg-park-* freeze). Do not merge or rebase anything; stop and tell the human.`;
+  }
+  return `${why} Merge ${liveParent} into ${branch}: git fetch origin, check out ${branch} at its live remote head, git merge origin/${liveParent}, resolve any conflicts, run the tests, then an ordinary git push (no force). Mergestorm clears Restack failed once the pushed head contains the tip of ${liveParent}. If GitHub refuses the push (branch protection or permissions), stop and tell the human. Do not rebase onto trunk, main, or mg-park-*, and do not retarget the PR base.`;
+}
+
 function landPrLiveParent(stack: StackDto, layer: StackLayerDto): string | null {
   const base = stack.unit?.landTarget?.trim() || layer.parentBranch?.trim();
   return base && !isMgParkBase(base) && base !== layer.branch ? base : null;
 }
 
 export function agentsCannotClear(blocker: string): boolean {
-  return blocker === "Conflict" || blocker === "Restack failed" || blocker === "Draft PR" ||
+  return blocker === "Conflict" || blocker === RESTACK_FAILED || blocker === "Draft PR" ||
     blocker === SEAM_REVIEW_NOT_RUNNING || blocker === VORTEX_REVIEW_OUT_OF_QUOTA ||
+    blocker === VORTEX_AUTO_REVIEW_OFF || blocker === VORTEX_BILLING_SKIPPED ||
+    blocker === VORTEX_REVIEW_INCOMPLETE ||
     STUCK_SEAM_BLOCKERS.includes(blocker) ||
     blocker.startsWith("Merge conflicts") || blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX);
 }
 
-function isTempestFindingsBlocker(attention: StackBlocker): boolean {
+const TEMPEST_RERUN_BLOCKER = /^(?:landing blocked:\s*)?tempest_(failed|stopped)\b/i;
+
+function isTempestFindingsBlocker(attention: StackBlocker, bounce: MergeQueueEntryDto | undefined): boolean {
   const blocker = attention.blocker.trim();
+  const reason = bounce?.bounceDetail?.message?.trim();
+  if (reason && TEMPEST_RERUN_BLOCKER.test(reason)) return false;
   return attention.bounceKind === "tempest_findings" || /^Tempest findings\b/i.test(blocker) ||
     /^(?:landing blocked:\s*)?tempest_findings\b/i.test(blocker);
 }
@@ -448,8 +622,20 @@ export function stackRepair(
   attention: StackBlocker | null,
   layer: StackLayerDto | undefined,
   bounce: MergeQueueEntryDto | undefined,
+  queueWait: MergeQueueWait | null = null,
 ): StackRepairHint | null {
   if (!attention || !layer || attention.prNumber !== layer.prNumber) return null;
+  if (queueWait && attention.blocker.startsWith(MERGE_QUEUE_STALLED_PREFIX)) {
+    return {
+      kind: "queue_stalled",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      since: queueWait.since,
+      waitReason: queueWait.waitReason,
+      steps: queueStalledSteps(stack, layer, queueWait),
+    };
+  }
   const landPr = !!stack.unit?.branch && layer.prNumber === stack.unit.landPrNumber && layer.branch === stack.unit.branch;
   const restackConflict = attention.blocker === "Conflict" || attention.bounceKind === "restack_conflict";
   const mergeConflict = attention.blocker.startsWith("Merge conflicts");
@@ -463,6 +649,18 @@ export function stackRepair(
       liveParent,
       files: conflictFiles(layer, bounce),
       steps: conflictRepairSteps(layer.branch, liveParent),
+    };
+  }
+  if (attention.blocker === RESTACK_FAILED && layer.restackError) {
+    const liveParent = landPr ? landPrLiveParent(stack, layer) : conflictLiveParent(stack, layer);
+    return {
+      kind: "restack_failed",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      liveParent,
+      restackKind: layer.restackError.kind,
+      steps: restackFailedRepairSteps(layer.branch, liveParent, layer.restackError),
     };
   }
   if (attention.blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX)) {
@@ -503,7 +701,7 @@ export function stackRepair(
       steps: `The ${attention.bounceKind} bounce turned Auto land off, so nothing will enqueue this stack. Fix the cause of the bounce on ${layer.branch}, then turn Auto land back on (mg stack set ${stack.id} --auto-land on) or enqueue the stack.`,
     };
   }
-  if (landPr && isTempestFindingsBlocker(attention)) {
+  if (landPr && isTempestFindingsBlocker(attention, bounce)) {
     const findings = `gh api repos/${stack.owner}/${stack.repo}/issues/${layer.prNumber}/comments`;
     return {
       kind: "tempest_findings",
@@ -512,6 +710,35 @@ export function stackRepair(
       branch: layer.branch,
       findings,
       steps: `Tempest never patches, and Cyclone is not patching this land PR. Read the Tempest report on it (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch on ${layer.branch}, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). Do not retarget the PR base.`,
+    };
+  }
+  const rerunBlocker = attention.blocker.trim().match(TEMPEST_RERUN_BLOCKER) ??
+    bounce?.bounceDetail?.message?.trim().match(TEMPEST_RERUN_BLOCKER);
+  const rerun = landPr ? rerunBlocker : null;
+  if (rerun) {
+    const stoppedByPerson = rerun[1]!.toLowerCase() === "stopped";
+    const comment = `gh pr comment ${layer.prNumber} --repo ${stack.owner}/${stack.repo} --body`;
+    const head = layer.headSha ?? "its live head";
+    return {
+      kind: "tempest_rerun",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      stoppedByPerson,
+      steps: stoppedByPerson
+        ? `Tempest's review of land PR #${layer.prNumber} at ${head} was stopped, so Auto land will not land it. There are no findings to fix: do not patch or push. Ask the human whether to run Tempest again. If they say yes, run ${comment} "@mergestorm-tempest review --force" and keep watching.`
+        : `Tempest's review of land PR #${layer.prNumber} at ${head} broke before it produced a result, and Mergestorm already re-ran it the most times it will on its own. There are no findings to fix: do not patch or push. Run it once more with ${comment} "@mergestorm-tempest review" and keep watching. If it breaks again, tell the human.`,
+    };
+  }
+  const vortexSkip = vortexIdleSkipBlocker(layer);
+  if (vortexSkip && attention.blocker === vortexSkip.blocker) {
+    return {
+      kind: "vortex_skipped",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      skipReason: vortexSkip.skipReason,
+      steps: vortexSkippedSteps(stack, layer, vortexSkip.skipReason),
     };
   }
   const wait = autoLandWaitOn(stack, layer);
@@ -557,7 +784,7 @@ export function stackRepair(
       branch: layer.branch,
       handoff,
       findings,
-      steps: `Vortex requested changes on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them for a person${handoff ? ` (${handoff.replaceAll("_", " ")})` : ""}, so nothing will patch them and Auto land waits. Read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). If a finding is wrong, tell the human; mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> dismisses that review. Do not retarget the PR base.`,
+      steps: `Vortex requested changes on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them for a person${handoff ? ` (${cycloneHandoffWords(handoff)})` : ""}, so nothing will patch them and Auto land waits. Read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). If a finding is wrong, tell the human; mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> dismisses that review. Do not retarget the PR base.`,
     };
   }
   if (attention.blocker.startsWith("CI failed") || attention.bounceKind === "ci_failure") {
@@ -592,6 +819,7 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   let attentionLayer: StackLayerDto | undefined;
   let bounce: MergeQueueEntryDto | undefined;
   const issues: StackBlocker[] = [];
+  const queueWait = stack.archivedAt ? null : mergeQueueWait(queue, nowMs);
   for (const layer of open) {
     const selected = layer.prNumber === candidate?.prNumber;
     let result = layerAttention(stack, layer, selected ? queue : [], cursor);
@@ -610,6 +838,9 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
         result = { blocker: waiting, bounceKind: null };
         waitNamed = true;
       }
+    }
+    if (!result.blocker && selected && queueWait?.stalled) {
+      result = { blocker: `${MERGE_QUEUE_STALLED_PREFIX}${queueWait.text}`, bounceKind: null };
     }
     if (!result.blocker) {
       if (mergeabilityPending(layer) && (selected || !candidate || layer.position > candidate.position)) {
@@ -632,6 +863,10 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
         headSha: disarmed.bounceDetail?.headSha ?? null, blocker: mergeQueueBounceLabel(disarmed), bounceKind: result.bounceKind });
     } else if (!candidate || layer.position > candidate.position) issues.push(issue);
   }
+  const queued: StackQueueWait | null = queueWait && candidate && !queueWait.stalled
+    ? { prNumber: candidate.prNumber, headSha: candidate.headSha ?? null, text: queueWait.text,
+      since: queueWait.since, waitReason: queueWait.waitReason }
+    : null;
   const settleIssue = mergeabilitySettleIssue(stack, open, issues, attention);
   if (settleIssue) issues.push(settleIssue);
   const focus = attentionLayer ?? candidate;
@@ -652,10 +887,14 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   if (busy.length && attention && agentsCannotClear(attention.blocker)) {
     const held: StackHeldBlocker = { ...attention, actAfter: "agents_idle", waitingOn: busy.map((entry) => entry.agent) };
     return { attention: null, held, issues: [attention, ...issues], currentCandidate, bounce: undefined, busy, agents,
-      repair: stackRepair(stack, attention, attentionLayer, undefined), landGatePending };
+      repair: stackRepair(stack, attention, attentionLayer, undefined, queueWait), landGatePending, queueWait: queued };
   }
-  if (busy.length) return { attention: null, held: null, issues, currentCandidate, bounce: undefined, busy, agents, repair: null, landGatePending };
-  return { attention, held: null, issues, currentCandidate, bounce, busy, agents, repair: stackRepair(stack, attention, attentionLayer, bounce), landGatePending };
+  if (busy.length) {
+    return { attention: null, held: null, issues, currentCandidate, bounce: undefined, busy, agents, repair: null, landGatePending,
+      queueWait: queued };
+  }
+  return { attention, held: null, issues, currentCandidate, bounce, busy, agents,
+    repair: stackRepair(stack, attention, attentionLayer, bounce, queueWait), landGatePending, queueWait: queued };
 }
 
 function mergeabilitySettleIssue(
@@ -679,7 +918,8 @@ function mergeabilitySettleIssue(
 export function stackBlockersSummary(attention: Pick<StackBlocker, "prNumber" | "blocker"> | null,
   issues: StackBlocker[], busy: readonly StackAgentBusy[] = [],
   landGatePending: Pick<StackLandGatePending, "prNumber" | "reason"> | null = null,
-  actAfter: StackHeldBlocker["actAfter"] | null = null): string {
+  actAfter: StackHeldBlocker["actAfter"] | null = null,
+  queueWait: Pick<StackQueueWait, "prNumber" | "text"> | null = null): string {
   const agentWork = (entry: StackAgentBusy) => entry.agent === "cyclone" ? "Cyclone patches" : "Vortex reviews";
   const blocked = attention && actAfter && busy.length
     ? ` · blocked after the agents: #${attention.prNumber} ${attention.blocker} (plan the fix; act once ${busy.map(agentWork).join(" and ")} finish and the watch returns attention)`
@@ -692,5 +932,6 @@ export function stackBlockersSummary(attention: Pick<StackBlocker, "prNumber" | 
   const gate = landGatePending && !attention
     ? ` · land gate: #${landGatePending.prNumber} ${landGatePending.reason} (nothing to fix; wait)`
     : "";
-  return blocked + working + gate + (listed.length ? ` · issues: ${labels}${listed.length > 3 ? `; +${listed.length - 3} more` : ""}` : "");
+  const queue = queueWait && !attention ? ` · queue: #${queueWait.prNumber} ${queueWait.text}` : "";
+  return blocked + working + gate + queue + (listed.length ? ` · issues: ${labels}${listed.length > 3 ? `; +${listed.length - 3} more` : ""}` : "");
 }

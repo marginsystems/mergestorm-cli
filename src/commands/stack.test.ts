@@ -1376,12 +1376,14 @@ test("stack status prints the enriched stack as one JSON value", async () => {
       assert.equal(seenCfg, cfg);
       return stack;
     },
+    listMergeQueueEntries: async () => [],
   }));
   assert.equal(captured.error, null);
   assert.equal(captured.stdout.length, 1);
-  const { held, repair, watch, ...printed } = JSON.parse(captured.stdout[0]!);
+  const { held, repair, queueWait, watch, ...printed } = JSON.parse(captured.stdout[0]!);
   assert.deepEqual(printed, stack);
   assert.equal(held, null);
+  assert.equal(queueWait, null);
   assert.equal(repair.kind, "ci_failure");
   assert.equal(repair.prNumber, stack.layers[0]!.prNumber);
   assert.equal(watch.done, false);
@@ -1399,6 +1401,7 @@ test("stack status names a merge conflict held while Vortex reviews, to act on a
   const deps = {
     loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
     getEnrichedStack: async () => stack,
+    listMergeQueueEntries: async () => [],
   };
   const json = await captureStackOutput(() => cmdStackStatus([stack.id, "--json"], deps));
   const body = JSON.parse(json.stdout[0]!);
@@ -1444,6 +1447,7 @@ test("stack status human output includes enriched PR checks and head", async () 
   const captured = await captureStackOutput(() => cmdStackStatus([stack.id], {
     loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
     getEnrichedStack: async () => stack,
+    listMergeQueueEntries: async () => [],
   }));
   assert.equal(captured.error, null);
   const text = strip(captured.stdout.join("\n"));
@@ -1455,6 +1459,36 @@ test("stack status human output includes enriched PR checks and head", async () 
   assert.match(text, /Vortex: reviewing/);
 });
 
+test("stack status reports a live merge-queue wait in human and JSON output", async () => {
+  const stack = structuredClone(REGISTERED[0]!);
+  const entry = {
+    id: "queue-entry", stackId: stack.id, owner: stack.owner, repo: stack.repo,
+    state: "waiting" as const, position: 1, waitReason: "CI pending on abc1234", bounceReason: null,
+    bounceDetail: null, enqueuedBy: "agent" as const, enqueuedVia: "cli" as const,
+    enqueuedAt: new Date(Date.now() - 15 * 60_000).toISOString(), attempts: 1,
+    landedPrNumbers: [], verifyHeadSha: null, verifyBaseSha: null, finishedAt: null,
+    claimedAt: new Date(Date.now() - 12 * 60_000).toISOString(),
+  };
+  const deps = {
+    loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
+    getEnrichedStack: async () => stack,
+    listMergeQueueEntries: async (_cfg: unknown, opts?: { stackId?: string }) => {
+      assert.equal(opts?.stackId, stack.id);
+      return [entry];
+    },
+  };
+  const json = await captureStackOutput(() => cmdStackStatus([stack.id, "--json"], deps));
+  assert.deepEqual(JSON.parse(json.stdout[0]!).queueWait, {
+    prNumber: stack.layers[0]!.prNumber,
+    headSha: stack.layers[0]!.headSha ?? null,
+    text: "Merge queue waiting for 12m: CI pending on abc1234",
+    since: entry.claimedAt,
+    waitReason: "CI pending on abc1234",
+  });
+  const human = await captureStackOutput(() => cmdStackStatus([stack.id], deps));
+  assert.match(strip(human.stdout.join("\n")), /Queue: #99 Merge queue waiting for 12m: CI pending on abc1234/);
+});
+
 test("stack status uses a dash for enriched layers without a PR", async () => {
   const stack = structuredClone(REGISTERED[0]!);
   stack.layers[0]!.prNumber = 0;
@@ -1462,6 +1496,7 @@ test("stack status uses a dash for enriched layers without a PR", async () => {
   const captured = await captureStackOutput(() => cmdStackStatus([stack.id], {
     loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
     getEnrichedStack: async () => stack,
+    listMergeQueueEntries: async () => [],
   }));
   assert.equal(captured.error, null);
   const text = strip(captured.stdout.join("\n"));
@@ -1475,6 +1510,7 @@ test("stack status uses unknown for missing enriched check statuses", async () =
   const captured = await captureStackOutput(() => cmdStackStatus([stack.id], {
     loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
     getEnrichedStack: async () => stack,
+    listMergeQueueEntries: async () => [],
   }));
   assert.equal(captured.error, null);
   const text = strip(captured.stdout.join("\n"));
