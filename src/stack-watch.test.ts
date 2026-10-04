@@ -1676,6 +1676,29 @@ test("Auto land's ci_pending is named only after a long wait (#3453)", () => {
   assert.match(late.repair?.steps ?? "", /gh run rerun/);
 });
 
+test("a land PR check that never finishes becomes attention after 45 minutes instead of a land gate wait forever", () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 2, ciStatus: "pending" });
+  const merged = layer({ state: "merged", prNumber: 42, position: 1 });
+  const s: StackDto = {
+    ...unitStack([merged], { state: "growing", landPrNumber: 2874, landPr: land,
+      landingBlockReason: "landing blocked: ci_pending on land PR #2874" }),
+    autoEnqueueWhenReady: true,
+    autoLandWait: { reason: "ci_pending", prNumber: 2874, headSha: HEAD, since: new Date(0).toISOString(), attempts: null, detail: null },
+  };
+  const early = stackBlockers(s, [], {}, 10 * MINUTE);
+  assert.equal(early.attention, null);
+  assert.deepEqual(early.landGatePending,
+    { prNumber: 2874, headSha: HEAD, reason: "landing blocked: ci_pending on land PR #2874" });
+  const late = stackBlockers(s, [], {}, 50 * MINUTE);
+  assert.deepEqual(late.attention, {
+    prNumber: 2874, headSha: HEAD, bounceKind: null,
+    blocker: "CI pending for 50m — a check on this head has not finished, so Auto land will not queue it",
+  });
+  assert.equal(late.repair?.kind, "ci_pending");
+  assert.match(late.repair?.steps ?? "", /gh run list --branch mg-stack-79/);
+  assert.match(stackBlockersSummary(late.attention, late.issues, late.busy, late.landGatePending), /blocked: #2874 CI pending for 50m/);
+});
+
 test("Auto land's vortex_not_green is held while Vortex reviews and attention once it is idle (#3453)", () => {
   const s = waiting("vortex_not_green");
   assert.equal(stackBlockers(s, [], {}, 20 * MINUTE).attention, null);
@@ -1702,12 +1725,13 @@ test("a promote Auto land stopped retrying is attention with a promote_failed re
   assert.match(stackBlockersSummary(stopped.attention, stopped.issues), /blocked: #42 Promote failed 3 times/);
 });
 
-test("Auto land's wait names nothing for another head, an unarmed or archived stack, or an unnamed reason (#3453)", () => {
+test("Auto land's wait names nothing for another head, an unarmed or archived stack, or a short wait (#3453)", () => {
   const late = 120 * MINUTE;
   assert.equal(stackBlockers(waiting("ci_failure", { headSha: NEXT }), [], {}, late).attention, null);
   assert.equal(stackBlockers({ ...waiting("ci_failure"), autoEnqueueWhenReady: false }, [], {}, late).attention, null);
   assert.equal(stackBlockers({ ...waiting("ci_failure"), archivedAt: "2026-10-02T00:00:00Z" }, [], {}, late).attention, null);
-  assert.equal(stackBlockers(waiting("stack_dirty"), [], {}, late).attention, null);
+  assert.equal(stackBlockers(waiting("stack_dirty"), [], {}, 44 * MINUTE).attention, null);
+  assert.equal(stackBlockers(waiting("stack_dirty", { prNumber: 41 }), [], {}, late).attention, null);
   assert.equal(stackBlockers({ ...stack(), autoEnqueueWhenReady: true }, [], {}, late).attention, null);
 });
 
@@ -1728,6 +1752,86 @@ test("Auto land's wait on the child of a clean bottom is attention on the child 
   assert.deepEqual(result.currentCandidate, { prNumber: 42, headSha: HEAD });
   assert.equal(result.repair?.kind, "ci_failure");
   assert.equal(result.repair?.prNumber, 43);
+});
+
+for (const [reason, words] of [
+  ["stack_dirty", "this layer is not clean (it has a conflict or needs a restack)"],
+  ["mergeability_unknown", "GitHub has not said whether this PR can merge into its base"],
+  ["tempest_stopped", "Tempest's review of this head was stopped"],
+  ["must_consolidate", "this PR's base is not the stack's land target, and the stack has no review unit to promote it into"],
+  ["missing_head", "GitHub returned no head commit for this PR"],
+  ["github_unreadable", "Mergestorm cannot read this PR from GitHub"],
+  ["parked_base", "this PR's base is a parked branch (mg-park-*) and has not been moved back"],
+  ["some_new_token", "some new token"],
+] as const) {
+  test(`Auto land waiting 45 minutes on ${reason} is attention in plain words with a repair`, async () => {
+    const s = waiting(reason);
+    assert.equal(stackBlockers(s, [], {}, 44 * MINUTE).attention, null);
+    const h = harness(s);
+    h.options.now = () => 50 * MINUTE;
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, `Auto land has waited 50m: ${words}`);
+    assert.equal(result.prNumber, 42);
+    assert.equal(result.repair?.kind, "auto_land_waiting");
+    assert.equal(result.repair?.kind === "auto_land_waiting" ? result.repair.reason : null, reason);
+    assert.match(result.repair?.steps ?? "", /Run mg stack status stack and read what it shows for #42/);
+    assert.match(result.repair?.steps ?? "", /tell the human what Auto land is waiting for and since when/);
+  });
+}
+
+test("a wait stored without a head or without a PR is matched on the stack", () => {
+  const noHead = stackBlockers(waiting("conflict_unchanged", { headSha: null }), [], {}, 50 * MINUTE);
+  assert.equal(noHead.attention?.blocker,
+    "Auto land has waited 50m: the merge queue bounced this PR for a conflict, and neither the PR nor its base has changed since");
+  assert.equal(noHead.attention?.prNumber, 42);
+  assert.equal(noHead.repair?.kind, "auto_land_waiting");
+
+  const noPr = stackBlockers(waiting("layer_without_pr", { prNumber: null, headSha: null }), [], {}, 50 * MINUTE);
+  assert.equal(noPr.attention?.blocker, "Auto land has waited 50m: a layer of this stack has no pull request");
+  assert.equal(noPr.attention?.prNumber, 42);
+
+  const merged = layer({ state: "merged", prNumber: 42, position: 1 });
+  const landed: StackDto = {
+    ...unitStack([merged], { state: "growing" }),
+    autoEnqueueWhenReady: true,
+    autoLandWait: { reason: "trunk_in_land_target_without_land_pr", prNumber: null, headSha: NEXT,
+      since: new Date(0).toISOString(), attempts: null, detail: null },
+  };
+  assert.equal(stackBlockers(landed, [], {}, 10 * MINUTE).attention, null);
+  const stuck = stackBlockers(landed, [], {}, 50 * MINUTE);
+  assert.deepEqual(stuck.attention, {
+    prNumber: 42, headSha: HEAD, bounceKind: null,
+    blocker: "Auto land has waited 50m: the stack's commits are already in the land target, but no merged land PR was found",
+  });
+  assert.equal(stuck.repair?.kind, "auto_land_waiting");
+});
+
+for (const [reason, what, permission] of [
+  ["check_runs_unreadable", "the check runs", /Checks: read on owner\/repo/],
+  ["commit_statuses_unreadable", "the commit statuses", /Commit statuses: read on owner\/repo/],
+  ["ci_unreadable", "the check runs and commit statuses", /Checks: read and Commit statuses: read on owner\/repo/],
+] as const) {
+  test(`${reason} with a refused read is attention at once and names the missing GitHub App permission`, async () => {
+    const h = harness(waiting(reason, { detail: "HTTP 403" }));
+    h.options.now = () => MINUTE;
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, `Mergestorm cannot read ${what} on this head (HTTP 403) — Auto land cannot tell whether CI passed`);
+    assert.equal(result.repair?.kind, "ci_unreadable");
+    assert.match(result.repair?.steps ?? "", permission);
+    assert.match(result.repair?.steps ?? "", /do not patch or push for this/);
+  });
+}
+
+test("an unreadable CI wait with no refusal recorded is named after 10 minutes, so a short GitHub outage stays a wait", () => {
+  assert.equal(stackBlockers(waiting("check_runs_unreadable", { detail: "HTTP 502" }), [], {}, 9 * MINUTE).attention, null);
+  assert.equal(stackBlockers(waiting("check_runs_unreadable"), [], {}, 9 * MINUTE).attention, null);
+  const late = stackBlockers(waiting("check_runs_unreadable", { detail: "HTTP 502" }), [], {}, 11 * MINUTE);
+  assert.equal(late.attention?.blocker,
+    "Mergestorm cannot read the check runs on this head (HTTP 502) — Auto land cannot tell whether CI passed");
+  assert.equal(late.repair?.kind, "ci_unreadable");
+  assert.equal(stackBlockers(waiting("check_runs_unreadable", { detail: "HTTP 404" }), [], {}, MINUTE).repair?.kind, "ci_unreadable");
 });
 
 const changesRequested = (extra: Partial<StackLayerDto> = {}) => layer({
@@ -1838,15 +1942,28 @@ test("a queue entry held past the stall threshold is attention with a plain repa
   assert.equal(result.queueWait, null);
 });
 
-test("a queued entry with nothing live ahead is named but never stalled, since a release leaves it so until the next claim", async () => {
-  const queued = bounce({ state: "queued", bounceDetail: null, finishedAt: null, enqueuedAt: minutesBefore(50) });
-  const h = harness(stack(), [queued]);
+test("a queued entry with nothing live ahead is a wait for 44 minutes after it was enqueued and attention after 45", async () => {
+  const queued = (minutes: number, extra: Partial<MergeQueueEntryDto> = {}) =>
+    bounce({ state: "queued", bounceDetail: null, finishedAt: null, enqueuedAt: minutesBefore(minutes), ...extra });
+  const early = harness(stack(), [queued(44)]);
+  early.options.now = () => QUEUE_NOW;
+  early.options.timeoutMs = 0;
+  const waitingResult = await pollStackWatch(cfg, "stack", early.options);
+  assert.equal(waitingResult.status, "in_progress");
+  assert.equal(waitingResult.blocker, null);
+  assert.equal(waitingResult.queueWait?.text, "Queued 44m in the merge queue, not picked up yet");
+
+  const h = harness(stack(), [queued(50, { claimedAt: minutesBefore(1), waitReason: "main keeps moving" })]);
   h.options.now = () => QUEUE_NOW;
-  h.options.timeoutMs = 0;
   const result = await pollStackWatch(cfg, "stack", h.options);
-  assert.equal(result.status, "in_progress");
-  assert.equal(result.blocker, null);
-  assert.equal(result.queueWait?.text, "Queued 50m in the merge queue, not picked up yet");
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker,
+    "Merge queue stuck: Queued 50m in the merge queue, not picked up yet (last note: main keeps moving)");
+  assert.equal(result.repair?.kind, "queue_stalled");
+  assert.equal(result.repair?.kind === "queue_stalled" ? result.repair.since : null, minutesBefore(50));
+  assert.match(result.repair?.steps ?? "", /nothing is working on it or on an entry ahead of it; its last note is: main keeps moving/);
+  assert.match(result.repair?.steps ?? "", /do not patch or push for this/);
+  assert.match(result.repair?.steps ?? "", /mg queue rm stack, then mg queue add stack/);
 });
 
 test("a running entry without a claim timestamp has an unknown age", () => {

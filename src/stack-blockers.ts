@@ -123,6 +123,15 @@ export type StackRepairHint =
     steps: string;
   }
   | {
+    kind: "ci_unreadable" | "auto_land_waiting";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    since: string;
+    reason: string;
+    steps: string;
+  }
+  | {
     kind: "queue_stalled";
     prNumber: number;
     headSha: string | null;
@@ -432,6 +441,58 @@ export const AUTO_LAND_CI_FAILED_BLOCKER = "CI failed — Auto land reads a fail
 const AUTO_LAND_CI_PENDING_PREFIX = "CI pending for ";
 const AUTO_LAND_VORTEX_WAIT_PREFIX = "No green Vortex review for ";
 const AUTO_LAND_PROMOTE_FAILED_PREFIX = "Promote failed ";
+export const AUTO_LAND_WAIT_ATTENTION_MS = 45 * 60_000;
+export const AUTO_LAND_CI_UNREADABLE_ATTENTION_MS = 10 * 60_000;
+const AUTO_LAND_CI_UNREADABLE_PREFIX = "Mergestorm cannot read ";
+const AUTO_LAND_WAITED_PREFIX = "Auto land has waited ";
+
+const CI_UNREADABLE_WHAT: Readonly<Record<string, string>> = {
+  check_runs_unreadable: "the check runs",
+  commit_statuses_unreadable: "the commit statuses",
+  ci_unreadable: "the check runs and commit statuses",
+};
+
+const CI_UNREADABLE_PERMISSION: Readonly<Record<string, string>> = {
+  check_runs_unreadable: "Checks: read",
+  commit_statuses_unreadable: "Commit statuses: read",
+  ci_unreadable: "Checks: read and Commit statuses: read",
+};
+
+const AUTO_LAND_WAIT_WORDS: Readonly<Record<string, string>> = {
+  mergeability_unknown: "GitHub has not said whether this PR can merge into its base",
+  tempest_pending: "Tempest's review of this head has not started",
+  tempest_running: "Tempest's review of this head has not finished",
+  tempest_trigger_failed: "Tempest's review of this head could not be started",
+  tempest_stopped: "Tempest's review of this head was stopped",
+  tempest_failed: "Tempest's review of this head broke without a result",
+  tempest_findings: "Tempest reported findings on this head",
+  cyclone_failed: "Cyclone's patch run failed on this head",
+  stack_dirty: "this layer is not clean (it has a conflict or needs a restack)",
+  must_consolidate: "this PR's base is not the stack's land target, and the stack has no review unit to promote it into",
+  missing_head: "GitHub returned no head commit for this PR",
+  pr_draft: "this PR is a draft",
+  trunk_in_land_target_without_land_pr: "the stack's commits are already in the land target, but no merged land PR was found",
+  conflict_unchanged: "the merge queue bounced this PR for a conflict, and neither the PR nor its base has changed since",
+  land_pr_unavailable: "the land PR cannot be opened or found",
+  github_unreadable: "Mergestorm cannot read this PR from GitHub",
+  land_gate_failed: "the check before landing keeps failing with an error",
+  readiness_check_failed: "the readiness check for this PR keeps failing with an error",
+  layer_without_pr: "a layer of this stack has no pull request",
+  parked_base: "this PR's base is a parked branch (mg-park-*) and has not been moved back",
+  pr_not_open: "GitHub shows this PR merged or closed, but the stack still lists it as open",
+  stack_without_unit: "the stack has more than one open layer but no review unit to promote them into",
+  ci_error: "CI reported an error on this head",
+  ci_unknown: "CI on this head is in a state Mergestorm cannot read",
+  ci_missing: "no CI run exists for this head",
+};
+
+function autoLandWaitWords(reason: string): string {
+  return AUTO_LAND_WAIT_WORDS[reason] ?? reason.replaceAll("_", " ");
+}
+
+function ciUnreadableForGood(wait: Pick<AutoLandWaitDto, "detail">): boolean {
+  return /\bHTTP 40[34]\b/.test(wait.detail ?? "");
+}
 
 type AutoLandWaitDto = NonNullable<StackDto["autoLandWait"]>;
 
@@ -440,11 +501,30 @@ function waitedMs(since: string, nowMs: number): number | null {
   return Number.isFinite(sinceMs) ? Math.max(0, nowMs - sinceMs) : null;
 }
 
-function autoLandWaitOn(stack: StackDto, layer: StackLayerDto): AutoLandWaitDto | null {
+function armedAutoLandWait(stack: StackDto): AutoLandWaitDto | null {
   const wait = stack.autoLandWait;
-  if (!wait || stack.archivedAt || stack.autoEnqueueWhenReady !== true) return null;
-  if (wait.prNumber !== layer.prNumber || !sameHead(wait.headSha, layer.headSha)) return null;
-  return wait;
+  return wait && !stack.archivedAt && stack.autoEnqueueWhenReady === true ? wait : null;
+}
+
+function lastPrLayer(stack: StackDto): StackLayerDto | undefined {
+  const land = stack.unit?.landPr;
+  if (land && land.prNumber > 0) return land;
+  return stack.layers.filter((layer) => layer.prNumber > 0).sort((a, b) => b.position - a.position)[0];
+}
+
+export function autoLandWaitLayer(stack: StackDto): StackLayerDto | undefined {
+  const wait = armedAutoLandWait(stack);
+  if (!wait) return undefined;
+  const candidate = currentLayer(stack);
+  if (wait.prNumber == null) return candidate ?? lastPrLayer(stack);
+  const named = candidate?.prNumber === wait.prNumber
+    ? candidate
+    : stack.layers.find((layer) => layer.prNumber === wait.prNumber && !isTerminalLayer(layer));
+  return named && (!wait.headSha || sameHead(wait.headSha, named.headSha)) ? named : undefined;
+}
+
+function autoLandWaitOn(stack: StackDto, layer: StackLayerDto): AutoLandWaitDto | null {
+  return autoLandWaitLayer(stack)?.prNumber === layer.prNumber ? armedAutoLandWait(stack) : null;
 }
 
 export function autoLandWaitBlocker(stack: StackDto, layer: StackLayerDto, nowMs: number): string | null {
@@ -469,8 +549,17 @@ export function autoLandWaitBlocker(stack: StackDto, layer: StackLayerDto, nowMs
         ? `${AUTO_LAND_PROMOTE_FAILED_PREFIX}${wait.attempts} times (merge_failed) — Auto land stopped retrying this head${wait.detail ? `: ${wait.detail}` : ""}`
         : null;
     default:
-      return null;
+      break;
   }
+  const unreadable = CI_UNREADABLE_WHAT[wait.reason];
+  if (unreadable) {
+    return ciUnreadableForGood(wait) || waited >= AUTO_LAND_CI_UNREADABLE_ATTENTION_MS
+      ? `${AUTO_LAND_CI_UNREADABLE_PREFIX}${unreadable} on this head${wait.detail ? ` (${wait.detail})` : ""} — Auto land cannot tell whether CI passed`
+      : null;
+  }
+  return waited >= AUTO_LAND_WAIT_ATTENTION_MS
+    ? `${AUTO_LAND_WAITED_PREFIX}${minutes}m: ${autoLandWaitWords(wait.reason)}`
+    : null;
 }
 
 export const MERGE_QUEUE_STALL_ATTENTION_MS = 45 * 60_000;
@@ -488,6 +577,7 @@ export type StackQueueWait = {
 export type MergeQueueWait = {
   text: string;
   stalled: boolean;
+  notPickedUp?: boolean;
   since: string | null;
   waitReason: string | null;
   aheadStackId: string | null;
@@ -503,12 +593,14 @@ export function mergeQueueWait(queue: readonly MergeQueueEntryDto[], nowMs: numb
   if (!entry) return null;
   const reason = entry.waitReason?.trim() || null;
   if (entry.state === "queued") {
-    const queuedFor = minutesOf(waitedMs(entry.enqueuedAt, nowMs));
+    const queuedMs = waitedMs(entry.enqueuedAt, nowMs);
+    const queuedFor = minutesOf(queuedMs);
     const ahead = entry.aheadInRepo;
     if (!ahead) {
       return {
         text: `Queued ${queuedFor}m in the merge queue, not picked up yet${reason ? ` (last note: ${reason})` : ""}`,
-        stalled: false,
+        stalled: queuedMs != null && queuedMs >= MERGE_QUEUE_STALL_ATTENTION_MS,
+        notPickedUp: true,
         since: entry.enqueuedAt, waitReason: reason, aheadStackId: null, aheadOther: false,
       };
     }
@@ -538,6 +630,9 @@ function queueStalledSteps(stack: StackDto, layer: StackLayerDto, wait: MergeQue
       ? `Run mg stack status ${wait.aheadStackId} and fix what it names there; this stack moves once that entry lands or bounces.`
       : "That entry belongs to another Mergestorm user, so you cannot fix it from here.";
     return `#${layer.prNumber} is waiting in the merge queue behind another entry in ${stack.owner}/${stack.repo} that has made no progress since ${wait.since ?? "it was claimed"}. Nothing on ${layer.branch} needs a change. ${ahead} If it stays stuck, tell the human: the queue for this repo is held by that entry.`;
+  }
+  if (wait.notPickedUp) {
+    return `#${layer.prNumber} has been queued in the merge queue for ${stack.owner}/${stack.repo} since ${wait.since ?? "it was enqueued"} and nothing is working on it or on an entry ahead of it${wait.waitReason ? `; its last note is: ${wait.waitReason}` : ""}. Nothing on ${layer.branch} needs a change: do not patch or push for this. If the note says the base branch keeps moving, the queue is waiting for a quiet moment on it and continues by itself once pushes to that branch pause. Otherwise tell the human: the merge queue is not picking this entry up; they can take the stack out of the queue and enqueue it again (mg queue rm ${stack.id}, then mg queue add ${stack.id}). Do not retarget the PR base.`;
   }
   return `The merge queue has held #${layer.prNumber} at ${layer.headSha ?? "its head"} since ${wait.since ?? "it was claimed"} without landing or bouncing it${wait.waitReason ? `; its last note is: ${wait.waitReason}` : ", and it recorded no reason"}. If the note names a failing check or a conflict on ${layer.branch}, fix that with an ordinary push. If it waits on CI, list the head's checks (gh run list --branch ${layer.branch}) and re-run the one that never finished (gh run rerun <run-id>). If nothing moves after that, tell the human: they can take the stack out of the queue and enqueue it again (mg queue rm ${stack.id}, then mg queue add ${stack.id}). Do not retarget the PR base.`;
 }
@@ -762,6 +857,30 @@ export function stackRepair(
       steps: `Auto land has waited since ${wait.since} for an approving Vortex review of ${layer.branch} at ${layer.headSha ?? "its head"}, and no Vortex run is working on it. Read the PR's latest Vortex review (gh api repos/${stack.owner}/${stack.repo}/pulls/${layer.prNumber}/reviews). If it has findings, verify and fix the real ones on ${layer.branch} with an ordinary push, or record a wrong one with mg dismiss as mergestorm-pr-loop describes. If no review exists at this head, or it failed or was skipped, tell the human: nothing re-reviews this head until they re-run the review or push a new head.`,
     };
   }
+  if (wait && attention.blocker.startsWith(AUTO_LAND_CI_UNREADABLE_PREFIX)) {
+    const what = CI_UNREADABLE_WHAT[wait.reason] ?? "the checks";
+    const permission = CI_UNREADABLE_PERMISSION[wait.reason] ?? "Checks: read and Commit statuses: read";
+    return {
+      kind: "ci_unreadable",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      since: wait.since,
+      reason: wait.reason,
+      steps: `GitHub has not let Mergestorm read ${what} for #${layer.prNumber} at ${layer.headSha ?? "its head"} since ${wait.since}${wait.detail ? ` (${wait.detail})` : ""}, so Auto land cannot tell whether CI passed and will not move this PR. Nothing on ${layer.branch} needs a change: do not patch or push for this. Tell the human: the Mergestorm GitHub App needs the permission ${permission} on ${stack.owner}/${stack.repo}. They open the app's installation on GitHub (Settings, then GitHub Apps or Installed GitHub Apps), accept the pending permission request, and check that ${stack.repo} is in the app's repository access. Auto land continues by itself once the read works. If GitHub itself is having an outage, the wait clears when it ends.`,
+    };
+  }
+  if (wait && attention.blocker.startsWith(AUTO_LAND_WAITED_PREFIX)) {
+    return {
+      kind: "auto_land_waiting",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      since: wait.since,
+      reason: wait.reason,
+      steps: `Auto land has been waiting on this stack since ${wait.since} because ${autoLandWaitWords(wait.reason)} (reason ${wait.reason}${wait.detail ? `: ${wait.detail}` : ""}), and nothing has changed that in the meantime. Run mg stack status ${stack.id} and read what it shows for #${layer.prNumber}. If it names something on ${layer.branch} that a commit fixes, fix it there with an ordinary push. Otherwise do not patch or push: tell the human what Auto land is waiting for and since when. Do not retarget the PR base.`,
+    };
+  }
   if (wait && attention.blocker.startsWith(AUTO_LAND_PROMOTE_FAILED_PREFIX)) {
     const attempts = wait.attempts ?? AUTO_LAND_PROMOTE_FAILED_ATTEMPTS;
     return {
@@ -862,6 +981,14 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       if (disarmed) issues.push({ prNumber: disarmed.bounceDetail?.prNumber ?? layer.prNumber,
         headSha: disarmed.bounceDetail?.headSha ?? null, blocker: mergeQueueBounceLabel(disarmed), bounceKind: result.bounceKind });
     } else if (!candidate || layer.position > candidate.position) issues.push(issue);
+  }
+  if (!attention) {
+    const unlisted = autoLandWaitLayer(stack);
+    const waiting = unlisted && !open.includes(unlisted) ? autoLandWaitBlocker(stack, unlisted, nowMs) : null;
+    if (unlisted && waiting) {
+      attention = { prNumber: unlisted.prNumber, headSha: unlisted.headSha ?? null, blocker: waiting, bounceKind: null };
+      attentionLayer = unlisted;
+    }
   }
   const queued: StackQueueWait | null = queueWait && candidate && !queueWait.stalled
     ? { prNumber: candidate.prNumber, headSha: candidate.headSha ?? null, text: queueWait.text,

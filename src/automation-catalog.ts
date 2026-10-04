@@ -11,6 +11,8 @@ export const BEARER_SETTINGS = [
   { key: "vortex_seam_specialist_enabled", flag: "--vortex-seam", label: "Vortex seam specialist" },
   { key: "auto_land_default", flag: "--auto-land", label: "Auto land (new stacks)" },
   { key: "auto_land_settle_seconds", flag: "--auto-land-settle", label: "Auto land settle (seconds)", kind: "seconds", min: 15, max: 300 },
+  { key: "merge_queue_batch_enabled", flag: "--merge-queue-batch", label: "Merge queue batching" },
+  { key: "merge_queue_batch_size", flag: "--merge-queue-batch-size", label: "Merge queue batch size (pull requests)", kind: "count", min: 2, max: 8 },
   { key: "ignored_bot_logins", flag: "--ignore-bot", label: "Ignored bot logins", kind: "logins" },
   { key: "vortex_bot_skip_check", flag: "--vortex-skip-check", label: "Vortex bot skip check", kind: "enum", values: ["none", "neutral"] },
   { key: "vortex_findings_check", flag: "--vortex-findings", label: "Vortex findings check", kind: "enum", values: ["failure", "neutral", "success"] },
@@ -33,7 +35,7 @@ export const BEARER_SETTINGS_LABELS: Record<BearerSettingsKey, string> = Object.
 export type BearerSettingsValues = {
   [Row in (typeof BEARER_SETTINGS)[number] as Row["key"]]:
     Row extends { kind: "logins" } ? string[] :
-    Row extends { kind: "seconds" } ? number :
+    Row extends { kind: "seconds" | "count" } ? number :
     Row extends { values: readonly (infer Value)[] } ? Value : boolean;
 };
 

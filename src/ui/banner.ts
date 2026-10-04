@@ -162,6 +162,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.37": [
     "turning auto-review on reviews skipped heads",
   ],
+  "0.3.38": [
+    "mg settings turns merge queue batching on or off",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

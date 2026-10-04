@@ -207,6 +207,8 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "  [--vortex-seam on|off] [--vortex-skip-all-clear on|off]",
       "  [--auto-land on|off]  Auto land default for new stacks",
       "  [--auto-land-settle <seconds>]  How long Auto land waits before queueing (15-300, default 60)",
+      "  [--merge-queue-batch on|off]  Test several queued pull requests on one CI run",
+      "  [--merge-queue-batch-size <n>]  Most pull requests per batch (2-8, default 4)",
       "  [--ignore-bot add <login>|remove <login>|clear]",
       "  [--vortex-skip-check none|neutral] [--vortex-findings failure|neutral|success]",
       "  [--cyclone-fail-check failure|neutral]",

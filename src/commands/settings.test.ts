@@ -31,6 +31,8 @@ const SETTINGS_BODY = {
   vortex_seam_specialist_enabled: true,
   auto_land_default: false,
   auto_land_settle_seconds: 60,
+  merge_queue_batch_enabled: false,
+  merge_queue_batch_size: 4,
 };
 
 // --- parseSettingsArgs --------------------------------------------------------
@@ -60,6 +62,36 @@ test("parseSettingsArgs maps --auto-land on to auto_land_default: true", () => {
   const parsed = parseSettingsArgs(["--auto-land", "on"]);
   assert.deepEqual(parsed, { json: false, patch: { auto_land_default: true } });
   assert.deepEqual(parseSettingsArgs(["--auto-land=off"]).patch, { auto_land_default: false });
+});
+
+test("parseSettingsArgs maps --merge-queue-batch and a batch size from 2 through 8", () => {
+  assert.deepEqual(parseSettingsArgs(["--merge-queue-batch", "on", "--merge-queue-batch-size", "6"]), {
+    json: false,
+    patch: { merge_queue_batch_enabled: true, merge_queue_batch_size: 6 },
+  });
+  assert.deepEqual(parseSettingsArgs(["--merge-queue-batch=off"]).patch, { merge_queue_batch_enabled: false });
+  assert.deepEqual(parseSettingsArgs(["--merge-queue-batch-size=2"]).patch, { merge_queue_batch_size: 2 });
+  assert.deepEqual(parseSettingsArgs(["--merge-queue-batch-size", "8"]).patch, { merge_queue_batch_size: 8 });
+  for (const args of [
+    ["--merge-queue-batch-size"], ["--merge-queue-batch-size", "1"], ["--merge-queue-batch-size", "9"],
+    ["--merge-queue-batch-size", "on"], ["--merge-queue-batch-size", "3.5"], ["--merge-queue-batch-size="],
+  ]) {
+    assert.throws(
+      () => parseSettingsArgs(args),
+      (err: unknown) =>
+        err instanceof Error &&
+        err.message === "--merge-queue-batch-size takes a whole number from 2 through 8.",
+      args.join(" "),
+    );
+  }
+  assert.throws(() => parseSettingsArgs(["--merge-queue-batch", "4"]), /--merge-queue-batch takes on or off\./);
+});
+
+test("formatSettingsLines prints the batch size as a plain number and the settle wait in seconds", () => {
+  const text = formatSettingsLines({ ...SETTINGS_BODY, merge_queue_batch_enabled: true, merge_queue_batch_size: 6 }).join("\n");
+  assert.match(text, /Merge queue batch size \(pull requests\)\s+6\n/);
+  assert.doesNotMatch(text, /Merge queue batch size \(pull requests\)\s+6s/);
+  assert.match(text, /Auto land settle \(seconds\)\s+60s/);
 });
 
 test("parseSettingsArgs maps --auto-land-settle to whole seconds from 15 through 300", () => {
