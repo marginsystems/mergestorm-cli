@@ -141,6 +141,22 @@ export type StackRepairHint =
     steps: string;
   }
   | {
+    kind: "members_remaining" | "vortex_failed" | "tempest_trigger_failed";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    detail: string | null;
+    steps: string;
+  }
+  | {
+    kind: "land_pr_unavailable";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    detail: string | null;
+    steps: string;
+  }
+  | {
     kind: "vortex_skipped";
     prNumber: number;
     headSha: string | null;
@@ -262,6 +278,13 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   stack_auto_patch_off: "auto-patch is off for this stack",
   account_auto_patch_off: "auto-patch is off for the account and this stack does not turn it on",
   cyclone_not_connected: "Cyclone is not connected to this repo",
+  infra_failure: "Cyclone could not start the patch: GitHub sign-in, comment load or checkout kept failing",
+  no_changes: "Cyclone found nothing to change for these findings",
+  credits_exhausted: "the account is out of standard credits this month",
+  no_billing: "the account has no billing set up",
+  unsupported_language: "the findings are in a language Cyclone does not patch",
+  policy_owner_changed: "the stack's owner changed while the patch was queued",
+  patch_job_lost: "Cyclone's patch job was lost before it finished",
 };
 
 function cycloneHandoffWords(reason: string): string {
@@ -285,11 +308,26 @@ export const VORTEX_BILLING_SKIPPED = "Vortex skipped this head: it could not co
 
 export const VORTEX_REVIEW_INCOMPLETE = "Vortex reviewed only part of this PR";
 
+export const VORTEX_IGNORED_AUTHOR = "Vortex skipped this head: the PR author is on the ignored authors list";
+
+export const VORTEX_REPO_DISABLED = "Vortex skipped this head: reviews are turned off for this repository";
+
+export const VORTEX_RETRY_SCHEDULED = "Vortex hit a temporary error on this head and will retry by itself";
+
+export const VORTEX_REVIEW_FAILED = "Review failed";
+
 const VORTEX_SKIP_BLOCKERS: Readonly<Record<string, string>> = {
   auto_review_off: VORTEX_AUTO_REVIEW_OFF,
   billing_blocked: VORTEX_BILLING_SKIPPED,
   billing_unavailable: VORTEX_BILLING_SKIPPED,
+  ignored_author: VORTEX_IGNORED_AUTHOR,
+  repo_disabled: VORTEX_REPO_DISABLED,
 };
+
+export function vortexRetryScheduled(layer: StackLayerDto): boolean {
+  const review = layer.vortexReview;
+  return review?.skip_reason?.trim() === "retry_scheduled" && sameHead(review.head_sha, layer.headSha);
+}
 
 function vortexIdleSkipBlocker(layer: StackLayerDto): { blocker: string; skipReason: string } | null {
   if (layerAgentsBusy(layer).vortex) return null;
@@ -310,6 +348,12 @@ function vortexSkippedSteps(stack: StackDto, layer: StackLayerDto, skipReason: s
   const mention = `comment @mergestorm-vortex review on #${layer.prNumber}`;
   if (skipReason === "auto_review_off") {
     return `Vortex auto-review is off for ${stack.owner}/${stack.repo} or for this stack, so it skipped #${layer.prNumber} at ${head} and Auto land waits for a review that will not come. Do not patch or push for this. Tell the human: turning auto-review on (mg stack set ${stack.id} --auto-review on, or the account setting in the dashboard) queues a review of this head by itself. To review only this head and leave auto-review off, ${mention}.`;
+  }
+  if (skipReason === "ignored_author") {
+    return `Vortex skipped #${layer.prNumber} at ${head} because the PR's author is on the account's ignored authors list, so Auto land waits for a review that will not come. Do not patch or push for this. To review this head once, ${mention}. To have this author's PRs reviewed by themselves, tell the human to remove the author from the ignored authors list in the Mergestorm dashboard settings.`;
+  }
+  if (skipReason === "repo_disabled") {
+    return `Vortex skipped #${layer.prNumber} at ${head} because reviews are turned off for ${stack.owner}/${stack.repo}, so Auto land waits for a review that will not come. Do not patch or push for this, and a mention will not run a review while the repository is off. Tell the human to turn the repository on in the Mergestorm dashboard; after that a push or a comment @mergestorm-vortex review on #${layer.prNumber} runs the review.`;
   }
   if (skipReason === "incomplete") {
     return `Vortex reviewed only some of the files in #${layer.prNumber} at ${head} and left the rest unreviewed, so Auto land waits for full coverage. Do not patch or push for this. To review the remaining files, ${mention} (the Continue button on the stack is unrelated), or tell the human to do it; turning on automatic overflow reviews in the dashboard settings covers this for later heads.`;
@@ -377,7 +421,10 @@ function layerAttention(
     const tempest = layer.agentRuns?.find((run) => run.agent === "tempest" &&
       run.status === "findings" && sameHead(run.sha, layer.headSha));
     if (tempest) return hardBlock(`Tempest ${tempest.status}`);
-    if (layer.vortexStatus === "failed") return hardBlock("Review failed");
+    if (layer.vortexStatus === "failed" && !vortexRetryScheduled(layer) &&
+      (!layer.vortexReview?.head_sha || sameHead(layer.vortexReview.head_sha, layer.headSha))) {
+      return hardBlock(VORTEX_REVIEW_FAILED);
+    }
     if (quotaSkippedReview(layer)) return hardBlock(VORTEX_REVIEW_OUT_OF_QUOTA);
     const vortexSkip = vortexIdleSkipBlocker(layer);
     if (vortexSkip) return hardBlock(vortexSkip.blocker);
@@ -445,6 +492,7 @@ export const AUTO_LAND_WAIT_ATTENTION_MS = 45 * 60_000;
 export const AUTO_LAND_CI_UNREADABLE_ATTENTION_MS = 10 * 60_000;
 const AUTO_LAND_CI_UNREADABLE_PREFIX = "Mergestorm cannot read ";
 const AUTO_LAND_WAITED_PREFIX = "Auto land has waited ";
+const AUTO_LAND_MEMBERS_REMAINING_PREFIX = "The land PR cannot be queued: ";
 
 const CI_UNREADABLE_WHAT: Readonly<Record<string, string>> = {
   check_runs_unreadable: "the check runs",
@@ -462,7 +510,9 @@ const AUTO_LAND_WAIT_WORDS: Readonly<Record<string, string>> = {
   mergeability_unknown: "GitHub has not said whether this PR can merge into its base",
   tempest_pending: "Tempest's review of this head has not started",
   tempest_running: "Tempest's review of this head has not finished",
-  tempest_trigger_failed: "Tempest's review of this head could not be started",
+  tempest_trigger_failed: "Mergestorm could not reach Tempest to review the land PR; it keeps trying every 5 minutes",
+  tempest_skipped: "Tempest skipped its review of this head",
+  members_remaining: "a PR that is not a layer of this stack is still open on the stack branch",
   tempest_stopped: "Tempest's review of this head was stopped",
   tempest_failed: "Tempest's review of this head broke without a result",
   tempest_findings: "Tempest reported findings on this head",
@@ -540,8 +590,10 @@ export function autoLandWaitBlocker(stack: StackDto, layer: StackLayerDto, nowMs
       return waited >= AUTO_LAND_CI_PENDING_ATTENTION_MS
         ? `${AUTO_LAND_CI_PENDING_PREFIX}${minutes}m — a check on this head has not finished, so Auto land will not queue it`
         : null;
+    case "members_remaining":
+      return `${AUTO_LAND_MEMBERS_REMAINING_PREFIX}${wait.detail ?? AUTO_LAND_WAIT_WORDS.members_remaining}`;
     case "vortex_not_green":
-      return waited >= AUTO_LAND_VORTEX_WAIT_ATTENTION_MS
+      return waited >= AUTO_LAND_VORTEX_WAIT_ATTENTION_MS && !vortexRetryScheduled(layer)
         ? `${AUTO_LAND_VORTEX_WAIT_PREFIX}${minutes}m — Auto land is waiting for an approving Vortex review at this head`
         : null;
     case "promote_merge_failed":
@@ -697,12 +749,13 @@ export function agentsCannotClear(blocker: string): boolean {
   return blocker === "Conflict" || blocker === RESTACK_FAILED || blocker === "Draft PR" ||
     blocker === SEAM_REVIEW_NOT_RUNNING || blocker === VORTEX_REVIEW_OUT_OF_QUOTA ||
     blocker === VORTEX_AUTO_REVIEW_OFF || blocker === VORTEX_BILLING_SKIPPED ||
-    blocker === VORTEX_REVIEW_INCOMPLETE ||
+    blocker === VORTEX_REVIEW_INCOMPLETE || blocker === VORTEX_IGNORED_AUTHOR || blocker === VORTEX_REPO_DISABLED ||
     STUCK_SEAM_BLOCKERS.includes(blocker) ||
     blocker.startsWith("Merge conflicts") || blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX);
 }
 
-const TEMPEST_RERUN_BLOCKER = /^(?:landing blocked:\s*)?tempest_(failed|stopped)\b/i;
+const TEMPEST_RERUN_BLOCKER = /^(?:landing blocked:\s*)?tempest_(failed|stopped|skipped)\b/i;
+const TEMPEST_TRIGGER_FAILED_BLOCKER = /^(?:landing blocked:\s*)?tempest_trigger_failed\b/i;
 
 function isTempestFindingsBlocker(attention: StackBlocker, bounce: MergeQueueEntryDto | undefined): boolean {
   const blocker = attention.blocker.trim();
@@ -811,7 +864,8 @@ export function stackRepair(
     bounce?.bounceDetail?.message?.trim().match(TEMPEST_RERUN_BLOCKER);
   const rerun = landPr ? rerunBlocker : null;
   if (rerun) {
-    const stoppedByPerson = rerun[1]!.toLowerCase() === "stopped";
+    const outcome = rerun[1]!.toLowerCase();
+    const stoppedByPerson = outcome === "stopped";
     const comment = `gh pr comment ${layer.prNumber} --repo ${stack.owner}/${stack.repo} --body`;
     const head = layer.headSha ?? "its live head";
     return {
@@ -822,7 +876,29 @@ export function stackRepair(
       stoppedByPerson,
       steps: stoppedByPerson
         ? `Tempest's review of land PR #${layer.prNumber} at ${head} was stopped, so Auto land will not land it. There are no findings to fix: do not patch or push. Ask the human whether to run Tempest again. If they say yes, run ${comment} "@mergestorm-tempest review --force" and keep watching.`
+        : outcome === "skipped"
+          ? `Tempest skipped its review of land PR #${layer.prNumber} at ${head}, so Auto land will not land it. There are no findings to fix: do not patch or push. Ask the human to run ${comment} "@mergestorm-tempest review" and keep watching.`
         : `Tempest's review of land PR #${layer.prNumber} at ${head} broke before it produced a result, and Mergestorm already re-ran it the most times it will on its own. There are no findings to fix: do not patch or push. Run it once more with ${comment} "@mergestorm-tempest review" and keep watching. If it breaks again, tell the human.`,
+    };
+  }
+  if (landPr && TEMPEST_TRIGGER_FAILED_BLOCKER.test(attention.blocker.trim())) {
+    return {
+      kind: "tempest_trigger_failed",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      detail: attention.blocker.trim(),
+      steps: `Mergestorm could not reach Tempest to review land PR #${layer.prNumber} at ${layer.headSha ?? "its head"} for over 5 minutes, so Auto land will not land it yet. Mergestorm keeps trying every 5 minutes. Nothing in the PR needs a change: do not patch or push. Keep watching; if this stays, tell the human that Tempest cannot be reached.`,
+    };
+  }
+  if (attention.blocker === VORTEX_REVIEW_FAILED) {
+    return {
+      kind: "vortex_failed",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      detail: null,
+      steps: `Vortex's review of #${layer.prNumber} at ${layer.headSha ?? "its head"} failed and nothing will run it again by itself, so Auto land waits. There are no findings to fix. Run the review again: comment @mergestorm-vortex review on #${layer.prNumber} (gh pr comment ${layer.prNumber} --repo ${stack.owner}/${stack.repo} --body "@mergestorm-vortex review"); a new commit pushed to ${layer.branch} also queues one. If it fails again, tell the human.`,
     };
   }
   const vortexSkip = vortexIdleSkipBlocker(layer);
@@ -837,6 +913,16 @@ export function stackRepair(
     };
   }
   const wait = autoLandWaitOn(stack, layer);
+  if (wait?.reason === "members_remaining" && attention.blocker.startsWith(AUTO_LAND_MEMBERS_REMAINING_PREFIX)) {
+    return {
+      kind: "members_remaining",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      detail: wait.detail,
+      steps: `Auto land will not send land PR #${layer.prNumber} to the merge queue while another PR is open on ${layer.branch} that is not a layer of this stack${wait.detail ? ` (${wait.detail})` : ""}. Nothing on ${layer.branch} needs a change: do not patch or push for this. Close that PR, retarget it to another base, or adopt it into the stack (mg stack adopt ${stack.owner}/${stack.repo}#<that PR>); a draft PR or a PR from a fork cannot be adopted, so close or retarget it. If the PR is not yours, tell the human. Auto land sends the land PR to the queue by itself once that PR is gone from ${layer.branch}.`,
+    };
+  }
   if (wait && attention.blocker.startsWith(AUTO_LAND_CI_PENDING_PREFIX)) {
     return {
       kind: "ci_pending",
@@ -920,6 +1006,44 @@ export function stackRepair(
   return null;
 }
 
+export const LAND_PR_MISSING_PREFIX = "No open land PR for ";
+
+function landPrMissing(
+  stack: StackDto,
+  candidate: StackLayerDto | undefined,
+): { attention: StackBlocker; repair: StackRepairHint } | null {
+  const unit = stack.unit;
+  if (!unit || candidate || stack.archivedAt || unit.state === "landed" || unit.state === "abandoned") return null;
+  if (stack.layers.some((layer) => !isTerminalLayer(layer))) return null;
+  const landing = unit.landingBlockReason?.trim();
+  if (!landing || landGateIsPending(landing) || unit.landPr?.state === "merged") return null;
+  const closed = unit.landPr && unit.landPr.prNumber > 0 ? unit.landPr : null;
+  const prNumber = unit.landPrNumber ?? closed?.prNumber ??
+    stack.layers.filter((layer) => layer.prNumber > 0).sort((a, b) => b.position - a.position)[0]?.prNumber;
+  if (prNumber == null || prNumber <= 0) return null;
+  const headSha = closed?.headSha ?? null;
+  const target = unit.landTarget?.trim() || stack.landTarget;
+  const detail = landing.replace(/^landing blocked:\s*/i, "").replace(/^land_pr_unavailable:\s*/i, "").trim() || null;
+  const landPrRef = unit.landPrNumber ?? closed?.prNumber ?? null;
+  const restore = landPrRef != null
+    ? `restore it from the closed land PR's head (gh pr view ${landPrRef} --repo ${stack.owner}/${stack.repo} --json headRefOid,state, then git push origin <that sha>:refs/heads/${unit.branch}) and reopen #${landPrRef}`
+    : `restore it from the commit it pointed at (git push origin <sha>:refs/heads/${unit.branch})`;
+  return {
+    attention: {
+      prNumber, headSha, bounceKind: null,
+      blocker: `${LAND_PR_MISSING_PREFIX}${unit.branch} — every layer is merged into it, but it cannot land in ${target} without one`,
+    },
+    repair: {
+      kind: "land_pr_unavailable",
+      prNumber,
+      headSha,
+      branch: unit.branch,
+      detail,
+      steps: `Every layer of this stack is merged into ${unit.branch}, but there is no open land PR from ${unit.branch} into ${target} and Mergestorm cannot open one${detail ? ` (${detail})` : ""}, so the stack cannot land. Nothing in the layers needs a change: do not patch or push for this. Check whether the stack branch still exists: git ls-remote origin refs/heads/${unit.branch}. If it is gone (deleting it makes GitHub close the land PR), tell the human: ${restore}, or close the stack if the work is no longer wanted. If the branch exists, tell the human that Mergestorm cannot open the land PR and give them the error above. Do not open a PR into ${target} yourself.`,
+    },
+  };
+}
+
 /** Pair-gate attention plus live hard blocks on every other open layer. */
 export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [],
   cursor: Pick<StackWatchCursor, "bounceId" | "afterFinishedAt"> = {}, nowMs: number = Date.now()) {
@@ -962,6 +1086,9 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       result = { blocker: `${MERGE_QUEUE_STALLED_PREFIX}${queueWait.text}`, bounceKind: null };
     }
     if (!result.blocker) {
+      if (vortexRetryScheduled(layer) && (selected || !candidate || layer.position > candidate.position)) {
+        issues.push({ prNumber: layer.prNumber, headSha: layer.headSha ?? null, blocker: VORTEX_RETRY_SCHEDULED, bounceKind: null });
+      }
       if (mergeabilityPending(layer) && (selected || !candidate || layer.position > candidate.position)) {
         issues.push({ prNumber: layer.prNumber, headSha: layer.headSha ?? null,
           blocker: `Merge state unknown${layer.parentBranch ? ` vs ${layer.parentBranch}` : ""}`, bounceKind: null });
@@ -996,6 +1123,11 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
     : null;
   const settleIssue = mergeabilitySettleIssue(stack, open, issues, attention);
   if (settleIssue) issues.push(settleIssue);
+  const landMissing = landPrMissing(stack, candidate);
+  if (landMissing) {
+    attention = landMissing.attention;
+    attentionLayer = undefined;
+  }
   const focus = attentionLayer ?? candidate;
   const agents = focus ? layerAgents(focus) : null;
   const busy: StackAgentBusy[] = [];
@@ -1021,7 +1153,8 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       queueWait: queued };
   }
   return { attention, held: null, issues, currentCandidate, bounce, busy, agents,
-    repair: stackRepair(stack, attention, attentionLayer, bounce, queueWait), landGatePending, queueWait: queued };
+    repair: landMissing?.repair ?? stackRepair(stack, attention, attentionLayer, bounce, queueWait), landGatePending,
+    queueWait: queued };
 }
 
 function mergeabilitySettleIssue(

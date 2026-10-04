@@ -493,6 +493,7 @@ export type MergeQueueBounceKind =
   | "ci_timeout"
   | "head_moved"
   | "tempest_findings"
+  | "tempest_rerun"
   | "seam_findings"
   | "restack_conflict"
   | "pr_draft"
@@ -506,6 +507,7 @@ export const MERGE_QUEUE_BOUNCE_KINDS = [
   "ci_timeout",
   "head_moved",
   "tempest_findings",
+  "tempest_rerun",
   "seam_findings",
   "restack_conflict",
   "pr_draft",
@@ -519,6 +521,7 @@ export const BOUNCE_KIND_LABELS: Readonly<Record<MergeQueueBounceKind, string>> 
   ci_timeout: "CI timed out",
   head_moved: "head moved",
   tempest_findings: "Tempest findings",
+  tempest_rerun: "Tempest needs rerun",
   seam_findings: "seam review findings",
   restack_conflict: "restack conflict",
   pr_draft: "draft PR",

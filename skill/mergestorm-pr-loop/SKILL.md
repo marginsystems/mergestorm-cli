@@ -67,7 +67,7 @@ Map these to `mergestorm.pr_review/v1` envelope fields; do not invent statuses.
 - status is `rate_limited`, or `patch_policy.mode` is `"hold"`: surface the findings to the human and stop. Do not patch.
 - status is `failed`: report to the human. Do not keep pushing to retrigger.
 - status is `in_progress` and the envelope has a `head_sha`: the pass is still running; call `review_wait_pr` again with the same `after_sha` and the same `after_pass`.
-- status is `in_progress` and the envelope has no `head_sha`: the wait timed out before Vortex wrote a pass for your SHA. Call `review_wait_pr` once more with the same `after_sha` and the same `after_pass`. If it comes back the same way a second time in a row, stop and tell the human that Vortex did not pick up the push. Do not push again to retrigger.
+- status is `none` (from an older MCP server: status is `in_progress` and the envelope has no `head_sha`): the wait timed out and no Vortex pass exists for your SHA yet. Call `review_wait_pr` once more with the same `after_sha` and the same `after_pass`. If it comes back the same way a second time in a row, stop and tell the human that Vortex did not pick up the push, and that a comment `@mergestorm-vortex review` on the PR runs it. Do not push again to retrigger.
 - status is `quota_exceeded` (or its legacy spelling `trial_expired`): the account's review credits are used up for this period; tell the human calmly and stop. It is not an error and not a lapsed trial. Do not patch or push.
 - status is `skipped`, `stopped`, or `synced`: surface the status and reason to the human and stop. Do not patch or push.
 

@@ -258,6 +258,51 @@ describe("pr", { concurrency: false }, () => {
     assert.equal(captured.error.code, "review_timeout");
   });
 
+  test("wait timeout with no review ever seen says none exists and what to do", async () => {
+    withApiKey();
+    mockPrFetch([{ status: 404, body: { error: "not_found" } }]);
+    const clock = fakeClock();
+    const captured = await captureOutput(() =>
+      cmdPr(["acme/widgets#12", "--json", "--wait", "--after-sha", "abc123def456", "--timeout", "0.01"], {
+        poll: clock,
+      }),
+    );
+    assert.ok(captured.error instanceof CommandError);
+    assert.equal(captured.error.exitCode, REVIEW_EXIT.timeout);
+    assert.equal(captured.error.code, "review_timeout");
+    assert.match(captured.error.message, /No Vortex review exists for acme\/widgets#12 at abc123def456 yet\./);
+    assert.match(captured.error.message, /comment "@mergestorm-vortex review" on the PR to run it, or review the branch locally with mg review/);
+  });
+
+  test("wait timeout after an in-progress review was seen keeps the plain timeout message", async () => {
+    withApiKey();
+    mockPrFetch([{ status: 200, body: review("in_progress") }]);
+    const captured = await captureOutput(() =>
+      cmdPr(["acme/widgets#12", "--json", "--wait", "--timeout", "0.01"], { poll: fakeClock() }),
+    );
+    assert.ok(captured.error instanceof CommandError);
+    assert.equal(captured.error.message, "Timed out waiting for PR review acme/widgets#12");
+  });
+
+  test("wait timeout after exhausted API timeouts does not report no review", async () => {
+    withApiKey();
+    originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    };
+    const captured = await captureOutput(() =>
+      cmdPr(["acme/widgets#12", "--json", "--wait", "--timeout", "10"], {
+        poll: fakeClock(),
+      }),
+    );
+    assert.ok(captured.error instanceof CommandError);
+    assert.equal(captured.error.code, "review_timeout");
+    assert.equal(captured.error.message, "Timed out waiting for PR review acme/widgets#12");
+    assert.equal(calls, 4);
+  });
+
   test("wait maps exhausted 429 retries to rate_limited", async () => {
     withApiKey();
     mockPrFetch([

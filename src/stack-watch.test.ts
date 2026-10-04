@@ -1293,6 +1293,60 @@ test("a failed land gate is still attention", async () => {
   assert.equal(landGateIsPending("ci_pending: settling idle project checks on abc1234"), true);
 });
 
+test("a stack whose land PR is gone is attention with a land_pr_unavailable repair, not a wait forever", async () => {
+  const merged = layer({ state: "merged", prNumber: 42, position: 1 });
+  const closedLand = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 2, state: "closed" });
+  const reason = "landing blocked: land_pr_unavailable: Validation Failed: head invalid";
+  const gone = unitStack([merged], { state: "growing", landPrNumber: 2874, landPr: closedLand, landingBlockReason: reason });
+  assert.equal(stackTerminalReason(gone), null);
+  const h = harness(gone);
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker,
+    "No open land PR for mg-stack-79 — every layer is merged into it, but it cannot land in main without one");
+  assert.equal(result.prNumber, 2874);
+  assert.equal(result.headSha, HEAD);
+  assert.equal(result.watch.done, false);
+  assert.equal(result.repair?.kind, "land_pr_unavailable");
+  assert.equal(result.repair?.kind === "land_pr_unavailable" ? result.repair.detail : null, "Validation Failed: head invalid");
+  assert.equal(result.repair?.branch, "mg-stack-79");
+  assert.match(result.repair?.steps ?? "", /git ls-remote origin refs\/heads\/mg-stack-79/);
+  assert.match(result.repair?.steps ?? "", /gh pr view 2874 --repo owner\/repo --json headRefOid,state/);
+  assert.match(result.repair?.steps ?? "", /or close the stack if the work is no longer wanted/);
+
+  const alsoStored = stackBlockers({
+    ...gone,
+    autoEnqueueWhenReady: true,
+    autoLandWait: { reason: "land_pr_unavailable", prNumber: null, headSha: null, since: new Date(0).toISOString(), attempts: null, detail: null },
+  }, [], {}, 50 * 60_000);
+  assert.equal(alsoStored.attention?.blocker, result.blocker);
+  assert.equal(alsoStored.repair?.kind, "land_pr_unavailable");
+  assert.deepEqual(alsoStored.issues, []);
+
+  const neverOpened = stackBlockers(unitStack([merged], { state: "growing", landingBlockReason: reason }));
+  assert.equal(neverOpened.attention?.prNumber, 42);
+  assert.equal(neverOpened.attention?.headSha, null);
+  assert.equal(neverOpened.repair?.kind, "land_pr_unavailable");
+  assert.match(neverOpened.repair?.steps ?? "", /git push origin <sha>:refs\/heads\/mg-stack-79/);
+});
+
+test("a missing land PR is not raised while the gate only waits, on an open layer, or once the unit is finished", () => {
+  const merged = layer({ state: "merged", prNumber: 42, position: 1 });
+  const reason = "landing blocked: land_pr_unavailable: Validation Failed: head invalid";
+  const quiet = (s: StackDto) => assert.equal(stackBlockers(s).attention, null);
+  quiet(unitStack([merged], { state: "growing", landingBlockReason: "landing blocked: tempest_pending on land PR #2874" }));
+  quiet(unitStack([merged], { state: "growing", landingBlockReason: null }));
+  quiet(unitStack([merged], { state: "landed", landingBlockReason: reason }));
+  quiet(unitStack([merged], { state: "abandoned", landingBlockReason: reason }));
+  quiet({ ...unitStack([merged], { state: "growing", landingBlockReason: reason }), archivedAt: "2026-10-02T00:00:00Z" });
+  quiet(unitStack([merged, layer({ prNumber: 43, position: 2 })], { state: "growing", landingBlockReason: reason }));
+  quiet(unitStack([merged], { state: "growing", landPrNumber: 2874, landingBlockReason: reason,
+    landPr: layer({ branch: "mg-stack-79", prNumber: 2874, position: 2, state: "merged" }) }));
+  const open = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 2 });
+  assert.equal(stackBlockers(unitStack([merged], { state: "growing", landPrNumber: 2874, landPr: open, landingBlockReason: reason }))
+    .repair?.kind, undefined);
+});
+
 test("land gate tempest_failed after the automatic re-runs names a Tempest re-run, not a findings fix", async () => {
   const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
   const reason = "landing blocked: tempest_failed on land PR #2874: Tempest's review broke 3 times at this head without a result";
@@ -1383,6 +1437,20 @@ test("a broken Tempest queue bounce uses its reason instead of the findings labe
   assert.equal(blockers.repair?.kind, "tempest_rerun");
   assert.equal(blockers.repair && "stoppedByPerson" in blockers.repair ? blockers.repair.stoppedByPerson : null, false);
   assert.match(blockers.repair!.steps, /do not patch or push/);
+});
+
+test("a skipped Tempest queue bounce asks for a rerun instead of findings fixes", () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
+  const reason = "landing blocked: tempest_skipped on land PR #2874: repo_disabled";
+  const entry = bounce({ bounceDetail: { kind: "tempest_rerun", headSha: HEAD, prNumber: 2874, message: reason } });
+  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874 }), [entry]);
+  assert.equal(blockers.attention?.bounceKind, "tempest_rerun");
+  assert.match(blockers.attention?.blocker ?? "", /^Tempest needs rerun/);
+  assert.equal(blockers.repair?.kind, "tempest_rerun");
+  assert.equal(blockers.repair && "stoppedByPerson" in blockers.repair ? blockers.repair.stoppedByPerson : null, false);
+  assert.match(blockers.repair!.steps, /@mergestorm-tempest review/);
+  assert.match(blockers.repair!.steps, /do not patch or push/);
+  assert.doesNotMatch(blockers.repair!.steps, /Tempest report|verify each finding/);
 });
 
 test("tempest findings on a land PR that Cyclone is patching hold in progress with no repair", () => {
@@ -2013,6 +2081,8 @@ for (const [skipReason, blocker, step] of [
   ["auto_review_off", "Vortex auto-review is off, so this head was not reviewed", /turning auto-review on \(mg stack set stack --auto-review on, or the account setting in the dashboard\) queues a review of this head by itself\. To review only this head and leave auto-review off, comment @mergestorm-vortex review on #42/],
   ["billing_blocked", "Vortex skipped this head: it could not confirm billing", /check the plan and billing/],
   ["billing_unavailable", "Vortex skipped this head: it could not confirm billing", /comment @mergestorm-vortex review on #42/],
+  ["ignored_author", "Vortex skipped this head: the PR author is on the ignored authors list", /To review this head once, comment @mergestorm-vortex review on #42\. To have this author's PRs reviewed by themselves, tell the human to remove the author from the ignored authors list/],
+  ["repo_disabled", "Vortex skipped this head: reviews are turned off for this repository", /a mention will not run a review while the repository is off\. Tell the human to turn the repository on in the Mergestorm dashboard/],
 ] as const) {
   test(`a Vortex review skipped for ${skipReason} at the head is attention at once, without Auto land`, async () => {
     const h = harness(stack([layer({ vortexStatus: "skipped", vortexReview: { ...quotaSkipped, skip_reason: skipReason } })]));
@@ -2072,3 +2142,92 @@ test("an auto_review_off skip at an older head is not named at the live head", (
   const review = { ...quotaSkipped, skip_reason: "auto_review_off", head_sha: NEXT };
   assert.equal(stackBlockers(stack([layer({ vortexStatus: "skipped", vortexReview: review })])).attention, null);
 });
+
+test("a Vortex retry that is scheduled is a named wait, never attention, also past the 30 minute Vortex rule", async () => {
+  const retrying = { ...quotaSkipped, skip_reason: "retry_scheduled" };
+  for (const vortexStatus of ["skipped", "failed"] as const) {
+    const h = harness({ ...waiting("vortex_not_green", {}, [layer({ vortexStatus, vortexReview: retrying })]) });
+    h.options.now = () => 50 * MINUTE;
+    h.options.timeoutMs = 0;
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "waiting", vortexStatus);
+    assert.equal(result.blocker, null);
+    assert.equal(result.repair, null);
+    assert.deepEqual(result.issues, [{ prNumber: 42, headSha: HEAD, bounceKind: null,
+      blocker: "Vortex hit a temporary error on this head and will retry by itself" }]);
+  }
+  const olderHead = layer({ vortexStatus: "failed", vortexReview: { ...retrying, head_sha: NEXT } });
+  const h = harness(stack([olderHead]));
+  h.options.timeoutMs = 0;
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "waiting");
+  assert.equal(result.blocker, null);
+  assert.equal(result.repair, null);
+});
+
+test("Review failed carries a vortex_failed repair that says how to run the review again", () => {
+  const result = stackBlockers(stack([layer({ vortexStatus: "failed" })]));
+  assert.equal(result.attention?.blocker, "Review failed");
+  assert.equal(result.repair?.kind, "vortex_failed");
+  assert.match(result.repair?.steps ?? "", /gh pr comment 42 --repo owner\/repo --body "@mergestorm-vortex review"/);
+  assert.match(result.repair?.steps ?? "", /a new commit pushed to feature also queues one\. If it fails again, tell the human/);
+});
+
+test("a stray PR open on the stack branch is attention at once with a members_remaining repair", () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 2 });
+  const merged = layer({ state: "merged", prNumber: 42, position: 1 });
+  const detail = "PR #4 is still open on mg-stack-79 and is not a layer of this stack: close it, retarget it or adopt it";
+  const s: StackDto = {
+    ...unitStack([merged], { state: "growing", landPrNumber: 2874, landPr: land }),
+    autoEnqueueWhenReady: true,
+    autoLandWait: { reason: "members_remaining", prNumber: 2874, headSha: HEAD, since: new Date(0).toISOString(), attempts: null, detail },
+  };
+  const result = stackBlockers(s, [], {}, MINUTE);
+  assert.deepEqual(result.attention, { prNumber: 2874, headSha: HEAD, bounceKind: null,
+    blocker: `The land PR cannot be queued: ${detail}` });
+  assert.equal(result.repair?.kind, "members_remaining");
+  assert.equal(result.repair?.kind === "members_remaining" ? result.repair.detail : null, detail);
+  assert.match(result.repair?.steps ?? "", /do not patch or push for this\. Close that PR, retarget it to another base, or adopt it into the stack/);
+  assert.match(result.repair?.steps ?? "", /a draft PR or a PR from a fork cannot be adopted, so close or retarget it/);
+  const tokenShaped = stackBlockers(
+    { ...s, autoLandWait: { ...s.autoLandWait!, detail: "members_remaining: #4, #5 still open" } }, [], {}, MINUTE);
+  assert.equal(tokenShaped.attention?.blocker, "The land PR cannot be queued: members_remaining: #4, #5 still open");
+  assert.equal(tokenShaped.repair?.kind, "members_remaining");
+  const bare = stackBlockers({ ...s, autoLandWait: { ...s.autoLandWait!, detail: null } }, [], {}, MINUTE);
+  assert.equal(bare.attention?.blocker,
+    "The land PR cannot be queued: a PR that is not a layer of this stack is still open on the stack branch");
+  assert.equal(bare.repair?.kind, "members_remaining");
+});
+
+test("the queue's merge_failed bounce for a stray PR on the stack branch is shown with its message", () => {
+  const message = "PR #4 is still open on mg-stack-79 and is not a layer of this stack: close it, retarget it or adopt it, then re-enqueue";
+  const bounced = bounce({ bounceDetail: { kind: "merge_failed", headSha: HEAD, message } });
+  const result = stackBlockers(stack(), [bounced]);
+  assert.equal(result.attention?.blocker, `merge failed — ${message}`);
+});
+
+test("land gate tempest_trigger_failed says Mergestorm keeps trying and nothing in the PR needs a fix", () => {
+  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
+  const reason = "landing blocked: tempest_trigger_failed on land PR #2874";
+  const result = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874, landingBlockReason: reason }));
+  assert.equal(result.attention?.blocker, reason);
+  assert.equal(result.repair?.kind, "tempest_trigger_failed");
+  assert.match(result.repair?.steps ?? "", /could not reach Tempest to review land PR #2874 .* for over 5 minutes/);
+  assert.match(result.repair?.steps ?? "", /keeps trying every 5 minutes\. Nothing in the PR needs a change: do not patch or push\. Keep watching; if this stays, tell the human/);
+});
+
+for (const [reason, words] of [
+  ["infra_failure", /Cyclone could not start the patch: GitHub sign-in, comment load or checkout kept failing/],
+  ["no_changes", /Cyclone found nothing to change for these findings/],
+  ["credits_exhausted", /the account is out of standard credits this month/],
+  ["no_billing", /the account has no billing set up/],
+  ["unsupported_language", /the findings are in a language Cyclone does not patch/],
+  ["policy_owner_changed", /the stack's owner changed while the patch was queued/],
+  ["patch_job_lost", /Cyclone's patch job was lost before it finished/],
+] as const) {
+  test(`the Cyclone hand-off ${reason} is said in plain words`, () => {
+    const result = stackBlockers(stack([changesRequested({ cycloneHandoff: { headSha: HEAD, reason, at: null } })]));
+    assert.equal(result.repair?.kind, "vortex_findings");
+    assert.match(result.repair?.steps ?? "", words);
+  });
+}

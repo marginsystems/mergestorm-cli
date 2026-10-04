@@ -341,24 +341,49 @@ export class ReviewPollTimeoutError extends Error {
   }
 }
 
+export type PrReviewWaitTarget = { afterSha?: string; pass?: number; afterPass?: number };
+
+export function noPrReviewYetMessage(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  target: PrReviewWaitTarget = {},
+): string {
+  const sha = target.afterSha?.trim();
+  const pass = target.pass !== undefined
+    ? `Vortex pass ${target.pass}`
+    : target.afterPass !== undefined ? `Vortex pass after pass ${target.afterPass}` : "Vortex review";
+  return `No ${pass} exists for ${owner}/${repo}#${prNumber}${sha ? ` at ${sha.slice(0, 12)}` : ""} yet. ` +
+    "If the push was in the last few minutes, wait once more. If it is still missing after that, Vortex is not reviewing this head " +
+    "(auto-review may be off for the repo or the stack, or the push did not reach Mergestorm): " +
+    `comment "@mergestorm-vortex review" on the PR to run it, or review the branch locally with mg review; a new push also queues a review.`;
+}
+
 export class PrReviewPollTimeoutError extends Error {
   readonly owner: string;
   readonly repo: string;
   readonly prNumber: number;
   readonly lastEnvelope: PrVortexReview | null;
+  readonly reviewSeen: boolean;
 
   constructor(
     owner: string,
     repo: string,
     prNumber: number,
     lastEnvelope: PrVortexReview | null,
+    target: PrReviewWaitTarget = {},
+    reviewSeen = lastEnvelope !== null,
   ) {
-    super(`Timed out waiting for PR review ${owner}/${repo}#${prNumber}`);
+    super(
+      `Timed out waiting for PR review ${owner}/${repo}#${prNumber}` +
+        (reviewSeen ? "" : `. ${noPrReviewYetMessage(owner, repo, prNumber, target)}`),
+    );
     this.name = "PrReviewPollTimeoutError";
     this.owner = owner;
     this.repo = repo;
     this.prNumber = prNumber;
     this.lastEnvelope = lastEnvelope;
+    this.reviewSeen = reviewSeen;
   }
 }
 
@@ -414,6 +439,7 @@ export async function pollPrVortexReview(
   applyPrReviewQuery(query, opts);
   let transientFailures = 0;
   let lastEnvelope: PrVortexReview | null = null;
+  let apiTimeoutSeen = false;
 
   const sleepBeforeRetry = async (retryAfterSeconds?: number) => {
     const waitMs = Math.min(
@@ -447,6 +473,7 @@ export async function pollPrVortexReview(
       }
       if (isCommandErrorCode(err, "api_timeout")) {
         if (opts.propagateTimeout) throw err;
+        apiTimeoutSeen = true;
         break;
       }
       if (isTransientReviewPollError(err)) {
@@ -520,7 +547,14 @@ export async function pollPrVortexReview(
     opts.onTick?.("progress");
   }
 
-  throw new PrReviewPollTimeoutError(owner, repo, prNumber, lastEnvelope);
+  throw new PrReviewPollTimeoutError(
+    owner,
+    repo,
+    prNumber,
+    lastEnvelope,
+    opts,
+    lastEnvelope !== null || apiTimeoutSeen,
+  );
 }
 
 export async function pollReview(

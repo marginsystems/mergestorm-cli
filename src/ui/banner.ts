@@ -162,6 +162,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.37": [
     "turning auto-review on reviews skipped heads",
   ],
+  "0.3.39": [
+    "the watch names more waits and what to do",
+  ],
   "0.3.38": [
     "mg settings turns merge queue batching on or off",
   ],
