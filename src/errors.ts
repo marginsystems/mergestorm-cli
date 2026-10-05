@@ -22,8 +22,10 @@ export type CommandErrorCode =
   | "reserved_branch"
   | "supabase_unconfigured"
   | "cyclone_not_connected"
+  | "cyclone_permission_missing"
   | "busy"
   | "adopt_failed"
+  | "github_unreadable"
   | "stack_attention";
 
 /** Stable one-shot exit codes for machine callers of `mergestorm review`. */
@@ -39,6 +41,7 @@ export const REVIEW_EXIT = {
 
 export type CommandErrorExtras = {
   retryAfterSeconds?: number;
+  reason?: string;
 };
 
 /** Thrown by command handlers; one-shot mode maps `exitCode` onto process.exitCode. */
@@ -46,6 +49,7 @@ export class CommandError extends Error {
   readonly exitCode: number;
   readonly code?: CommandErrorCode;
   readonly retryAfterSeconds?: number;
+  readonly reason?: string;
 
   constructor(
     message: string,
@@ -60,7 +64,17 @@ export class CommandError extends Error {
     if (extras?.retryAfterSeconds !== undefined) {
       this.retryAfterSeconds = extras.retryAfterSeconds;
     }
+    if (extras?.reason !== undefined) {
+      this.reason = extras.reason;
+    }
   }
+}
+
+const ANSI_SEQUENCE = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
+const CONTROL_CHARACTER = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
+
+export function plainServerText(text: string): string {
+  return text.replace(ANSI_SEQUENCE, "").replace(CONTROL_CHARACTER, "");
 }
 
 export const RATE_LIMITED_HINT =

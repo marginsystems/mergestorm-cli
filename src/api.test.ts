@@ -3,6 +3,9 @@ import { afterEach, test } from "node:test";
 import {
   adoptStack,
   apiFetch,
+  cancelMergeQueueEntry,
+  enqueueStack,
+  ensureUpperPark,
   findStackPull,
   openStackPull,
   getEnrichedStack,
@@ -519,6 +522,239 @@ test("findStackPull falls back to the canonical install link on a transport not-
       err.message.endsWith(
         "Cyclone installed on acme/widgets (https://github.com/apps/mergestorm-cyclone/installations/new).",
       ),
+  );
+});
+
+test("openStackPull prints the server's Surge sentence and install link when the reason is a Surge one", async () => {
+  mockFetch(400, {
+    error: "cyclone_not_installed",
+    reason: "surge_not_installed",
+    message: "Opening PRs needs either the GitHub CLI (gh auth login) or Mergestorm Surge installed on acme/widgets (https://github.com/apps/mergestorm-surge/installations/new).",
+  });
+  await assert.rejects(
+    () => openStackPull(cfg, PULL_INPUT),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "cyclone_not_installed" &&
+      err.reason === "surge_not_installed" &&
+      err.message === "Opening PRs needs either the GitHub CLI (gh auth login) or Mergestorm Surge installed on acme/widgets (https://github.com/apps/mergestorm-surge/installations/new)." &&
+      !/Cyclone/.test(err.message),
+  );
+});
+
+test("findStackPull appends a separate installUrl to a Surge refusal and falls back when the message is missing", async () => {
+  mockFetch(400, {
+    error: "cyclone_not_installed",
+    reason: "surge_not_installed",
+    message: "Mergestorm Surge is not installed on acme/widgets.",
+    installUrl: "https://github.com/apps/mergestorm-surge/installations/new",
+  });
+  await assert.rejects(
+    () => findStackPull(cfg, { owner: "acme", repo: "widgets", head: "ms/feat-a" }),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.message ===
+        "Mergestorm Surge is not installed on acme/widgets. (https://github.com/apps/mergestorm-surge/installations/new)",
+  );
+  mockFetch(403, { error: "cyclone_permission_missing", reason: "surge_permission_missing" });
+  await assert.rejects(
+    () => findStackPull(cfg, { owner: "acme", repo: "widgets", head: "ms/feat-a" }),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "cyclone_permission_missing" &&
+      err.reason === "surge_permission_missing" &&
+      err.message === "Mergestorm Surge is not installed or not ready on this repository. Install it from Agents.",
+  );
+});
+
+test("openStackPull keeps today's Cyclone sentence for a refusal without a Surge reason", async () => {
+  for (const reason of [undefined, "", "other_reason", 7]) {
+    mockFetch(400, {
+      error: "cyclone_not_installed",
+      ...(reason === undefined ? {} : { reason }),
+      message: "Cyclone is not installed on acme/widgets.",
+    });
+    await assert.rejects(
+      () => openStackPull(cfg, PULL_INPUT),
+      (err: unknown) =>
+        err instanceof CommandError &&
+        err.code === "cyclone_not_installed" &&
+        err.reason === undefined &&
+        err.message ===
+          "Opening PRs needs either the GitHub CLI (gh auth login) or Cyclone installed on acme/widgets " +
+            "(https://github.com/apps/mergestorm-cyclone/installations/new).",
+    );
+  }
+});
+
+test("adoptStack carries the Surge reason with the server's Surge message, and no reason without one", async () => {
+  mockFetch(400, { error: "cyclone_not_connected", reason: "surge_not_connected", message: "Install the Mergestorm Surge GitHub App to adopt this pull request. Surge is the write app: adopt, restack, the merge queue, and Auto land all run through it. Install it from Agents." });
+  await assert.rejects(
+    () => adoptStack("acme", "widgets", 42, cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "cyclone_not_connected" &&
+      err.reason === "surge_not_connected" &&
+      err.message === "Install the Mergestorm Surge GitHub App to adopt this pull request. Surge is the write app: adopt, restack, the merge queue, and Auto land all run through it. Install it from Agents.",
+  );
+  mockFetch(400, { error: "cyclone_not_connected", message: "Connect the Cyclone GitHub App to adopt this pull request." });
+  await assert.rejects(
+    () => adoptStack("acme", "widgets", 42, cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "cyclone_not_connected" &&
+      err.reason === undefined &&
+      err.message === "Connect the Cyclone GitHub App to adopt this pull request.",
+  );
+});
+
+test("a stack POST prints the server's Surge message; without a Surge reason it keeps the raw failure", async () => {
+  mockFetch(400, { error: "cyclone_not_connected", reason: "surge_not_connected", message: "Install the Mergestorm Surge GitHub App to adopt this pull request. Surge is the write app: adopt, restack, the merge queue, and Auto land all run through it. Install it from Agents." });
+  await assert.rejects(
+    () => ensureUpperPark("stack-1", cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "cyclone_not_connected" &&
+      err.reason === "surge_not_connected" &&
+      err.message === "Install the Mergestorm Surge GitHub App to adopt this pull request. Surge is the write app: adopt, restack, the merge queue, and Auto land all run through it. Install it from Agents.",
+  );
+  mockFetch(400, { error: "cyclone_not_connected", message: "Connect Cyclone." });
+  await assert.rejects(
+    () => ensureUpperPark("stack-1", cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === undefined &&
+      err.message ===
+        'Failed to ensure upper-park freeze (HTTP 400): {"error":"cyclone_not_connected","message":"Connect Cyclone."}',
+  );
+});
+
+test("enqueueStack prints the server's own line for a GitHub read failure, and a fixed line when there is none", async () => {
+  mockFetch(503, {
+    error: "github_unreadable",
+    message: "Not queued: Mergestorm could not read #7 from GitHub, so it cannot record the head being queued. Nothing was enqueued; try again.",
+  });
+  await assert.rejects(
+    () => enqueueStack("stack-1", cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "github_unreadable" &&
+      err.exitCode === 1 &&
+      err.message === "Not queued: Mergestorm could not read #7 from GitHub, so it cannot record the head being queued. Nothing was enqueued; try again.",
+  );
+  for (const message of [undefined, 7, "  ", "\u001b[2J"]) {
+    mockFetch(503, { error: "github_unreadable", ...(message === undefined ? {} : { message }) });
+    await assert.rejects(
+      () => enqueueStack("stack-1", cfg),
+      (err: unknown) =>
+        err instanceof CommandError &&
+        err.code === "github_unreadable" &&
+        err.exitCode === 1 &&
+        err.message === "GitHub could not be read just now; try again.",
+    );
+  }
+});
+
+test("enqueueStack strips escape sequences and control characters from the server's GitHub read failure", async () => {
+  mockFetch(503, {
+    error: "github_unreadable",
+    message: "Not queued: \u001b[31mcould not read\u001b[0m #7\u0007\u009b from GitHub\r; try again.",
+  });
+  await assert.rejects(
+    () => enqueueStack("stack-1", cfg),
+    (err: unknown) =>
+      err instanceof CommandError && err.message === "Not queued: could not read #7 from GitHub; try again.",
+  );
+});
+
+test("cancelMergeQueueEntry keeps the raw failure for github_unreadable", async () => {
+  mockFetch(503, { error: "github_unreadable", message: "Not queued." });
+  await assert.rejects(
+    () => cancelMergeQueueEntry("entry-1", cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === undefined &&
+      err.message ===
+        'Failed to remove merge queue entry (HTTP 503): {"error":"github_unreadable","message":"Not queued."}',
+  );
+});
+
+test("a Surge refusal drops an install link that is not a GitHub App install page and strips escape sequences", async () => {
+  for (const installUrl of [
+    "https://evil.example/apps/mergestorm-surge/installations/new",
+    "http://github.com/apps/mergestorm-surge/installations/new",
+    "see https://github.com/apps/mergestorm-surge/installations/new",
+    "https://github.com/apps/mergestorm-surge",
+    "javascript:alert(1)",
+    7,
+  ]) {
+    mockFetch(400, {
+      error: "cyclone_not_installed",
+      reason: "surge_not_installed",
+      message: "\u001b]0;owned\u0007Mergestorm \u001b[1mSurge\u001b[0m is not installed on acme/widgets.\u0000",
+      installUrl,
+    });
+    await assert.rejects(
+      () => findStackPull(cfg, { owner: "acme", repo: "widgets", head: "ms/feat-a" }),
+      (err: unknown) =>
+        err instanceof CommandError &&
+        err.reason === "surge_not_installed" &&
+        err.message === "Mergestorm Surge is not installed on acme/widgets.",
+    );
+  }
+  mockFetch(400, {
+    error: "cyclone_not_installed",
+    reason: "surge_not_installed",
+    message: "Mergestorm Surge is not installed on acme/widgets.",
+    installUrl: "https://github.com/apps/mergestorm-surge/installations/new/permissions?x=1 \u001b[31mtrailing",
+  });
+  await assert.rejects(
+    () => findStackPull(cfg, { owner: "acme", repo: "widgets", head: "ms/feat-a" }),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.message ===
+        "Mergestorm Surge is not installed on acme/widgets. (https://github.com/apps/mergestorm-surge/installations/new)",
+  );
+});
+
+test("adoptStack shows the install link of a Surge refusal", async () => {
+  mockFetch(400, {
+    error: "cyclone_not_installed",
+    reason: "surge_not_installed",
+    message: "Install Mergestorm Surge on this repository, then adopt. Surge is required for stacks.",
+    installUrl: "https://github.com/apps/mergestorm-surge/installations/new",
+  });
+  await assert.rejects(
+    () => adoptStack("acme", "widgets", 42, cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "cyclone_not_installed" &&
+      err.reason === "surge_not_installed" &&
+      err.message ===
+        "Install Mergestorm Surge on this repository, then adopt. Surge is required for stacks. (https://github.com/apps/mergestorm-surge/installations/new)",
+  );
+});
+
+test("enqueueStack prints the server's Surge message and keeps other refusals as they were", async () => {
+  mockFetch(400, { error: "cyclone_not_connected", reason: "surge_not_connected", message: "Install the Mergestorm Surge GitHub App to adopt this pull request. Surge is the write app: adopt, restack, the merge queue, and Auto land all run through it. Install it from Agents." });
+  await assert.rejects(
+    () => enqueueStack("stack-1", cfg),
+    (err: unknown) => err instanceof CommandError && err.reason === "surge_not_connected" && err.message === "Install the Mergestorm Surge GitHub App to adopt this pull request. Surge is the write app: adopt, restack, the merge queue, and Auto land all run through it. Install it from Agents.",
+  );
+  mockFetch(400, { error: "cyclone_not_connected", message: "Connect Cyclone." });
+  await assert.rejects(
+    () => enqueueStack("stack-1", cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.message ===
+        'Failed to add stack to merge queue (HTTP 400): {"error":"cyclone_not_connected","message":"Connect Cyclone."}',
+  );
+  mockFetch(503, { error: "busy" });
+  await assert.rejects(
+    () => enqueueStack("stack-1", cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.message === 'Failed to add stack to merge queue (HTTP 503): {"error":"busy"}',
   );
 });
 

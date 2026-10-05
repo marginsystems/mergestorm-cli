@@ -217,6 +217,38 @@ test("formatSettingsLines prints on/off toggles and connected flags", () => {
   assert.match(text, /GitHub\s+connected/);
 });
 
+test("formatSettingsLines is unchanged when the server sends no stacks_ready", () => {
+  const text = stripAnsi(formatSettingsLines(SETTINGS_BODY).join("\n"));
+  assert.doesNotMatch(text, /Stacks, merge queue, Auto land/);
+  assert.doesNotMatch(text, /auto patch\)/);
+  assert.deepEqual(
+    buildConfigRows(SETTINGS_BODY).filter((row) => !row.writable),
+    [
+      { key: "cyclone_connected", label: "Cyclone", value: false, writable: false },
+      { key: "github_connected", label: "GitHub", value: true, writable: false },
+    ],
+  );
+});
+
+test("formatSettingsLines says whether stacks, the merge queue and Auto land are ready and labels Cyclone as auto patch", () => {
+  const ready = stripAnsi(formatSettingsLines({ ...SETTINGS_BODY, stacks_ready: true }).join("\n"));
+  assert.match(ready, /Stacks, merge queue, Auto land\s+ready$/m);
+  assert.match(ready, /Cyclone \(auto patch\)\s+not connected$/m);
+  assert.match(ready, /GitHub\s+connected$/m);
+
+  const notReady = stripAnsi(
+    formatSettingsLines({ ...SETTINGS_BODY, cyclone_connected: true, stacks_ready: false }).join("\n"),
+  );
+  assert.match(notReady, /Stacks, merge queue, Auto land\s+not ready \(install Mergestorm Surge\)$/m);
+  assert.match(notReady, /Cyclone \(auto patch\)\s+connected$/m);
+
+  const rows = buildConfigRows({ ...SETTINGS_BODY, stacks_ready: true });
+  assert.deepEqual(
+    rows.filter((row) => !row.writable).map((row) => row.key),
+    ["stacks_ready", "cyclone_connected", "github_connected"],
+  );
+});
+
 // --- cmdSettings (piped) ------------------------------------------------------
 
 let originalFetch: typeof globalThis.fetch | undefined;

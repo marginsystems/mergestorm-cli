@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ApiFetchInit, ApiFetchResult } from "./api.js";
-import type { StackDto, StackLayerDto, MergeQueueEntryDto } from "./stack-dto.js";
+import type { MergeQueueBounceKind, StackAgentRun, StackDto, StackLayerDto, MergeQueueEntryDto } from "./stack-dto.js";
 import {
   pollStackWatch, StackWatchError, StackWatchTimeoutError,
   type PollStackWatchOptions, type StackWatchEnvelope,
 } from "./stack-watch.js";
-import { conflictLiveParent, conflictRepairSteps, landGateIsPending, mergeQueueWait, stackBlockers, stackBlockersSummary } from "./stack-blockers.js";
+import {
+  agentsCannotClear, conflictLiveParent, conflictRepairSteps, landGateIsPending, mergeQueueWait, stackBlockers,
+  stackBlockersSummary, type StackBlockerReason,
+} from "./stack-blockers.js";
 import { STACK_WATCH_NOT_DONE_SENTENCE, stackTerminalReason, stackWatchObligation } from "./stack-watch-obligation.js";
 
 const HEAD = "a".repeat(40);
@@ -18,7 +21,7 @@ function layer(overrides: Partial<StackLayerDto> = {}): StackLayerDto {
     openedAt: null, mergedAt: null, closedAt: null, additions: null, deletions: null,
     openAdditions: null, openDeletions: null, title: null, htmlUrl: null,
     ciStatus: "success", reviewStatus: "approved", checks: null, vortexStatus: null,
-    cycloneStatus: null, tempestStatus: null, conflictDetail: null, lastRestackedSha: null,
+    cycloneStatus: null, conflictDetail: null, lastRestackedSha: null,
     mergeable: true, mergeableState: "clean", headSha: HEAD, mergeableHeadSha: HEAD,
     ...overrides,
   };
@@ -254,39 +257,36 @@ test("ignores other stacks' live entries and reported bounces", async () => {
   await timedOut({ ...h.options, cursor: { stackId: "stack", enrolledHeadSha: HEAD, afterFinishedAt: h.state.entries[0].finishedAt } });
 });
 
-test("Tempest findings take precedence over a failed Vortex review", async () => {
-  const h = harness(stack([layer({
-    vortexStatus: "failed",
-    agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD }],
-  })]));
-  const result = await pollStackWatch(cfg, "stack", h.options);
-  assert.equal(result.blocker, "Tempest findings");
-});
-
-test("a Cyclone failure on the head is attention, after red CI and before Tempest", async () => {
+test("a failed Cyclone run on the head is not attention and does not hide the blocker behind it", async () => {
   const failed = { agent: "cyclone" as const, status: "failed" as const, sha: HEAD };
-  const named = harness(stack([layer({
-    agentRuns: [failed, { agent: "tempest", status: "findings", sha: HEAD }],
-  })]));
-  const result = await pollStackWatch(cfg, "stack", named.options);
+  const alone = harness(stack([layer({ agentRuns: [failed] })]));
+  assert.equal((await timedOut(alone.options)).blocker, null);
+  const withFailedReview = harness(stack([layer({ vortexStatus: "failed", agentRuns: [failed] })]));
+  const result = await pollStackWatch(cfg, "stack", withFailedReview.options);
   assert.equal(result.status, "attention");
-  assert.equal(result.blocker, "Cyclone failed");
+  assert.equal(result.blocker, "Review failed");
   assert.equal(result.prNumber, 42);
   const red = harness(stack([layer({ ciStatus: "failure", agentRuns: [failed] })]));
   assert.equal((await pollStackWatch(cfg, "stack", red.options)).blocker, "CI failed");
-  const stale = harness(stack([layer({ agentRuns: [{ ...failed, sha: NEXT }] })]));
-  assert.equal((await timedOut(stale.options)).blocker, null);
+});
+
+test("an older server's cyclone_failed Auto land wait is read as a plain wait, never as a Cyclone block", () => {
+  const s = waiting("cyclone_failed");
+  assert.equal(stackBlockers(s, [], {}, 10 * MINUTE).attention, null);
+  const late = stackBlockers(s, [], {}, 50 * MINUTE);
+  assert.equal(late.attention?.blocker, "Auto land has waited 50m: cyclone failed");
+  assert.equal(late.repair?.kind, "auto_land_waiting");
 });
 
 test("unit land gate blocks the selected land PR", async () => {
   const h = harness(stack([]));
   h.state.stack.unit = {
     id: "unit", uNumber: 1, state: "growing", branch: "unit", landTarget: "main", landPrNumber: 50,
-    tempestLandStatus: "failed", landingBlockReason: "tempest_failed on land PR #50",
+    landingBlockReason: "ci_failure on land PR #50",
     landPr: layer({ prNumber: 50 }), members: [],
   };
   const result = await pollStackWatch(cfg, "stack", h.options);
-  assert.equal(result.blocker, "tempest_failed on land PR #50");
+  assert.equal(result.blocker, "ci_failure on land PR #50");
 });
 
 test("stack wait normalizes case-insensitive stack IDs", async () => {
@@ -301,7 +301,7 @@ test("bottom unpromoted real layer then unit land PR supplies enrollment", async
   const h = harness(stack([layer({ prNumber: 0, position: -2, headSha: "placeholder" }), layer({ prNumber: 41, position: -1, headSha: "promoted" }), layer({ ciStatus: "failure" })]));
   h.state.stack.unit = {
     id: "unit", uNumber: 1, state: "growing", branch: "unit", landTarget: "main", landPrNumber: 50,
-    tempestLandStatus: null, landingBlockReason: null, landPr: layer({ prNumber: 50, headSha: NEXT, ciStatus: "failure" }),
+    landingBlockReason: null, landPr: layer({ prNumber: 50, headSha: NEXT, ciStatus: "failure" }),
     members: [{ prNumber: 41, promotedHeadSha: "promoted" } as NonNullable<StackDto["unit"]>["members"][number]],
   };
   assert.equal((await pollStackWatch(cfg, "stack", h.options)).cursor.enrolledHeadSha, HEAD);
@@ -360,8 +360,6 @@ for (const [overrides, expected] of [
   [{ draft: true }, "Draft PR"],
   [{ mergeable: false }, "Merge conflicts vs main"],
   [{ vortexStatus: "failed" }, "Review failed"],
-  [{ agentRuns: [{ agent: "cyclone", status: "failed", sha: HEAD }] }, "Cyclone failed"],
-  [{ agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD }] }, "Tempest findings"],
   [{ restackError: { kind: "push_failed", detail: "failure", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null } }, "Restack failed"],
   [{ restackError: { kind: "push_failed", detail: "force-push failed: ! [remote rejected] b -> b (failure)", headSha: HEAD, attemptedAt: "", attempts: 3, backupRef: null } }, "Restack failed"],
   [{ restackError: { kind: "checkout_failed", detail: "failure", headSha: HEAD, attemptedAt: "", attempts: 1, backupRef: null } }, "Restack failed"],
@@ -933,7 +931,7 @@ function seamUnit(target: StackDto, seamState: string, seamReviewedSha: string |
   promoted: UnitMember[] = [{ prNumber: 41, promotedHeadSha: "promoted", promotedAt: "2026-09-27T00:28:09Z", seamState: "none", seamReviewedSha: null } as UnitMember]): StackDto {
   target.unit = {
     id: "unit", uNumber: 77, state: "growing", branch: "unit", landTarget: "main", landPrNumber: 50,
-    tempestLandStatus: null, landingBlockReason: null, landPr: null,
+    landingBlockReason: null, landPr: null,
     members: [...promoted, { prNumber: 42, promotedHeadSha: null, promotedAt: "2026-09-27T00:28:21Z", seamState, seamReviewedSha } as UnitMember],
   };
   return target;
@@ -1121,7 +1119,7 @@ function unitStack(layers: StackLayerDto[], unit: Partial<NonNullable<StackDto["
     ...stack(layers), trunkBranch: "mg-stack-79",
     unit: {
       id: "unit", uNumber: 79, state: "growing", branch: "mg-stack-79", landTarget: "main", members: [],
-      landPrNumber: null, tempestLandStatus: null, landingBlockReason: null, landPr: null, ...unit,
+      landPrNumber: null, landingBlockReason: null, landPr: null, ...unit,
     },
   };
 }
@@ -1266,7 +1264,7 @@ test("merge-conflict and CI repairs; a busy hold carries no repair", () => {
   assert.equal(stackBlockers(stack([layer({ draft: true })])).repair, null);
 });
 
-for (const reason of ["ci_pending", "tempest_pending", "tempest_running"]) {
+for (const reason of ["ci_pending", "some_new_gate_running"]) {
   test(`land gate ${reason} is a wait, not attention`, async () => {
     const land = layer({ branch: "mg-land-79", parentBranch: "main", prNumber: 2874, position: 1 });
     const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874,
@@ -1284,7 +1282,7 @@ for (const reason of ["ci_pending", "tempest_pending", "tempest_running"]) {
 test("a failed land gate is still attention", async () => {
   const land = layer({ branch: "mg-land-79", parentBranch: "main", prNumber: 2874, position: 1 });
   const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874,
-    landingBlockReason: "landing blocked: tempest_findings on land PR #2874" }));
+    landingBlockReason: "landing blocked: ci_failure on land PR #2874" }));
   h.options.timeoutMs = 0;
   const result = await pollStackWatch(cfg, "stack", h.options);
   assert.equal(result.status, "attention");
@@ -1334,7 +1332,7 @@ test("a missing land PR is not raised while the gate only waits, on an open laye
   const merged = layer({ state: "merged", prNumber: 42, position: 1 });
   const reason = "landing blocked: land_pr_unavailable: Validation Failed: head invalid";
   const quiet = (s: StackDto) => assert.equal(stackBlockers(s).attention, null);
-  quiet(unitStack([merged], { state: "growing", landingBlockReason: "landing blocked: tempest_pending on land PR #2874" }));
+  quiet(unitStack([merged], { state: "growing", landingBlockReason: "landing blocked: ci_pending on land PR #2874" }));
   quiet(unitStack([merged], { state: "growing", landingBlockReason: null }));
   quiet(unitStack([merged], { state: "landed", landingBlockReason: reason }));
   quiet(unitStack([merged], { state: "abandoned", landingBlockReason: reason }));
@@ -1347,124 +1345,119 @@ test("a missing land PR is not raised while the gate only waits, on an open laye
     .repair?.kind, undefined);
 });
 
-test("land gate tempest_failed after the automatic re-runs names a Tempest re-run, not a findings fix", async () => {
-  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
-  const reason = "landing blocked: tempest_failed on land PR #2874: Tempest's review broke 3 times at this head without a result";
-  const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874, landingBlockReason: reason }));
-  const result = await pollStackWatch(cfg, "stack", h.options);
-  assert.equal(result.status, "attention");
-  assert.equal(result.blocker, reason);
-  assert.equal(result.repair?.kind, "tempest_rerun");
-  assert.equal(result.repair?.prNumber, 2874);
-  assert.equal(result.repair && "stoppedByPerson" in result.repair ? result.repair.stoppedByPerson : null, false);
-  assert.match(result.repair!.steps, /gh pr comment 2874 --repo owner\/repo --body "@mergestorm-tempest review"/);
-  assert.match(result.repair!.steps, /do not patch or push/);
-  assert.doesNotMatch(result.repair!.steps, /--force/);
-});
+const OLD_SERVER_LAND = () => layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
 
-test("land gate tempest_stopped asks the human before a forced Tempest re-run", async () => {
-  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
-  const reason = "landing blocked: tempest_stopped on land PR #2874: a person stopped Tempest's review at this head";
-  const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874, landingBlockReason: reason }));
-  const result = await pollStackWatch(cfg, "stack", h.options);
-  assert.equal(result.status, "attention");
-  assert.equal(result.blocker, reason);
-  assert.equal(result.repair?.kind, "tempest_rerun");
-  assert.equal(result.repair && "stoppedByPerson" in result.repair ? result.repair.stoppedByPerson : null, true);
-  assert.match(result.repair!.steps, /Ask the human whether to run Tempest again/);
-  assert.match(result.repair!.steps, /@mergestorm-tempest review --force/);
-});
+for (const token of ["tempest_findings", "tempest_failed", "tempest_stopped", "tempest_skipped", "tempest_trigger_failed"]) {
+  test(`old server: land gate ${token} is attention with the server's text and no repair, like any unrecognised land gate`, async () => {
+    const reason = `landing blocked: ${token} on land PR #2874`;
+    const h = harness(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874,
+      tempestLandStatus: "failed", landingBlockReason: reason } as Partial<NonNullable<StackDto["unit"]>>));
+    h.options.timeoutMs = 0;
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    const unknown = stackBlockers(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874,
+      landingBlockReason: "landing blocked: some_new_gate on land PR #2874" }));
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, reason);
+    assert.equal(result.prNumber, 2874);
+    assert.equal(result.repair, null);
+    assert.equal(result.landGatePending, null);
+    assert.equal(result.watch.done, false);
+    assert.equal(unknown.attention?.blocker, "landing blocked: some_new_gate on land PR #2874");
+    assert.equal(unknown.repair, null);
+  });
+}
 
-test("tempest findings on the land PR carry a tempest_findings repair on the land branch", async () => {
-  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
-  const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874,
-    landingBlockReason: "landing blocked: tempest_findings on land PR #2874" }));
-  h.options.timeoutMs = 0;
-  const result = await pollStackWatch(cfg, "stack", h.options);
-  assert.equal(result.status, "attention");
-  assert.equal(result.repair?.kind, "tempest_findings");
-  assert.equal(result.repair?.prNumber, 2874);
-  assert.equal(result.repair?.branch, "mg-stack-79");
-  assert.equal(result.repair && "findings" in result.repair ? result.repair.findings : null,
-    "gh api repos/owner/repo/issues/2874/comments");
-  assert.match(result.repair!.steps, /ordinary git push \(no force\)/);
-  assert.match(result.repair!.steps, /verify each finding/);
-});
+for (const token of ["tempest_pending", "tempest_running"]) {
+  test(`old server: land gate ${token} is a wait, like any other pending or running land gate`, async () => {
+    const reason = `landing blocked: ${token} on land PR #2874`;
+    const h = harness(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874, landingBlockReason: reason }));
+    h.options.timeoutMs = 0;
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "in_progress");
+    assert.equal(result.blocker, null);
+    assert.deepEqual(result.landGatePending, { prNumber: 2874, headSha: HEAD, reason });
+    assert.equal(result.watch.done, false);
+  });
+}
 
-test("a Tempest findings run on the land PR carries the same repair", () => {
-  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1,
-    agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD }] });
-  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874 }));
-  assert.equal(blockers.attention?.blocker, "Tempest findings");
-  assert.equal(blockers.repair?.kind, "tempest_findings");
-});
-
-test("a broken Tempest run is not a hard block while Mergestorm re-runs it", () => {
-  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1,
-    agentRuns: [{ agent: "tempest", status: "failed", sha: HEAD }] });
-  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874,
-    landingBlockReason: "landing blocked: tempest_pending on land PR #2874" }));
+test("old server: tempestLandStatus failed with no landing block reason is ignored", () => {
+  const blockers = stackBlockers(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874,
+    tempestLandStatus: "failed", landingBlockReason: null } as Partial<NonNullable<StackDto["unit"]>>));
   assert.equal(blockers.attention, null);
-  assert.equal(blockers.repair, null);
-  const layerRun = stackBlockers(stack([layer({ agentRuns: [{ agent: "tempest", status: "failed", sha: HEAD }] })]));
-  assert.equal(layerRun.attention, null);
+  assert.deepEqual(blockers.issues, []);
 });
 
-test("a land PR repair never names an undefined branch when the unit branch is unknown", () => {
-  const land = layer({ branch: undefined as unknown as string, parentBranch: "main", prNumber: 99, position: 1 });
-  const blockers = stackBlockers(unitStack([land], { state: "growing", landPrNumber: 99, branch: undefined,
-    landingBlockReason: "landing blocked: tempest_findings on land PR #99" }));
-  assert.equal(blockers.repair, null);
+test("old server: a Tempest agent run is ignored, neither a blocker nor a busy agent", async () => {
+  for (const status of ["findings", "failed", "running", "queued"] as const) {
+    const run = { agent: "tempest", status, sha: HEAD } as unknown as StackAgentRun;
+    const onLayer = stackBlockers(stack([layer({ tempestStatus: "findings", agentRuns: [run] } as Partial<StackLayerDto>)]));
+    assert.equal(onLayer.attention, null, status);
+    assert.deepEqual(onLayer.busy, [], status);
+    assert.deepEqual(onLayer.agents?.busy, { vortex: false, cyclone: false }, status);
+    const onLand = stackBlockers(unitStack([{ ...OLD_SERVER_LAND(), agentRuns: [run] }], { state: "landing", landPrNumber: 2874 }));
+    assert.equal(onLand.attention, null, status);
+    assert.equal(onLand.repair, null, status);
+  }
+  const behind = harness(stack([layer({
+    vortexStatus: "failed", agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD } as unknown as StackAgentRun],
+  })]));
+  assert.equal((await pollStackWatch(cfg, "stack", behind.options)).blocker, "Review failed");
 });
 
-test("a tempest_findings queue bounce on the land PR carries the tempest_findings repair", () => {
-  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
-  const entry = bounce({ bounceDetail: { kind: "tempest_findings", headSha: HEAD, prNumber: 2874,
-    message: "landing blocked: tempest_findings on land PR #2874" } });
-  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874 }), [entry]);
-  assert.equal(blockers.attention?.bounceKind, "tempest_findings");
-  assert.match(blockers.attention?.blocker ?? "", /^Tempest findings/);
-  assert.equal(blockers.repair?.kind, "tempest_findings");
-  assert.equal(blockers.repair?.branch, "mg-stack-79");
+for (const kind of ["tempest_findings", "tempest_rerun"] as const) {
+  test(`old server: a ${kind} queue bounce is attention with the stored bounce reason and no repair, like any unknown bounce kind`, async () => {
+    const message = `landing blocked: ${kind === "tempest_rerun" ? "tempest_skipped" : kind} on land PR #2874`;
+    const entry = bounce({ bounceReason: kind, bounceDetail: { kind: kind as string as MergeQueueBounceKind, headSha: HEAD, prNumber: 2874, message } });
+    const h = harness(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874 }), [entry]);
+    h.options.timeoutMs = 0;
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.bounceKind, kind);
+    assert.equal(result.blocker, kind);
+    assert.equal(result.repair, null);
+    assert.equal(result.watch.done, false);
+    const other = stackBlockers(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874 }),
+      [bounce({ bounceDetail: { kind: "seam_findings", headSha: HEAD, prNumber: 2874 } })]);
+    assert.equal(other.attention?.bounceKind, "seam_findings");
+    assert.equal(other.repair, null);
+  });
+}
+
+test("old server: a tempest_pending Auto land wait is read as a plain wait, then named in generic words", () => {
+  const s = waiting("tempest_pending");
+  assert.equal(stackBlockers(s, [], {}, 10 * MINUTE).attention, null);
+  const late = stackBlockers(s, [], {}, 50 * MINUTE);
+  assert.equal(late.attention?.blocker, "Auto land has waited 50m: tempest pending");
+  assert.equal(late.repair?.kind, "auto_land_waiting");
 });
 
-test("a broken Tempest queue bounce uses its reason instead of the findings label", () => {
-  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
-  const reason = "landing blocked: tempest_failed on land PR #2874: Tempest's review broke 3 times";
-  const entry = bounce({ bounceDetail: { kind: "tempest_findings", headSha: HEAD, prNumber: 2874, message: reason } });
-  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874 }), [entry]);
-  assert.equal(blockers.attention?.bounceKind, "tempest_findings");
-  assert.equal(blockers.repair?.kind, "tempest_rerun");
-  assert.equal(blockers.repair && "stoppedByPerson" in blockers.repair ? blockers.repair.stoppedByPerson : null, false);
-  assert.match(blockers.repair!.steps, /do not patch or push/);
+test("new server: a payload with no Tempest fields at all is read without a crash", async () => {
+  const bareLayer = OLD_SERVER_LAND();
+  assert.equal("tempestStatus" in bareLayer, false);
+  const base = unitStack([bareLayer], { state: "landing", landPrNumber: 2874,
+    landingBlockReason: "landing blocked: ci_pending on land PR #2874" });
+  const bareUnit = base.unit!;
+  assert.equal("tempestLandStatus" in bareUnit, false);
+  const h = harness({ ...base, unit: bareUnit as NonNullable<StackDto["unit"]> });
+  h.options.timeoutMs = 0;
+  const waitingResult = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(waitingResult.status, "in_progress");
+  assert.equal(waitingResult.blocker, null);
+  const clear = stackBlockers({ ...base, unit: { ...bareUnit, landingBlockReason: null } as NonNullable<StackDto["unit"]> });
+  assert.equal(clear.attention, null);
+  assert.deepEqual(clear.issues, []);
+  const blocked = stackBlockers({ ...base,
+    unit: { ...bareUnit, landingBlockReason: "landing blocked: ci_failure on land PR #2874" } as NonNullable<StackDto["unit"]> });
+  assert.equal(blocked.attention?.blocker, "landing blocked: ci_failure on land PR #2874");
 });
 
-test("a skipped Tempest queue bounce asks for a rerun instead of findings fixes", () => {
-  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
-  const reason = "landing blocked: tempest_skipped on land PR #2874: repo_disabled";
-  const entry = bounce({ bounceDetail: { kind: "tempest_rerun", headSha: HEAD, prNumber: 2874, message: reason } });
-  const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874 }), [entry]);
-  assert.equal(blockers.attention?.bounceKind, "tempest_rerun");
-  assert.match(blockers.attention?.blocker ?? "", /^Tempest needs rerun/);
-  assert.equal(blockers.repair?.kind, "tempest_rerun");
-  assert.equal(blockers.repair && "stoppedByPerson" in blockers.repair ? blockers.repair.stoppedByPerson : null, false);
-  assert.match(blockers.repair!.steps, /@mergestorm-tempest review/);
-  assert.match(blockers.repair!.steps, /do not patch or push/);
-  assert.doesNotMatch(blockers.repair!.steps, /Tempest report|verify each finding/);
-});
-
-test("tempest findings on a land PR that Cyclone is patching hold in progress with no repair", () => {
+test("a failed land gate on a land PR that Cyclone is patching holds in progress with no repair", () => {
   const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1, cycloneStatus: "patching" });
   const blockers = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874,
-    landingBlockReason: "landing blocked: tempest_findings on land PR #2874" }));
+    landingBlockReason: "landing blocked: ci_failure on land PR #2874" }));
   assert.equal(blockers.attention, null);
   assert.equal(blockers.repair, null);
   assert.deepEqual(blockers.busy.map((entry) => entry.agent), ["cyclone"]);
-});
-
-test("tempest findings off the land PR get no tempest_findings repair", () => {
-  const other = layer({ branch: "feature", prNumber: 42, agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD }] });
-  assert.equal(stackBlockers(stack([other])).repair, null);
 });
 
 test("a stack that lands mid-wait ends the wait with watch done instead of timing out", async () => {
@@ -1825,7 +1818,6 @@ test("Auto land's wait on the child of a clean bottom is attention on the child 
 for (const [reason, words] of [
   ["stack_dirty", "this layer is not clean (it has a conflict or needs a restack)"],
   ["mergeability_unknown", "GitHub has not said whether this PR can merge into its base"],
-  ["tempest_stopped", "Tempest's review of this head was stopped"],
   ["must_consolidate", "this PR's base is not the stack's land target, and the stack has no review unit to promote it into"],
   ["missing_head", "GitHub returned no head commit for this PR"],
   ["github_unreadable", "Mergestorm cannot read this PR from GitHub"],
@@ -1967,7 +1959,7 @@ test("a more specific blocker on the head wins over Vortex findings left for a p
   assert.equal(stackBlockers(stack([changesRequested({ cycloneHandoff: handoff, ...redCi })])).attention?.blocker, "CI failed — lint");
   assert.equal(stackBlockers(stack([changesRequested({
     cycloneHandoff: handoff, agentRuns: [{ agent: "cyclone", status: "failed", sha: HEAD }],
-  })])).attention?.blocker, "Cyclone failed");
+  })])).attention?.blocker, stackBlockers(stack([changesRequested({ cycloneHandoff: handoff })])).attention?.blocker);
 });
 
 const QUEUE_NOW = Date.parse("2026-01-01T02:00:00Z");
@@ -2206,16 +2198,6 @@ test("the queue's merge_failed bounce for a stray PR on the stack branch is show
   assert.equal(result.attention?.blocker, `merge failed — ${message}`);
 });
 
-test("land gate tempest_trigger_failed says Mergestorm keeps trying and nothing in the PR needs a fix", () => {
-  const land = layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
-  const reason = "landing blocked: tempest_trigger_failed on land PR #2874";
-  const result = stackBlockers(unitStack([land], { state: "landing", landPrNumber: 2874, landingBlockReason: reason }));
-  assert.equal(result.attention?.blocker, reason);
-  assert.equal(result.repair?.kind, "tempest_trigger_failed");
-  assert.match(result.repair?.steps ?? "", /could not reach Tempest to review land PR #2874 .* for over 5 minutes/);
-  assert.match(result.repair?.steps ?? "", /keeps trying every 5 minutes\. Nothing in the PR needs a change: do not patch or push\. Keep watching; if this stays, tell the human/);
-});
-
 for (const [reason, words] of [
   ["infra_failure", /Cyclone could not start the patch: GitHub sign-in, comment load or checkout kept failing/],
   ["no_changes", /Cyclone found nothing to change for these findings/],
@@ -2231,3 +2213,47 @@ for (const [reason, words] of [
     assert.match(result.repair?.steps ?? "", words);
   });
 }
+
+test("the agents-busy hold names exactly the blockers no agent run clears", () => {
+  const expected: Record<StackBlockerReason, boolean> = {
+    restack_conflict: true,
+    restack_failed: true,
+    draft_pr: true,
+    merge_conflict: true,
+    ci_failed: false,
+    vortex_failed: false,
+    vortex_out_of_quota: true,
+    vortex_skipped: true,
+    vortex_findings_need_person: false,
+    seam_failed: false,
+    seam_findings: false,
+    seam_not_running: true,
+    seam_review_stuck: true,
+    seam_rereview_not_running: true,
+    seam_verdict_stale: true,
+    unit_abandoned: true,
+    land_gate: false,
+    bounce: false,
+    auto_land_off: false,
+    auto_land_ci_pending: false,
+    auto_land_members_remaining: false,
+    auto_land_vortex_wait: false,
+    auto_land_promote_failed: false,
+    auto_land_ci_unreadable: false,
+    auto_land_waited: false,
+    queue_stalled: false,
+    land_pr_missing: false,
+  };
+  for (const reason of Object.keys(expected) as StackBlockerReason[]) {
+    assert.equal(agentsCannotClear(reason), expected[reason], reason);
+  }
+});
+
+test("attention, held and issues carry only the published blocker fields", () => {
+  const published = ["blocker", "bounceKind", "headSha", "prNumber"];
+  const plain = stackBlockers(stack([layer(dirtyMain)]));
+  assert.deepEqual(Object.keys(plain.attention ?? {}).sort(), published);
+  const held = stackBlockers(stack([layer({ ...dirtyMain, ...vortexBusy })]));
+  assert.deepEqual(Object.keys(held.held ?? {}).sort(), ["actAfter", ...published, "waitingOn"].sort());
+  for (const issue of held.issues) assert.deepEqual(Object.keys(issue).sort(), published);
+});

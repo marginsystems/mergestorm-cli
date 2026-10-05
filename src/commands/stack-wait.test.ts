@@ -170,7 +170,7 @@ async function serve(t: { after: (fn: () => void) => void }, body: (url: string)
 
 const openLayer = {
   branch: "feat/a", parentBranch: "main", prNumber: 7, position: 1, state: "clean", headSha: "a".repeat(40),
-  ciStatus: "success", reviewStatus: "none", checks: null, vortexStatus: null, cycloneStatus: null, tempestStatus: null,
+  ciStatus: "success", reviewStatus: "none", checks: null, vortexStatus: null, cycloneStatus: null,
   conflictDetail: null, lastRestackedSha: null, mergeable: true, mergeableState: "clean", mergeableHeadSha: "a".repeat(40),
 };
 

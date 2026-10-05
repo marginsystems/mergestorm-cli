@@ -183,12 +183,12 @@ test("stack watch waits out a rate limit without counting it as a failure", asyn
 
 test("stack watch --ignore stays silent on the handed-off blocker until it changes", async () => {
   const { run, lines, calls } = harness([
-    attention("Tempest findings"),
-    attention("Tempest findings"),
+    attention("Seam findings"),
+    attention("Seam findings"),
     new StackWatchTimeoutError(envelope()),
-    attention("Tempest findings"),
+    attention("Seam findings"),
     attention("CI failed — lint"),
-  ], { ignore: ["tempest"] });
+  ], { ignore: ["seam"] });
   const result = await run;
   assert.equal(result.outcome, "attention");
   assert.equal(calls.length, 5);
@@ -197,10 +197,10 @@ test("stack watch --ignore stays silent on the handed-off blocker until it chang
 
 test("stack watch --ignore silences a distinct blocker for each repeated flag", async () => {
   const { run, lines } = harness([
-    attention("Tempest findings"),
+    attention("Seam findings"),
     attention("Draft PR", { prNumber: 13 }),
     envelope({}, "landed"),
-  ], { ignore: ["Tempest", "Draft"] });
+  ], { ignore: ["Seam", "Draft"] });
   const result = await run;
   assert.equal(result.outcome, "landed");
   assert.deepEqual(lines, [`MS-WATCH LANDED stack=${stackId} reason=landed`, "This stack is landed. The watch is done; stop calling stack_wait for it."]);

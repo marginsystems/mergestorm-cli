@@ -461,7 +461,6 @@ const REGISTERED: StackDto[] = [
         checks: null,
         vortexStatus: null,
         cycloneStatus: null,
-        tempestStatus: null,
         conflictDetail: null,
         lastRestackedSha: null,
         mergeable: null,

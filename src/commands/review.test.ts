@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { access, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, test } from "node:test";
+import { after, afterEach, test } from "node:test";
 import { API_TIMEOUT_PREFIX } from "../api.js";
 import type { Config } from "../config.js";
 import { CommandError, DetachedError, REVIEW_EXIT } from "../errors.js";
@@ -398,9 +398,36 @@ async function repoWithReviewDiff(prefix: string): Promise<{ root: string; repo:
   return { root, repo };
 }
 
+let sharedRepo: Promise<{ root: string; repo: string }> | null = null;
+
+function sharedReviewRepo(): Promise<{ root: string; repo: string; shared: true }> {
+  sharedRepo ??= repoWithReviewDiff("mg-review-shared-");
+  return sharedRepo.then((f) => ({ ...f, shared: true as const }));
+}
+
+after(async () => {
+  if (sharedRepo) await rm((await sharedRepo).root, { recursive: true, force: true });
+});
+
+function virtualPollClock() {
+  let nowMs = 0;
+  const sleeps: number[] = [];
+  return {
+    sleeps,
+    pollClock: {
+      now: () => nowMs,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        nowMs += ms;
+      },
+      random: () => 0,
+    },
+  };
+}
+
 /** Run fn from the temp repo with a fake API key, restoring cwd/env afterwards. */
 async function runReviewInRepo(
-  f: { root: string; repo: string },
+  f: { root: string; repo: string; shared?: true },
   fn: () => Promise<void>,
 ): Promise<void> {
   const prevCwd = process.cwd();
@@ -417,12 +444,12 @@ async function runReviewInRepo(
     else process.env.MERGESTORM_API_KEY = prevKey;
     if (prevUrl === undefined) delete process.env.MERGESTORM_API_URL;
     else process.env.MERGESTORM_API_URL = prevUrl;
-    await rm(f.root, { recursive: true, force: true });
+    if (!f.shared) await rm(f.root, { recursive: true, force: true });
   }
 }
 
 test("cmdReview retries a transient 503 poll and keeps looping", async () => {
-  const f = await repoWithReviewDiff("mg-review-loop-503-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     const mock = mockReviewFetch([
       { status: 202, body: { job_id: "job_loop_503", status: "queued" } },
@@ -430,13 +457,15 @@ test("cmdReview retries a transient 503 poll and keeps looping", async () => {
       { status: 200, body: { status: "in_progress" } },
       { status: 200, body: { status: "completed", verdict: "LGTM", summary: "ok" } },
     ]);
-    await cmdReview(["main"], {});
+    const clock = virtualPollClock();
+    await cmdReview(["main"], { pollClock: clock.pollClock });
     assert.equal(mock.calls(), 4);
+    assert.deepEqual(clock.sleeps, [125, 2_000]);
   });
 });
 
 test("cmdReview surfaces status <job_id> after permanent 500 poll failure", async () => {
-  const f = await repoWithReviewDiff("mg-review-loop-500-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     mockReviewFetch([
       { status: 202, body: { job_id: "job_loop_500", status: "queued" } },
@@ -445,18 +474,20 @@ test("cmdReview surfaces status <job_id> after permanent 500 poll failure", asyn
       { status: 500, body: { error: "boom" } },
       { status: 500, body: { error: "boom" } },
     ]);
+    const clock = virtualPollClock();
     await assert.rejects(
-      () => cmdReview(["main"], {}),
+      () => cmdReview(["main"], { pollClock: clock.pollClock }),
       (err: unknown) =>
         err instanceof CommandError &&
         err.exitCode === 4 &&
         /mergestorm status job_loop_500/.test(err.message),
     );
+    assert.deepEqual(clock.sleeps, [125, 250, 500]);
   });
 });
 
 test("cmdReview does not spin on 401 poll responses", async () => {
-  const f = await repoWithReviewDiff("mg-review-loop-401-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     const mock = mockReviewFetch([
       { status: 202, body: { job_id: "job_loop_401", status: "queued" } },
@@ -474,7 +505,7 @@ test("cmdReview does not spin on 401 poll responses", async () => {
 });
 
 test("cmdReview exits 4 when thrown poll transport failures exhaust retries (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-transport-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     originalFetch = globalThis.fetch;
     let n = 0;
@@ -489,7 +520,7 @@ test("cmdReview exits 4 when thrown poll transport failures exhaust retries (#12
       throw new TypeError("fetch failed");
     };
     await assert.rejects(
-      () => cmdReview(["main", "--timeout", "5"], { pollIntervalMs: 1 }),
+      () => cmdReview(["main", "--timeout", "5"], { pollIntervalMs: 1, pollClock: virtualPollClock().pollClock }),
       (err: unknown) =>
         err instanceof CommandError &&
         err.exitCode === 4 &&
@@ -499,7 +530,7 @@ test("cmdReview exits 4 when thrown poll transport failures exhaust retries (#12
 });
 
 test("cmdReview JSON exits 5 when poll requests keep timing out before the deadline (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-hung-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     originalFetch = globalThis.fetch;
     let n = 0;
@@ -518,7 +549,7 @@ test("cmdReview JSON exits 5 when poll requests keep timing out before the deadl
       );
     };
     const captured = await captureReviewOutput(() =>
-      cmdReview(["main", "--json", "--timeout", "30"], { pollIntervalMs: 1 }),
+      cmdReview(["main", "--json", "--timeout", "30"], { pollIntervalMs: 1, pollClock: virtualPollClock().pollClock }),
     );
     assert.ok(captured.error instanceof CommandError);
     assert.equal(captured.error.exitCode, 5);
@@ -532,7 +563,7 @@ test("cmdReview JSON exits 5 when poll requests keep timing out before the deadl
 });
 
 test("cmdReview interactive detaches on Ctrl+C mid-poll (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-abort-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     originalFetch = globalThis.fetch;
     let n = 0;
@@ -562,7 +593,7 @@ test("cmdReview interactive detaches on Ctrl+C mid-poll (#1286)", async () => {
 });
 
 test("cmdReview interactive detaches when poll requests time out (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-detach-timeout-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     originalFetch = globalThis.fetch;
     let n = 0;
@@ -585,6 +616,7 @@ test("cmdReview interactive detaches when poll requests time out (#1286)", async
         cmdReview(["main", "--timeout", "30"], {
           interactive: true,
           pollIntervalMs: 1,
+          pollClock: virtualPollClock().pollClock,
         }),
       (err: unknown) =>
         err instanceof DetachedError && err.jobId === "job_detach_timeout",
@@ -614,7 +646,7 @@ async function captureReviewOutput(
 }
 
 test("cmdReview --json prints one terminal envelope and progress only on stderr (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-json-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     const mock = mockReviewFetch([
       { status: 202, body: { job_id: "job_json", status: "queued" } },
@@ -645,7 +677,7 @@ test("cmdReview --json prints one terminal envelope and progress only on stderr 
 });
 
 test("cmdReview polls immediately so short timeouts do not skip the first poll (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-first-poll-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     const mock = mockReviewFetch([
       { status: 202, body: { job_id: "job_first_poll", status: "queued" } },
@@ -671,7 +703,7 @@ test("cmdReview polls immediately so short timeouts do not skip the first poll (
 });
 
 test("cmdReview --json --no-wait submits once and returns queued envelope (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-no-wait-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     const mock = mockReviewFetch([
       { status: 202, body: { job_id: "job_detached", status: "queued" } },
@@ -689,7 +721,7 @@ test("cmdReview --json --no-wait submits once and returns queued envelope (#1286
 });
 
 test("cmdReview JSON timeout preserves job id and exits 5 (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-timeout-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     mockReviewFetch([
       { status: 202, body: { job_id: "job_timeout", status: "queued" } },
@@ -709,7 +741,7 @@ test("cmdReview JSON timeout preserves job id and exits 5 (#1286)", async () => 
 });
 
 test("cmdReview JSON maps submit 429 to exit 7 with a rate_limited envelope", async () => {
-  const f = await repoWithReviewDiff("mg-review-429-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     mockReviewFetch([
       {
@@ -736,7 +768,7 @@ test("cmdReview JSON maps submit 429 to exit 7 with a rate_limited envelope", as
 });
 
 test("cmdReview JSON maps poll-phase 429 exhaustion to exit 7 with a rate_limited envelope", async () => {
-  const f = await repoWithReviewDiff("mg-review-poll-429-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     mockReviewFetch([
       { status: 202, body: { job_id: "job_poll_429", status: "queued" } },
@@ -746,7 +778,7 @@ test("cmdReview JSON maps poll-phase 429 exhaustion to exit 7 with a rate_limite
       { status: 429, body: { error: "rate_limited", retry_after_seconds: 0.01 }, headers: { "Retry-After": "0.01" } },
     ]);
     const captured = await captureReviewOutput(() =>
-      cmdReview(["main", "--json", "--timeout", "5"], { pollIntervalMs: 1 }),
+      cmdReview(["main", "--json", "--timeout", "5"], { pollIntervalMs: 1, pollClock: virtualPollClock().pollClock }),
     );
     assert.ok(captured.error instanceof CommandError);
     assert.equal(captured.error.exitCode, REVIEW_EXIT.rate_limited);
@@ -785,7 +817,7 @@ test("cmdReview JSON maps quota, failed job, and auth to distinct exits (#1286)"
   ];
 
   for (const item of cases) {
-    const f = await repoWithReviewDiff(`mg-review-${item.prefix}-`);
+    const f = await sharedReviewRepo();
     await runReviewInRepo(f, async () => {
       mockReviewFetch(item.responses);
       const captured = await captureReviewOutput(() =>
@@ -800,7 +832,7 @@ test("cmdReview JSON maps quota, failed job, and auth to distinct exits (#1286)"
 });
 
 test("cmdReview maps submit-time api_timeout to exit 5 without a false failed envelope (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-submit-timeout-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     originalFetch = globalThis.fetch;
     globalThis.fetch = async () => {
@@ -822,7 +854,7 @@ test("cmdReview maps submit-time api_timeout to exit 5 without a false failed en
 });
 
 test("cmdReview maps submit-time network failure to a documented exit (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-submit-net-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     originalFetch = globalThis.fetch;
     globalThis.fetch = async () => {
@@ -837,7 +869,7 @@ test("cmdReview maps submit-time network failure to a documented exit (#1286)", 
 });
 
 test("cmdReview shell Ctrl+C during --json poll detaches without a false failed envelope (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-json-abort-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     originalFetch = globalThis.fetch;
     let n = 0;
@@ -915,7 +947,7 @@ test("cmdReview --json sends context, thread, and webhook fields and keeps the s
 });
 
 test("cmdReview --json wait keeps the one-time webhook_secret from the 202 row in the terminal envelope", async () => {
-  const f = await repoWithReviewDiff("mg-review-json-wait-secret-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     mockReviewFetch([
       {
@@ -957,7 +989,7 @@ test("cmdReview --json wait keeps the one-time webhook_secret from the 202 row i
 });
 
 test("cmdReview --json wait poll-failure keeps the one-time webhook_secret from the 202 row", async () => {
-  const f = await repoWithReviewDiff("mg-review-json-wait-fail-secret-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     mockReviewFetch([
       {
@@ -991,7 +1023,7 @@ test("cmdReview --json wait poll-failure keeps the one-time webhook_secret from 
 });
 
 test("cmdReview pretty mode never prints webhook_secret", async () => {
-  const f = await repoWithReviewDiff("mg-review-pretty-secret-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     mockReviewFetch([
       {
@@ -1019,7 +1051,7 @@ test("cmdReview pretty mode never prints webhook_secret", async () => {
 });
 
 test("cmdReview shell Ctrl+C during --json submit prints no false failed envelope (#1286)", async () => {
-  const f = await repoWithReviewDiff("mg-review-json-abort-submit-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     originalFetch = globalThis.fetch;
     const ac = new AbortController();
@@ -1162,7 +1194,7 @@ test("formatReviewSubmitError explains nginx 413 instead of Failed: {}", () => {
 });
 
 test("cmdReview maps submit 413 HTML to a charged-nothing message", async () => {
-  const f = await repoWithReviewDiff("mg-review-413-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     mockReviewFetch([{ status: 413, body: "<html>413 Request Entity Too Large</html>" }]);
     const captured = await captureReviewOutput(() => cmdReview(["main", "--json"]));
@@ -1178,7 +1210,7 @@ test("cmdReview maps submit 413 HTML to a charged-nothing message", async () => 
 
 
 test("cmdReview interactive attributes credits to this job despite concurrent account spend (#1994)", async () => {
-  const f = await repoWithReviewDiff("mg-review-job-credits-");
+  const f = await sharedReviewRepo();
   await runReviewInRepo(f, async () => {
     originalFetch = globalThis.fetch;
     let remaining = 10;

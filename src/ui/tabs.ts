@@ -40,7 +40,13 @@ export type TabsConfigRow = {
   label: string;
   value: boolean;
   writable: boolean;
+  readOnlyWords?: { on: string; off: string };
 };
+
+export function readOnlyRowWords(row: TabsConfigRow): string {
+  const words = row.readOnlyWords ?? { on: "connected", off: "not connected" };
+  return row.value ? words.on : words.off;
+}
 
 export type TabsData = {
   /** Prebuilt whoami + credits lines for the Status tab. */
@@ -306,9 +312,7 @@ function configBody(
       ? row.value
         ? "on"
         : "off"
-      : row.value
-        ? "connected"
-        : "not connected";
+      : readOnlyRowWords(row);
     const paintedValue = !color
       ? value
       : row.writable

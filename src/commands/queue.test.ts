@@ -222,6 +222,21 @@ describe("queue commands", { concurrency: false }, () => {
     );
   });
 
+  test("mg queue add prints the refusal for a PR with failing CI", async () => {
+    configureApi();
+    const message =
+      "#3267 has failing CI on 1287927 (Core CI (Node 22)). The merge queue does not take a PR with red CI: fix it or re-run the check, then enqueue again.";
+    globalThis.fetch = async () =>
+      Response.json(
+        { error: "ci_failed", message, ci: { prNumber: 3267, headSha: "1287927", failingCheck: "Core CI (Node 22)" } },
+        { status: 409 },
+      );
+    await assert.rejects(
+      () => cmdQueue(["add", stackId]),
+      (err: unknown) => err instanceof CommandError && err.message === message,
+    );
+  });
+
   test("mg queue rm surfaces a 409 already_finished cancel", async () => {
     configureApi();
     globalThis.fetch = async (input, init) => {

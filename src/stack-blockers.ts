@@ -16,6 +16,39 @@ export type StackBlocker = {
   bounceKind: string | null;
 };
 
+export type StackBlockerReason =
+  | "restack_conflict"
+  | "restack_failed"
+  | "draft_pr"
+  | "merge_conflict"
+  | "ci_failed"
+  | "vortex_failed"
+  | "vortex_out_of_quota"
+  | "vortex_skipped"
+  | "vortex_findings_need_person"
+  | "seam_failed"
+  | "seam_findings"
+  | "seam_not_running"
+  | "seam_review_stuck"
+  | "seam_rereview_not_running"
+  | "seam_verdict_stale"
+  | "unit_abandoned"
+  | "land_gate"
+  | "bounce"
+  | "auto_land_off"
+  | "auto_land_ci_pending"
+  | "auto_land_members_remaining"
+  | "auto_land_vortex_wait"
+  | "auto_land_promote_failed"
+  | "auto_land_ci_unreadable"
+  | "auto_land_waited"
+  | "queue_stalled"
+  | "land_pr_missing";
+
+export type ClassifiedStackBlocker = StackBlocker & { reason: StackBlockerReason };
+
+type NamedBlocker = { blocker: string; reason: StackBlockerReason };
+
 export type StackAgentBusy = {
   prNumber: number;
   headSha: string | null;
@@ -55,22 +88,6 @@ export type StackRepairHint =
     headSha: string | null;
     branch: string;
     failingCheck: string | null;
-    steps: string;
-  }
-  | {
-    kind: "tempest_findings";
-    prNumber: number;
-    headSha: string | null;
-    branch: string;
-    findings: string;
-    steps: string;
-  }
-  | {
-    kind: "tempest_rerun";
-    prNumber: number;
-    headSha: string | null;
-    branch: string;
-    stoppedByPerson: boolean;
     steps: string;
   }
   | {
@@ -141,7 +158,7 @@ export type StackRepairHint =
     steps: string;
   }
   | {
-    kind: "members_remaining" | "vortex_failed" | "tempest_trigger_failed";
+    kind: "members_remaining" | "vortex_failed";
     prNumber: number;
     headSha: string | null;
     branch: string;
@@ -253,7 +270,7 @@ export const SEAM_REREVIEW_NOT_RUNNING = "Seam re-review pending, no review runn
 
 export const SEAM_VERDICT_STALE = "Seam verdict is for an older head, no review running";
 
-const STUCK_SEAM_BLOCKERS: readonly string[] = [SEAM_REVIEW_STUCK, SEAM_REREVIEW_NOT_RUNNING, SEAM_VERDICT_STALE];
+const STUCK_SEAM_REASONS: readonly StackBlockerReason[] = ["seam_review_stuck", "seam_rereview_not_running", "seam_verdict_stale"];
 
 function coreReviewDoneAtHead(layer: StackLayerDto): boolean {
   const review = layer.vortexReview;
@@ -361,22 +378,25 @@ function vortexSkippedSteps(stack: StackDto, layer: StackLayerDto, skipReason: s
   return `Vortex skipped #${layer.prNumber} at ${head} because it could not confirm billing for this account, so Auto land waits for a review that will not come. Do not patch or push for this. Re-run the review: ${mention}. If it is skipped again, tell the human to check the plan and billing in the Mergestorm dashboard.`;
 }
 
-function seamGateBlocker(stack: StackDto, layer: StackLayerDto): string | null {
+function seamGateBlocker(stack: StackDto, layer: StackLayerDto): NamedBlocker | null {
   const members = stack.unit?.members ?? [];
   if (layer.prNumber === stack.unit?.landPrNumber) return null;
   if (!members.some((member) => member.promotedHeadSha?.trim())) return null;
   const member = members.find((entry) => entry.prNumber === layer.prNumber);
   if (!member || member.promotedHeadSha?.trim()) return null;
   const seamState = member.seamState?.trim().toLowerCase();
-  if (seamState === "failed") return "Seam review failed";
-  if (seamState === "findings" && sameHead(member.seamReviewedSha, layer.headSha)) return "Seam findings";
+  const stale: NamedBlocker = { blocker: SEAM_VERDICT_STALE, reason: "seam_verdict_stale" };
+  if (seamState === "failed") return { blocker: "Seam review failed", reason: "seam_failed" };
+  if (seamState === "findings" && sameHead(member.seamReviewedSha, layer.headSha)) {
+    return { blocker: "Seam findings", reason: "seam_findings" };
+  }
   if (layerAgentsBusy(layer).vortex) return null;
-  if (seamState === "pending") return SEAM_REVIEW_NOT_RUNNING;
-  if (seamState === "reviewing") return SEAM_REVIEW_STUCK;
-  if (seamState === "pending_rereview") return SEAM_REREVIEW_NOT_RUNNING;
+  if (seamState === "pending") return { blocker: SEAM_REVIEW_NOT_RUNNING, reason: "seam_not_running" };
+  if (seamState === "reviewing") return { blocker: SEAM_REVIEW_STUCK, reason: "seam_review_stuck" };
+  if (seamState === "pending_rereview") return { blocker: SEAM_REREVIEW_NOT_RUNNING, reason: "seam_rereview_not_running" };
   if (!layer.headSha?.trim() || sameHead(member.seamReviewedSha, layer.headSha)) return null;
-  if (seamState === "findings") return SEAM_VERDICT_STALE;
-  if (seamState === "approved" && !coreReviewDoneAtHead(layer)) return SEAM_VERDICT_STALE;
+  if (seamState === "findings") return stale;
+  if (seamState === "approved" && !coreReviewDoneAtHead(layer)) return stale;
   return null;
 }
 
@@ -386,59 +406,59 @@ function headChecksAllGreen(layer: StackLayerDto): boolean {
     checks.failure === 0 && checks.pending === 0 && checks.success > 0;
 }
 
+type LayerAttention =
+  | { blocker: null; reason: null; bounceKind: null; bounce?: undefined }
+  | { blocker: string; reason: StackBlockerReason; bounceKind: string | null; bounce?: MergeQueueEntryDto };
+
 /** Shared live-fact precedence; bounce history is only passed for the candidate. */
 function layerAttention(
   stack: StackDto,
   layer: StackLayerDto | undefined,
   queue: MergeQueueEntryDto[],
   cursor: Pick<StackWatchCursor, "bounceId" | "afterFinishedAt">,
-): { blocker: string | null; bounceKind: string | null; bounce?: MergeQueueEntryDto } {
-  const none = { blocker: null, bounceKind: null };
+): LayerAttention {
+  const none: LayerAttention = { blocker: null, reason: null, bounceKind: null };
   if (stack.archivedAt) return none;
   const bounce = queue.filter((entry) => entry.state === "bounced")
     .sort((a, b) => (Date.parse(b.finishedAt ?? "") || 0) - (Date.parse(a.finishedAt ?? "") || 0))[0];
   const kind = bounce?.bounceDetail?.kind;
   const recoverable = kind === "head_moved" || kind === "must_consolidate";
-  const hardBlock = (blocker: string) => ({ blocker, bounceKind: null });
+  const hardBlock = (blocker: string, reason: StackBlockerReason): LayerAttention => ({ blocker, reason, bounceKind: null });
   if (layer) {
     if (layer.restackError && layer.state !== "restacking") {
-      if (layer.restackError.kind === "rebase_conflict") return hardBlock("Conflict");
-      if (!restackRetryPending(layer.restackError, layer)) return hardBlock(RESTACK_FAILED);
+      if (layer.restackError.kind === "rebase_conflict") return hardBlock("Conflict", "restack_conflict");
+      if (!restackRetryPending(layer.restackError, layer)) return hardBlock(RESTACK_FAILED, "restack_failed");
     }
-    if (layer.state === "conflict") return hardBlock("Conflict");
+    if (layer.state === "conflict") return hardBlock("Conflict", "restack_conflict");
     if (layer.draft) return {
-      blocker: "Draft PR", bounceKind: "pr_draft",
+      blocker: "Draft PR", reason: "draft_pr", bounceKind: "pr_draft",
       ...(kind === "pr_draft" && sameHead(bounce.bounceDetail?.headSha ?? bounce.verifyHeadSha, layer.headSha) &&
         (bounce.bounceDetail?.prNumber == null || bounce.bounceDetail.prNumber === layer.prNumber) ? { bounce } : {}),
     };
-    if (boundDirty(layer)) return hardBlock(`Merge conflicts${layer.parentBranch ? ` vs ${layer.parentBranch}` : ""}`);
+    if (boundDirty(layer)) {
+      return hardBlock(`Merge conflicts${layer.parentBranch ? ` vs ${layer.parentBranch}` : ""}`, "merge_conflict");
+    }
     if (layer.ciStatus === "failure" || (layer.checks?.failure ?? 0) > 0) {
       const name = layer.checks?.failingName?.trim();
-      return hardBlock(`CI failed${name ? ` — ${name}` : ""}`);
+      return hardBlock(`CI failed${name ? ` — ${name}` : ""}`, "ci_failed");
     }
-    if (layer.agentRuns?.some((run) => run.agent === "cyclone" && run.status === "failed" &&
-      sameHead(run.sha, layer.headSha))) return hardBlock("Cyclone failed");
-    const tempest = layer.agentRuns?.find((run) => run.agent === "tempest" &&
-      run.status === "findings" && sameHead(run.sha, layer.headSha));
-    if (tempest) return hardBlock(`Tempest ${tempest.status}`);
     if (layer.vortexStatus === "failed" && !vortexRetryScheduled(layer) &&
       (!layer.vortexReview?.head_sha || sameHead(layer.vortexReview.head_sha, layer.headSha))) {
-      return hardBlock(VORTEX_REVIEW_FAILED);
+      return hardBlock(VORTEX_REVIEW_FAILED, "vortex_failed");
     }
-    if (quotaSkippedReview(layer)) return hardBlock(VORTEX_REVIEW_OUT_OF_QUOTA);
+    if (quotaSkippedReview(layer)) return hardBlock(VORTEX_REVIEW_OUT_OF_QUOTA, "vortex_out_of_quota");
     const vortexSkip = vortexIdleSkipBlocker(layer);
-    if (vortexSkip) return hardBlock(vortexSkip.blocker);
+    if (vortexSkip) return hardBlock(vortexSkip.blocker, "vortex_skipped");
     const seam = seamGateBlocker(stack, layer);
-    if (seam) return hardBlock(seam);
+    if (seam) return hardBlock(seam.blocker, seam.reason);
     if (unitAbandonedUnder(stack, layer)) {
-      return hardBlock(`${UNIT_ABANDONED_BLOCKER_PREFIX}${layer.parentBranch?.trim() || stack.trunkBranch}`);
+      return hardBlock(`${UNIT_ABANDONED_BLOCKER_PREFIX}${layer.parentBranch?.trim() || stack.trunkBranch}`, "unit_abandoned");
     }
     if (stack.unit?.landPrNumber === layer.prNumber) {
       const landing = stack.unit.landingBlockReason?.trim();
-      if (landing && !landGateIsPending(landing)) return hardBlock(landing);
-      if (stack.unit.tempestLandStatus?.toLowerCase() === "failed") return hardBlock("Tempest failed");
+      if (landing && !landGateIsPending(landing)) return hardBlock(landing, "land_gate");
     }
-    if (vortexFindingsLeftForPerson(stack, layer)) return hardBlock(VORTEX_FINDINGS_NEED_PERSON);
+    if (vortexFindingsLeftForPerson(stack, layer)) return hardBlock(VORTEX_FINDINGS_NEED_PERSON, "vortex_findings_need_person");
   }
   if (!bounce || !kind || recoverable || !layer || queue.some((entry) => ["queued", "running", "waiting"].includes(entry.state))) return none;
   if ((cursor.bounceId != null && cursor.bounceId === bounce.id) || (cursor.afterFinishedAt &&
@@ -447,7 +467,8 @@ function layerAttention(
   if (!sameHead(bounce.bounceDetail?.headSha ?? bounce.verifyHeadSha, layer.headSha) ||
     (bounce.bounceDetail?.prNumber != null && bounce.bounceDetail.prNumber !== layer.prNumber)) return none;
   if (kind === "ci_failure" && !bounce.bounceDetail?.batch && headChecksAllGreen(layer)) return none;
-  return { blocker: mergeQueueBounceLabel(bounce), bounceKind: kind, bounce };
+  const label = mergeQueueBounceLabel(bounce);
+  return { blocker: label, reason: "bounce", bounceKind: kind, bounce };
 }
 
 const UNIT_ABANDONED_BLOCKER_PREFIX = "Review unit abandoned: based on ";
@@ -508,15 +529,7 @@ const CI_UNREADABLE_PERMISSION: Readonly<Record<string, string>> = {
 
 const AUTO_LAND_WAIT_WORDS: Readonly<Record<string, string>> = {
   mergeability_unknown: "GitHub has not said whether this PR can merge into its base",
-  tempest_pending: "Tempest's review of this head has not started",
-  tempest_running: "Tempest's review of this head has not finished",
-  tempest_trigger_failed: "Mergestorm could not reach Tempest to review the land PR; it keeps trying every 5 minutes",
-  tempest_skipped: "Tempest skipped its review of this head",
   members_remaining: "a PR that is not a layer of this stack is still open on the stack branch",
-  tempest_stopped: "Tempest's review of this head was stopped",
-  tempest_failed: "Tempest's review of this head broke without a result",
-  tempest_findings: "Tempest reported findings on this head",
-  cyclone_failed: "Cyclone's patch run failed on this head",
   stack_dirty: "this layer is not clean (it has a conflict or needs a restack)",
   must_consolidate: "this PR's base is not the stack's land target, and the stack has no review unit to promote it into",
   missing_head: "GitHub returned no head commit for this PR",
@@ -578,6 +591,10 @@ function autoLandWaitOn(stack: StackDto, layer: StackLayerDto): AutoLandWaitDto 
 }
 
 export function autoLandWaitBlocker(stack: StackDto, layer: StackLayerDto, nowMs: number): string | null {
+  return autoLandWaitNamed(stack, layer, nowMs)?.blocker ?? null;
+}
+
+function autoLandWaitNamed(stack: StackDto, layer: StackLayerDto, nowMs: number): NamedBlocker | null {
   const wait = autoLandWaitOn(stack, layer);
   if (!wait) return null;
   const waited = waitedMs(wait.since, nowMs);
@@ -585,20 +602,32 @@ export function autoLandWaitBlocker(stack: StackDto, layer: StackLayerDto, nowMs
   const minutes = Math.floor(waited / 60_000);
   switch (wait.reason) {
     case "ci_failure":
-      return AUTO_LAND_CI_FAILED_BLOCKER;
+      return { blocker: AUTO_LAND_CI_FAILED_BLOCKER, reason: "ci_failed" };
     case "ci_pending":
       return waited >= AUTO_LAND_CI_PENDING_ATTENTION_MS
-        ? `${AUTO_LAND_CI_PENDING_PREFIX}${minutes}m — a check on this head has not finished, so Auto land will not queue it`
+        ? {
+          blocker: `${AUTO_LAND_CI_PENDING_PREFIX}${minutes}m — a check on this head has not finished, so Auto land will not queue it`,
+          reason: "auto_land_ci_pending",
+        }
         : null;
     case "members_remaining":
-      return `${AUTO_LAND_MEMBERS_REMAINING_PREFIX}${wait.detail ?? AUTO_LAND_WAIT_WORDS.members_remaining}`;
+      return {
+        blocker: `${AUTO_LAND_MEMBERS_REMAINING_PREFIX}${wait.detail ?? AUTO_LAND_WAIT_WORDS.members_remaining}`,
+        reason: "auto_land_members_remaining",
+      };
     case "vortex_not_green":
       return waited >= AUTO_LAND_VORTEX_WAIT_ATTENTION_MS && !vortexRetryScheduled(layer)
-        ? `${AUTO_LAND_VORTEX_WAIT_PREFIX}${minutes}m — Auto land is waiting for an approving Vortex review at this head`
+        ? {
+          blocker: `${AUTO_LAND_VORTEX_WAIT_PREFIX}${minutes}m — Auto land is waiting for an approving Vortex review at this head`,
+          reason: "auto_land_vortex_wait",
+        }
         : null;
     case "promote_merge_failed":
       return (wait.attempts ?? 0) >= AUTO_LAND_PROMOTE_FAILED_ATTEMPTS
-        ? `${AUTO_LAND_PROMOTE_FAILED_PREFIX}${wait.attempts} times (merge_failed) — Auto land stopped retrying this head${wait.detail ? `: ${wait.detail}` : ""}`
+        ? {
+          blocker: `${AUTO_LAND_PROMOTE_FAILED_PREFIX}${wait.attempts} times (merge_failed) — Auto land stopped retrying this head${wait.detail ? `: ${wait.detail}` : ""}`,
+          reason: "auto_land_promote_failed",
+        }
         : null;
     default:
       break;
@@ -606,11 +635,14 @@ export function autoLandWaitBlocker(stack: StackDto, layer: StackLayerDto, nowMs
   const unreadable = CI_UNREADABLE_WHAT[wait.reason];
   if (unreadable) {
     return ciUnreadableForGood(wait) || waited >= AUTO_LAND_CI_UNREADABLE_ATTENTION_MS
-      ? `${AUTO_LAND_CI_UNREADABLE_PREFIX}${unreadable} on this head${wait.detail ? ` (${wait.detail})` : ""} — Auto land cannot tell whether CI passed`
+      ? {
+        blocker: `${AUTO_LAND_CI_UNREADABLE_PREFIX}${unreadable} on this head${wait.detail ? ` (${wait.detail})` : ""} — Auto land cannot tell whether CI passed`,
+        reason: "auto_land_ci_unreadable",
+      }
       : null;
   }
   return waited >= AUTO_LAND_WAIT_ATTENTION_MS
-    ? `${AUTO_LAND_WAITED_PREFIX}${minutes}m: ${autoLandWaitWords(wait.reason)}`
+    ? { blocker: `${AUTO_LAND_WAITED_PREFIX}${minutes}m: ${autoLandWaitWords(wait.reason)}`, reason: "auto_land_waited" }
     : null;
 }
 
@@ -745,35 +777,32 @@ function landPrLiveParent(stack: StackDto, layer: StackLayerDto): string | null 
   return base && !isMgParkBase(base) && base !== layer.branch ? base : null;
 }
 
-export function agentsCannotClear(blocker: string): boolean {
-  return blocker === "Conflict" || blocker === RESTACK_FAILED || blocker === "Draft PR" ||
-    blocker === SEAM_REVIEW_NOT_RUNNING || blocker === VORTEX_REVIEW_OUT_OF_QUOTA ||
-    blocker === VORTEX_AUTO_REVIEW_OFF || blocker === VORTEX_BILLING_SKIPPED ||
-    blocker === VORTEX_REVIEW_INCOMPLETE || blocker === VORTEX_IGNORED_AUTHOR || blocker === VORTEX_REPO_DISABLED ||
-    STUCK_SEAM_BLOCKERS.includes(blocker) ||
-    blocker.startsWith("Merge conflicts") || blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX);
-}
+const AGENTS_CANNOT_CLEAR: readonly StackBlockerReason[] = [
+  "restack_conflict",
+  "restack_failed",
+  "draft_pr",
+  "merge_conflict",
+  "seam_not_running",
+  ...STUCK_SEAM_REASONS,
+  "vortex_out_of_quota",
+  "vortex_skipped",
+  "unit_abandoned",
+];
 
-const TEMPEST_RERUN_BLOCKER = /^(?:landing blocked:\s*)?tempest_(failed|stopped|skipped)\b/i;
-const TEMPEST_TRIGGER_FAILED_BLOCKER = /^(?:landing blocked:\s*)?tempest_trigger_failed\b/i;
-
-function isTempestFindingsBlocker(attention: StackBlocker, bounce: MergeQueueEntryDto | undefined): boolean {
-  const blocker = attention.blocker.trim();
-  const reason = bounce?.bounceDetail?.message?.trim();
-  if (reason && TEMPEST_RERUN_BLOCKER.test(reason)) return false;
-  return attention.bounceKind === "tempest_findings" || /^Tempest findings\b/i.test(blocker) ||
-    /^(?:landing blocked:\s*)?tempest_findings\b/i.test(blocker);
+export function agentsCannotClear(reason: StackBlockerReason): boolean {
+  return AGENTS_CANNOT_CLEAR.includes(reason);
 }
 
 export function stackRepair(
   stack: StackDto,
-  attention: StackBlocker | null,
+  attention: ClassifiedStackBlocker | null,
   layer: StackLayerDto | undefined,
   bounce: MergeQueueEntryDto | undefined,
   queueWait: MergeQueueWait | null = null,
 ): StackRepairHint | null {
   if (!attention || !layer || attention.prNumber !== layer.prNumber) return null;
-  if (queueWait && attention.blocker.startsWith(MERGE_QUEUE_STALLED_PREFIX)) {
+  const reason = attention.reason;
+  if (queueWait && reason === "queue_stalled") {
     return {
       kind: "queue_stalled",
       prNumber: layer.prNumber,
@@ -785,8 +814,8 @@ export function stackRepair(
     };
   }
   const landPr = !!stack.unit?.branch && layer.prNumber === stack.unit.landPrNumber && layer.branch === stack.unit.branch;
-  const restackConflict = attention.blocker === "Conflict" || attention.bounceKind === "restack_conflict";
-  const mergeConflict = attention.blocker.startsWith("Merge conflicts");
+  const restackConflict = reason === "restack_conflict" || attention.bounceKind === "restack_conflict";
+  const mergeConflict = reason === "merge_conflict";
   if (restackConflict || mergeConflict) {
     const liveParent = landPr ? landPrLiveParent(stack, layer) : conflictLiveParent(stack, layer);
     return {
@@ -799,7 +828,7 @@ export function stackRepair(
       steps: conflictRepairSteps(layer.branch, liveParent),
     };
   }
-  if (attention.blocker === RESTACK_FAILED && layer.restackError) {
+  if (reason === "restack_failed" && layer.restackError) {
     const liveParent = landPr ? landPrLiveParent(stack, layer) : conflictLiveParent(stack, layer);
     return {
       kind: "restack_failed",
@@ -811,7 +840,7 @@ export function stackRepair(
       steps: restackFailedRepairSteps(layer.branch, liveParent, layer.restackError),
     };
   }
-  if (attention.blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX)) {
+  if (reason === "unit_abandoned") {
     const openPrCount = stack.layers.filter((candidate) =>
       candidate.prNumber > 0 && !isTerminalLayer(candidate),
     ).length;
@@ -823,11 +852,11 @@ export function stackRepair(
       steps: `The stack's review unit was abandoned when #${layer.prNumber}'s base on GitHub was changed off its mg-stack trunk, so Auto land cannot promote or land this stack. Ask the human whether to re-root it. ${openPrCount < 2 ? `With only one open PR, re-adopting #${layer.prNumber} will not create a review unit; close and resubmit it to create a fresh stack.` : `If yes, tell the human that mg stack adopt ${stack.owner}/${stack.repo}#${layer.prNumber} re-roots it on a new review unit.`} Do not retarget the PR base yourself.`,
     };
   }
-  if (STUCK_SEAM_BLOCKERS.includes(attention.blocker)) {
+  if (STUCK_SEAM_REASONS.includes(reason)) {
     const member = stack.unit?.members?.find((entry) => entry.prNumber === layer.prNumber);
     const seamState = member?.seamState?.trim().toLowerCase() || "unknown";
     const reviewed = member?.seamReviewedSha?.trim();
-    const what = attention.blocker === SEAM_VERDICT_STALE
+    const what = reason === "seam_verdict_stale"
       ? `The seam (integration) review verdict on #${layer.prNumber} (${seamState}) was made at ${reviewed ? reviewed.slice(0, 7) : "an older head"}, not the live head ${layer.headSha ?? "(unknown)"}, and no seam review is queued or running to replace it`
       : `The seam (integration) review of #${layer.prNumber} is ${seamState} but no seam review is queued or running at ${layer.headSha ?? "the live head"}`;
     return {
@@ -839,7 +868,7 @@ export function stackRepair(
       steps: `${what}, so Auto land cannot promote it. Do not patch or push for this. Tell the human to click Continue on the stack in the Mergestorm dashboard, which re-queues the seam review at the live head of ${layer.branch}; a new commit pushed to ${layer.branch} also queues one. Then keep watching.`,
     };
   }
-  if (attention.blocker.startsWith(AUTO_LAND_OFF_BLOCKER_PREFIX) && attention.bounceKind) {
+  if (reason === "auto_land_off" && attention.bounceKind) {
     return {
       kind: "auto_land_off",
       prNumber: layer.prNumber,
@@ -849,49 +878,7 @@ export function stackRepair(
       steps: `The ${attention.bounceKind} bounce turned Auto land off, so nothing will enqueue this stack. Fix the cause of the bounce on ${layer.branch}, then turn Auto land back on (mg stack set ${stack.id} --auto-land on) or enqueue the stack.`,
     };
   }
-  if (landPr && isTempestFindingsBlocker(attention, bounce)) {
-    const findings = `gh api repos/${stack.owner}/${stack.repo}/issues/${layer.prNumber}/comments`;
-    return {
-      kind: "tempest_findings",
-      prNumber: layer.prNumber,
-      headSha: layer.headSha ?? null,
-      branch: layer.branch,
-      findings,
-      steps: `Tempest never patches, and Cyclone is not patching this land PR. Read the Tempest report on it (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch on ${layer.branch}, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). Do not retarget the PR base.`,
-    };
-  }
-  const rerunBlocker = attention.blocker.trim().match(TEMPEST_RERUN_BLOCKER) ??
-    bounce?.bounceDetail?.message?.trim().match(TEMPEST_RERUN_BLOCKER);
-  const rerun = landPr ? rerunBlocker : null;
-  if (rerun) {
-    const outcome = rerun[1]!.toLowerCase();
-    const stoppedByPerson = outcome === "stopped";
-    const comment = `gh pr comment ${layer.prNumber} --repo ${stack.owner}/${stack.repo} --body`;
-    const head = layer.headSha ?? "its live head";
-    return {
-      kind: "tempest_rerun",
-      prNumber: layer.prNumber,
-      headSha: layer.headSha ?? null,
-      branch: layer.branch,
-      stoppedByPerson,
-      steps: stoppedByPerson
-        ? `Tempest's review of land PR #${layer.prNumber} at ${head} was stopped, so Auto land will not land it. There are no findings to fix: do not patch or push. Ask the human whether to run Tempest again. If they say yes, run ${comment} "@mergestorm-tempest review --force" and keep watching.`
-        : outcome === "skipped"
-          ? `Tempest skipped its review of land PR #${layer.prNumber} at ${head}, so Auto land will not land it. There are no findings to fix: do not patch or push. Ask the human to run ${comment} "@mergestorm-tempest review" and keep watching.`
-        : `Tempest's review of land PR #${layer.prNumber} at ${head} broke before it produced a result, and Mergestorm already re-ran it the most times it will on its own. There are no findings to fix: do not patch or push. Run it once more with ${comment} "@mergestorm-tempest review" and keep watching. If it breaks again, tell the human.`,
-    };
-  }
-  if (landPr && TEMPEST_TRIGGER_FAILED_BLOCKER.test(attention.blocker.trim())) {
-    return {
-      kind: "tempest_trigger_failed",
-      prNumber: layer.prNumber,
-      headSha: layer.headSha ?? null,
-      branch: layer.branch,
-      detail: attention.blocker.trim(),
-      steps: `Mergestorm could not reach Tempest to review land PR #${layer.prNumber} at ${layer.headSha ?? "its head"} for over 5 minutes, so Auto land will not land it yet. Mergestorm keeps trying every 5 minutes. Nothing in the PR needs a change: do not patch or push. Keep watching; if this stays, tell the human that Tempest cannot be reached.`,
-    };
-  }
-  if (attention.blocker === VORTEX_REVIEW_FAILED) {
+  if (reason === "vortex_failed") {
     return {
       kind: "vortex_failed",
       prNumber: layer.prNumber,
@@ -902,7 +889,7 @@ export function stackRepair(
     };
   }
   const vortexSkip = vortexIdleSkipBlocker(layer);
-  if (vortexSkip && attention.blocker === vortexSkip.blocker) {
+  if (vortexSkip && reason === "vortex_skipped") {
     return {
       kind: "vortex_skipped",
       prNumber: layer.prNumber,
@@ -913,7 +900,7 @@ export function stackRepair(
     };
   }
   const wait = autoLandWaitOn(stack, layer);
-  if (wait?.reason === "members_remaining" && attention.blocker.startsWith(AUTO_LAND_MEMBERS_REMAINING_PREFIX)) {
+  if (wait?.reason === "members_remaining" && reason === "auto_land_members_remaining") {
     return {
       kind: "members_remaining",
       prNumber: layer.prNumber,
@@ -923,7 +910,7 @@ export function stackRepair(
       steps: `Auto land will not send land PR #${layer.prNumber} to the merge queue while another PR is open on ${layer.branch} that is not a layer of this stack${wait.detail ? ` (${wait.detail})` : ""}. Nothing on ${layer.branch} needs a change: do not patch or push for this. Close that PR, retarget it to another base, or adopt it into the stack (mg stack adopt ${stack.owner}/${stack.repo}#<that PR>); a draft PR or a PR from a fork cannot be adopted, so close or retarget it. If the PR is not yours, tell the human. Auto land sends the land PR to the queue by itself once that PR is gone from ${layer.branch}.`,
     };
   }
-  if (wait && attention.blocker.startsWith(AUTO_LAND_CI_PENDING_PREFIX)) {
+  if (wait && reason === "auto_land_ci_pending") {
     return {
       kind: "ci_pending",
       prNumber: layer.prNumber,
@@ -933,7 +920,7 @@ export function stackRepair(
       steps: `A check on ${layer.branch} at ${layer.headSha ?? "its head"} has been pending since ${wait.since}, and Auto land will not queue an unfinished head. List the head's checks (gh api repos/${stack.owner}/${stack.repo}/commits/${layer.headSha ?? "<sha>"}/check-runs, and gh run list --branch ${layer.branch}) and find the one that never finished. Re-run it (gh run rerun <run-id>) if it is stuck or was never picked up. If it is a required check that no workflow reports, or it fails again, tell the human. Push a fix only when the check is red for a reason in the code. Do not retarget the PR base.`,
     };
   }
-  if (wait && attention.blocker.startsWith(AUTO_LAND_VORTEX_WAIT_PREFIX)) {
+  if (wait && reason === "auto_land_vortex_wait") {
     return {
       kind: "vortex_not_green",
       prNumber: layer.prNumber,
@@ -943,7 +930,7 @@ export function stackRepair(
       steps: `Auto land has waited since ${wait.since} for an approving Vortex review of ${layer.branch} at ${layer.headSha ?? "its head"}, and no Vortex run is working on it. Read the PR's latest Vortex review (gh api repos/${stack.owner}/${stack.repo}/pulls/${layer.prNumber}/reviews). If it has findings, verify and fix the real ones on ${layer.branch} with an ordinary push, or record a wrong one with mg dismiss as mergestorm-pr-loop describes. If no review exists at this head, or it failed or was skipped, tell the human: nothing re-reviews this head until they re-run the review or push a new head.`,
     };
   }
-  if (wait && attention.blocker.startsWith(AUTO_LAND_CI_UNREADABLE_PREFIX)) {
+  if (wait && reason === "auto_land_ci_unreadable") {
     const what = CI_UNREADABLE_WHAT[wait.reason] ?? "the checks";
     const permission = CI_UNREADABLE_PERMISSION[wait.reason] ?? "Checks: read and Commit statuses: read";
     return {
@@ -956,7 +943,7 @@ export function stackRepair(
       steps: `GitHub has not let Mergestorm read ${what} for #${layer.prNumber} at ${layer.headSha ?? "its head"} since ${wait.since}${wait.detail ? ` (${wait.detail})` : ""}, so Auto land cannot tell whether CI passed and will not move this PR. Nothing on ${layer.branch} needs a change: do not patch or push for this. Tell the human: the Mergestorm GitHub App needs the permission ${permission} on ${stack.owner}/${stack.repo}. They open the app's installation on GitHub (Settings, then GitHub Apps or Installed GitHub Apps), accept the pending permission request, and check that ${stack.repo} is in the app's repository access. Auto land continues by itself once the read works. If GitHub itself is having an outage, the wait clears when it ends.`,
     };
   }
-  if (wait && attention.blocker.startsWith(AUTO_LAND_WAITED_PREFIX)) {
+  if (wait && reason === "auto_land_waited") {
     return {
       kind: "auto_land_waiting",
       prNumber: layer.prNumber,
@@ -967,7 +954,7 @@ export function stackRepair(
       steps: `Auto land has been waiting on this stack since ${wait.since} because ${autoLandWaitWords(wait.reason)} (reason ${wait.reason}${wait.detail ? `: ${wait.detail}` : ""}), and nothing has changed that in the meantime. Run mg stack status ${stack.id} and read what it shows for #${layer.prNumber}. If it names something on ${layer.branch} that a commit fixes, fix it there with an ordinary push. Otherwise do not patch or push: tell the human what Auto land is waiting for and since when. Do not retarget the PR base.`,
     };
   }
-  if (wait && attention.blocker.startsWith(AUTO_LAND_PROMOTE_FAILED_PREFIX)) {
+  if (wait && reason === "auto_land_promote_failed") {
     const attempts = wait.attempts ?? AUTO_LAND_PROMOTE_FAILED_ATTEMPTS;
     return {
       kind: "promote_failed",
@@ -979,7 +966,7 @@ export function stackRepair(
       steps: `Auto land tried to promote #${layer.prNumber} at ${layer.headSha ?? "its head"} ${attempts} times and GitHub refused the merge each time${wait.detail ? ` (${wait.detail})` : ""}, so it stopped retrying this head. Read why: gh api repos/${stack.owner}/${stack.repo}/pulls/${layer.prNumber} --jq '{mergeable, mergeable_state, base: .base.ref}', and the branch protection on that base. If the cause is in ${layer.branch}, fix it and push with an ordinary push: a new head is retried. If it is outside the PR (branch protection, permissions, a required review), tell the human, and that once it is fixed they can retry the promote by turning Auto land off and on (mg stack set ${stack.id} --auto-land off, then --auto-land on). Do not toggle Auto land yourself, and do not retarget the PR base.`,
     };
   }
-  if (attention.blocker === VORTEX_FINDINGS_NEED_PERSON) {
+  if (reason === "vortex_findings_need_person") {
     const findings = `gh api repos/${stack.owner}/${stack.repo}/pulls/${layer.prNumber}/reviews`;
     const handoff = cycloneHandoffAtHead(stack, layer);
     return {
@@ -992,7 +979,7 @@ export function stackRepair(
       steps: `Vortex requested changes on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them for a person${handoff ? ` (${cycloneHandoffWords(handoff)})` : ""}, so nothing will patch them and Auto land waits. Read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). If a finding is wrong, tell the human; mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> dismisses that review. Do not retarget the PR base.`,
     };
   }
-  if (attention.blocker.startsWith("CI failed") || attention.bounceKind === "ci_failure") {
+  if (reason === "ci_failed" || attention.bounceKind === "ci_failure") {
     const failingCheck = bounce?.bounceDetail?.failingCheck?.trim() || layer.checks?.failingName?.trim() || null;
     return {
       kind: "ci_failure",
@@ -1011,7 +998,7 @@ export const LAND_PR_MISSING_PREFIX = "No open land PR for ";
 function landPrMissing(
   stack: StackDto,
   candidate: StackLayerDto | undefined,
-): { attention: StackBlocker; repair: StackRepairHint } | null {
+): { attention: StackBlocker; reason: StackBlockerReason; repair: StackRepairHint } | null {
   const unit = stack.unit;
   if (!unit || candidate || stack.archivedAt || unit.state === "landed" || unit.state === "abandoned") return null;
   if (stack.layers.some((layer) => !isTerminalLayer(layer))) return null;
@@ -1029,6 +1016,7 @@ function landPrMissing(
     ? `restore it from the closed land PR's head (gh pr view ${landPrRef} --repo ${stack.owner}/${stack.repo} --json headRefOid,state, then git push origin <that sha>:refs/heads/${unit.branch}) and reopen #${landPrRef}`
     : `restore it from the commit it pointed at (git push origin <sha>:refs/heads/${unit.branch})`;
   return {
+    reason: "land_pr_missing",
     attention: {
       prNumber, headSha, bounceKind: null,
       blocker: `${LAND_PR_MISSING_PREFIX}${unit.branch} — every layer is merged into it, but it cannot land in ${target} without one`,
@@ -1059,9 +1047,11 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       (layer.state !== "restacking" && layer.restackError?.kind === "rebase_conflict")),
   ).sort((a, b) => a.position - b.position)[0];
   let attention: StackBlocker | null = null;
+  let attentionReason: StackBlockerReason | null = null;
   let attentionLayer: StackLayerDto | undefined;
   let bounce: MergeQueueEntryDto | undefined;
   const issues: StackBlocker[] = [];
+  const mergeStateUnknownPrs = new Set<number>();
   const queueWait = stack.archivedAt ? null : mergeQueueWait(queue, nowMs);
   for (const layer of open) {
     const selected = layer.prNumber === candidate?.prNumber;
@@ -1071,25 +1061,26 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       disarmed = disarmingBounce(stack, queue);
       if (disarmed) {
         const kind = disarmed.bounceDetail!.kind;
-        result = { blocker: `${AUTO_LAND_OFF_BLOCKER_PREFIX}${kind} bounce`, bounceKind: kind, bounce: disarmed };
+        result = { blocker: `${AUTO_LAND_OFF_BLOCKER_PREFIX}${kind} bounce`, reason: "auto_land_off", bounceKind: kind, bounce: disarmed };
       }
     }
     let waitNamed = false;
     if (!result.blocker) {
-      const waiting = autoLandWaitBlocker(stack, layer, nowMs);
+      const waiting = autoLandWaitNamed(stack, layer, nowMs);
       if (waiting) {
-        result = { blocker: waiting, bounceKind: null };
+        result = { ...waiting, bounceKind: null };
         waitNamed = true;
       }
     }
     if (!result.blocker && selected && queueWait?.stalled) {
-      result = { blocker: `${MERGE_QUEUE_STALLED_PREFIX}${queueWait.text}`, bounceKind: null };
+      result = { blocker: `${MERGE_QUEUE_STALLED_PREFIX}${queueWait.text}`, reason: "queue_stalled", bounceKind: null };
     }
     if (!result.blocker) {
       if (vortexRetryScheduled(layer) && (selected || !candidate || layer.position > candidate.position)) {
         issues.push({ prNumber: layer.prNumber, headSha: layer.headSha ?? null, blocker: VORTEX_RETRY_SCHEDULED, bounceKind: null });
       }
       if (mergeabilityPending(layer) && (selected || !candidate || layer.position > candidate.position)) {
+        mergeStateUnknownPrs.add(layer.prNumber);
         issues.push({ prNumber: layer.prNumber, headSha: layer.headSha ?? null,
           blocker: `Merge state unknown${layer.parentBranch ? ` vs ${layer.parentBranch}` : ""}`, bounceKind: null });
       }
@@ -1099,10 +1090,11 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       blocker: result.blocker, bounceKind: result.bounceKind };
     if (
       selected ||
-      result.blocker.startsWith(UNIT_ABANDONED_BLOCKER_PREFIX) ||
+      result.reason === "unit_abandoned" ||
       (!attention && (layer === child || waitNamed))
     ) {
       attention = issue;
+      attentionReason = result.reason;
       attentionLayer = layer;
       bounce = result.bounce;
       if (disarmed) issues.push({ prNumber: disarmed.bounceDetail?.prNumber ?? layer.prNumber,
@@ -1111,9 +1103,10 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   }
   if (!attention) {
     const unlisted = autoLandWaitLayer(stack);
-    const waiting = unlisted && !open.includes(unlisted) ? autoLandWaitBlocker(stack, unlisted, nowMs) : null;
+    const waiting = unlisted && !open.includes(unlisted) ? autoLandWaitNamed(stack, unlisted, nowMs) : null;
     if (unlisted && waiting) {
-      attention = { prNumber: unlisted.prNumber, headSha: unlisted.headSha ?? null, blocker: waiting, bounceKind: null };
+      attention = { prNumber: unlisted.prNumber, headSha: unlisted.headSha ?? null, blocker: waiting.blocker, bounceKind: null };
+      attentionReason = waiting.reason;
       attentionLayer = unlisted;
     }
   }
@@ -1121,13 +1114,17 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
     ? { prNumber: candidate.prNumber, headSha: candidate.headSha ?? null, text: queueWait.text,
       since: queueWait.since, waitReason: queueWait.waitReason }
     : null;
-  const settleIssue = mergeabilitySettleIssue(stack, open, issues, attention);
+  const settleIssue = mergeabilitySettleIssue(stack, open, mergeStateUnknownPrs, attention);
   if (settleIssue) issues.push(settleIssue);
   const landMissing = landPrMissing(stack, candidate);
   if (landMissing) {
     attention = landMissing.attention;
+    attentionReason = landMissing.reason;
     attentionLayer = undefined;
   }
+  const classified: ClassifiedStackBlocker | null = attention && attentionReason
+    ? { ...attention, reason: attentionReason }
+    : null;
   const focus = attentionLayer ?? candidate;
   const agents = focus ? layerAgents(focus) : null;
   const busy: StackAgentBusy[] = [];
@@ -1143,30 +1140,30 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   const landGatePending: StackLandGatePending | null = landLayer && landing && landGateIsPending(landing)
     ? { prNumber: landLayer.prNumber, headSha: landLayer.headSha ?? null, reason: landing }
     : null;
-  if (busy.length && attention && agentsCannotClear(attention.blocker)) {
+  if (busy.length && attention && classified && agentsCannotClear(classified.reason)) {
     const held: StackHeldBlocker = { ...attention, actAfter: "agents_idle", waitingOn: busy.map((entry) => entry.agent) };
     return { attention: null, held, issues: [attention, ...issues], currentCandidate, bounce: undefined, busy, agents,
-      repair: stackRepair(stack, attention, attentionLayer, undefined, queueWait), landGatePending, queueWait: queued };
+      repair: stackRepair(stack, classified, attentionLayer, undefined, queueWait), landGatePending, queueWait: queued };
   }
   if (busy.length) {
     return { attention: null, held: null, issues, currentCandidate, bounce: undefined, busy, agents, repair: null, landGatePending,
       queueWait: queued };
   }
   return { attention, held: null, issues, currentCandidate, bounce, busy, agents,
-    repair: landMissing?.repair ?? stackRepair(stack, attention, attentionLayer, bounce, queueWait), landGatePending,
+    repair: landMissing?.repair ?? stackRepair(stack, classified, attentionLayer, bounce, queueWait), landGatePending,
     queueWait: queued };
 }
 
 function mergeabilitySettleIssue(
   stack: StackDto,
   open: readonly StackLayerDto[],
-  issues: readonly StackBlocker[],
+  mergeStateUnknownPrs: ReadonlySet<number>,
   attention: StackBlocker | null,
 ): StackBlocker | null {
   const settle = stack.autoEnqueueSettle;
   if (stack.archivedAt || settle?.action !== "mergeability") return null;
   if (attention?.prNumber === settle.prNumber) return null;
-  if (issues.some((issue) => issue.prNumber === settle.prNumber && issue.blocker.startsWith("Merge state unknown"))) return null;
+  if (mergeStateUnknownPrs.has(settle.prNumber)) return null;
   const layer = open.find((candidate) => candidate.prNumber === settle.prNumber);
   if (layer && !sameHead(layer.headSha, settle.headSha)) return null;
   const vs = layer?.parentBranch ? ` vs ${layer.parentBranch}` : "";

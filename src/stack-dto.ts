@@ -6,6 +6,7 @@ export type RestackError = {
   attempts: number;
   backupRef: string | null;
   from?: { branch: string; oldSha: string };
+  droppedMergeCommit?: boolean;
 };
 
 const RESTACK_ATTEMPT_CAP = 3;
@@ -121,9 +122,7 @@ export type StackCycloneHandoff = {
   at: string | null;
 };
 
-export type StackTempestStatus = "reviewing" | "findings" | "clear" | "failed" | "stale";
-
-export type StackAgentName = "vortex" | "cyclone" | "tempest";
+export type StackAgentName = "vortex" | "cyclone";
 
 /**
  * One live-or-resting agent run for a PR (#1119): a dumb projection of one
@@ -282,8 +281,6 @@ export type StackLayerDto = {
   vortexStatus: StackVortexStatus | null;
   /** null on the fast list or when no Cyclone signal exists. */
   cycloneStatus: StackCycloneStatus | null;
-  /** null when no Tempest signal exists. Fast list and enrich both paint this from pr_reviews (#876). */
-  tempestStatus: StackTempestStatus | null;
   /**
    * Ledger-backed agent runs, one per live row (#1119). Fast list and enrich
    * both paint this from our tables only — never GitHub. The per-agent status
@@ -383,11 +380,10 @@ export type StackUnitDto = {
   landTarget: string;
   members: StackUnitMemberDto[];
   landPrNumber: number | null;
-  tempestLandStatus: string | null;
   landingBlockReason: string | null;
   /**
    * Land-PR chrome. Fast list hydrates last-known CI/title/mergeable/issues from
-   * `review_units` (#878 / #892) and may attach a tempest-only stub (#876). Enrich
+   * `review_units` (#878 / #892). Enrich
    * refreshes GitHub and writes back. Null when the land PR is an open stack
    * layer (chips live on `layers`) or the unit has no land PR.
    */
@@ -471,6 +467,8 @@ export type StackDto = {
    */
   cycloneOwnerMatch?: CycloneOwnerMatch;
   cyclonePatchOff?: CyclonePatchOffReason;
+  infrastructureInstallUserId?: string | null;
+  infrastructureOwnerMatch?: CycloneOwnerMatch;
   layers: StackLayerDto[];
   /** Present when a review-unit row exists for this stack. */
   unit?: StackUnitDto;
@@ -492,8 +490,6 @@ export type MergeQueueBounceKind =
   | "ci_failure"
   | "ci_timeout"
   | "head_moved"
-  | "tempest_findings"
-  | "tempest_rerun"
   | "seam_findings"
   | "restack_conflict"
   | "pr_draft"
@@ -506,8 +502,6 @@ export const MERGE_QUEUE_BOUNCE_KINDS = [
   "ci_failure",
   "ci_timeout",
   "head_moved",
-  "tempest_findings",
-  "tempest_rerun",
   "seam_findings",
   "restack_conflict",
   "pr_draft",
@@ -520,8 +514,6 @@ export const BOUNCE_KIND_LABELS: Readonly<Record<MergeQueueBounceKind, string>> 
   ci_failure: "CI failed",
   ci_timeout: "CI timed out",
   head_moved: "head moved",
-  tempest_findings: "Tempest findings",
-  tempest_rerun: "Tempest needs rerun",
   seam_findings: "seam review findings",
   restack_conflict: "restack conflict",
   pr_draft: "draft PR",

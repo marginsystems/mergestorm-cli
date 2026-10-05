@@ -8,6 +8,7 @@ import {
   REVIEW_EXIT,
   rateLimitedMessage,
   type CommandErrorCode,
+  plainServerText,
 } from "./errors.js";
 import type { MergeQueueEntryDto, StackDto } from "./stack-dto.js";
 
@@ -24,7 +25,6 @@ export type {
   StackLayerChecks,
   StackLayerDto,
   StackReviewStatus,
-  StackTempestStatus,
   StackUnitDto,
   StackUnitMemberDto,
 } from "./stack-dto.js";
@@ -373,6 +373,7 @@ export type SettingsPatch = Partial<import("./automation-catalog.js").BearerSett
 export type SettingsResponse = import("./automation-catalog.js").BearerSettingsValues & {
   cyclone_connected: boolean;
   github_connected: boolean;
+  stacks_ready?: boolean;
 };
 
 /**
@@ -733,6 +734,8 @@ export async function adoptStack(
         : code === "supabase_unconfigured"
           ? "Stacks are not configured on this server."
           : undefined;
+    const surge = surgeRefusal(body);
+    if (surge) throw surge;
     throw new CommandError(
       message?.trim()
         ? message
@@ -742,6 +745,53 @@ export async function adoptStack(
     );
   }
   return body;
+}
+
+const INFRASTRUCTURE_REFUSAL_CODES = [
+  "cyclone_not_connected",
+  "cyclone_not_installed",
+  "cyclone_permission_missing",
+] as const;
+
+function refusalReason(body: unknown): string | undefined {
+  const reason = (body && typeof body === "object" ? (body as { reason?: unknown }).reason : undefined);
+  return typeof reason === "string" && plainServerText(reason).trim() ? plainServerText(reason).trim() : undefined;
+}
+
+export const SURGE_REFUSAL_FALLBACK =
+  "Mergestorm Surge is not installed or not ready on this repository. Install it from Agents.";
+
+export function surgeRefusal(body: unknown): CommandError | null {
+  if (!body || typeof body !== "object") return null;
+  const refusal = body as { error?: unknown; message?: unknown; installUrl?: unknown };
+  const reason = refusalReason(body);
+  if (!reason?.startsWith("surge_")) return null;
+  const error = INFRASTRUCTURE_REFUSAL_CODES.find((code) => code === refusal.error);
+  if (!error) return null;
+  const message = serverMessage(refusal.message) ?? SURGE_REFUSAL_FALLBACK;
+  const installUrl = githubAppInstallUrl(refusal.installUrl) ?? "";
+  return new CommandError(
+    installUrl && !message.includes(installUrl) ? `${message} (${installUrl})` : message,
+    1,
+    error,
+    { reason },
+  );
+}
+
+export const GITHUB_UNREADABLE_MESSAGE = "GitHub could not be read just now; try again.";
+
+function serverMessage(message: unknown): string | null {
+  if (typeof message !== "string") return null;
+  const plain = plainServerText(message).trim();
+  return plain ? plain : null;
+}
+
+const GITHUB_APP_INSTALL_URL = /https:\/\/github\.com\/apps\/[^\s)]+\/installations\/new/;
+
+function githubAppInstallUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const match = GITHUB_APP_INSTALL_URL.exec(plainServerText(value).trim());
+  return match && match.index === 0 ? match[0] : null;
 }
 
 /** Mint or reuse the PR3+ park freeze (Bearer POST /api/v1/stacks/:id/ensure-upper-park). */
@@ -781,7 +831,7 @@ export function cycloneNotInstalledMessage(owner: string, repo: string, installU
 
 function installUrlFrom(message: unknown): string {
   if (typeof message !== "string") return CYCLONE_INSTALL_URL;
-  return message.match(/https:\/\/github\.com\/apps\/[^\s)]+\/installations\/new/)?.[0] ?? CYCLONE_INSTALL_URL;
+  return message.match(GITHUB_APP_INSTALL_URL)?.[0] ?? CYCLONE_INSTALL_URL;
 }
 
 function stackPullFailure(
@@ -795,6 +845,8 @@ function stackPullFailure(
     error?: unknown;
     message?: unknown;
   };
+  const surge = surgeRefusal(body);
+  if (surge) return surge;
   const text = `${String(rejection.error ?? "")} ${String(rejection.message ?? "")}`;
   if (
     rejection.error === "cyclone_not_installed" ||
@@ -876,6 +928,8 @@ async function stackMutation(
     );
   }
   if (status !== 200) {
+    const surge = surgeRefusal(body);
+    if (surge) throw surge;
     const rejection = body as { error?: string; message?: unknown } | null;
     if (method === "PATCH" && rejection?.error === "cyclone_not_connected") {
       throw new CommandError(
@@ -974,6 +1028,7 @@ async function queueMutation(
   route: string,
   failLabel: string,
   cfg?: Config,
+  opts: { githubUnreadableRefusal?: boolean } = {},
 ): Promise<unknown> {
   const resolved = cfg ?? (await loadConfig());
   const { status, body } = await apiFetch(resolved, route, {
@@ -994,11 +1049,27 @@ async function queueMutation(
   }
   if (status === 409) {
     const refusal = body as { error?: unknown; message?: unknown } | null;
-    if (refusal?.error === "conflict_unchanged" && typeof refusal.message === "string") {
+    if (
+      (refusal?.error === "conflict_unchanged" || refusal?.error === "ci_failed") &&
+      typeof refusal.message === "string"
+    ) {
       throw new CommandError(refusal.message);
     }
   }
+  if (
+    opts.githubUnreadableRefusal &&
+    status === 503 &&
+    (body as { error?: unknown } | null)?.error === "github_unreadable"
+  ) {
+    throw new CommandError(
+      serverMessage((body as { message?: unknown }).message) ?? GITHUB_UNREADABLE_MESSAGE,
+      1,
+      "github_unreadable",
+    );
+  }
   if (status < 200 || status >= 300) {
+    const surge = surgeRefusal(body);
+    if (surge) throw surge;
     throw new CommandError(`${failLabel} (HTTP ${status}): ${JSON.stringify(body)}`);
   }
   return body;
@@ -1013,6 +1084,7 @@ export async function enqueueStack(
     `/api/v1/stacks/${encodeURIComponent(stackId)}/enqueue`,
     "Failed to add stack to merge queue",
     cfg,
+    { githubUnreadableRefusal: true },
   );
 }
 

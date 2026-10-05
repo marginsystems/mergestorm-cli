@@ -157,16 +157,19 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.36": [
     "stack watch names what the merge queue waits on",
     "stack watch names why Vortex skipped a head",
-    "stack watch says how to re-run Tempest",
   ],
   "0.3.37": [
     "turning auto-review on reviews skipped heads",
   ],
+  "0.3.38": [
+    "mg settings turns merge queue batching on or off",
+  ],
   "0.3.39": [
     "the watch names more waits and what to do",
   ],
-  "0.3.38": [
-    "mg settings turns merge queue batching on or off",
+  "0.3.40": [
+    "refusals name Surge when it is the App to install",
+    "mg settings says whether stacks are ready",
   ],
 };
 

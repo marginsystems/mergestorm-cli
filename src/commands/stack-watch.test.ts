@@ -18,11 +18,11 @@ function fakeRun(result: Partial<StackWatchLoopResult>, seen: RunStackWatchOptio
 
 test("stack watch passes until, every ignore, max, head, and json to the watcher", async () => {
   const seen: RunStackWatchOptions[] = [];
-  await cmdStackWatch([stackId, "--until", "landed", "--ignore", "Tempest", "--ignore=Draft", "--max", "90",
+  await cmdStackWatch([stackId, "--until", "landed", "--ignore", "Seam", "--ignore=Draft", "--max", "90",
     "--head", "ABCDEF1", "--json"], { loadConfig: async () => ({}), runStackWatch: fakeRun({}, seen) });
   assert.equal(seen.length, 1);
   assert.equal(seen[0]!.until, "landed");
-  assert.deepEqual(seen[0]!.ignore, ["Tempest", "Draft"]);
+  assert.deepEqual(seen[0]!.ignore, ["Seam", "Draft"]);
   assert.equal(seen[0]!.maxMs, 90 * 60_000);
   assert.equal(seen[0]!.json, true);
   assert.deepEqual(seen[0]!.cursor, { stackId, enrolledHeadSha: "abcdef1" });
@@ -67,7 +67,7 @@ test("CLI stack watch prints one MS-WATCH ATTENTION line and exits 3 on a confli
     response.end(JSON.stringify(request.url!.includes("/queue") ? { entries: [] } : { stacks: [{
       id: stackId, trunkBranch: "main", archivedAt: null, layers: [{
         branch: "feat/a", parentBranch: "main", prNumber: 7, position: 1, state: "conflict", headSha: head,
-        ciStatus: "success", reviewStatus: "none", checks: null, vortexStatus: null, cycloneStatus: null, tempestStatus: null,
+        ciStatus: "success", reviewStatus: "none", checks: null, vortexStatus: null, cycloneStatus: null,
         conflictDetail: null, lastRestackedSha: null, mergeable: false, mergeableState: "dirty", mergeableHeadSha: head,
       }],
     }] }));

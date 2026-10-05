@@ -28,6 +28,7 @@ import {
   isTransientReviewPollStatus,
   loadReviewContext,
   pollReview,
+  type PollReviewOptions,
   formatReviewSubmitError,
   submitReview,
 } from "./review-client.js";
@@ -283,6 +284,7 @@ export type ReviewOptions = {
   interactive?: boolean;
   /** Test seam; production uses the two-second poll interval. */
   pollIntervalMs?: number;
+  pollClock?: Pick<PollReviewOptions, "sleep" | "now" | "random">;
 };
 
 export function reviewStatusHint(jobId: string): string {
@@ -437,6 +439,7 @@ export async function cmdReview(args: string[], opts: ReviewOptions = {}): Promi
       row = await pollReview(cfg, jobId, {
         timeoutMs: parsed.timeoutMs,
         intervalMs: opts.pollIntervalMs,
+        ...opts.pollClock,
         signal: opts.signal,
         propagateTimeout: interactive,
         onTick(kind) {

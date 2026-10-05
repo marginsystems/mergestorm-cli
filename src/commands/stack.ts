@@ -1376,8 +1376,7 @@ export async function cmdStackStatus(
       `    ${String(layer.position).padStart(2)}  ${pr}${head}  ${layer.state.padEnd(14)}  ${layer.branch}` +
         `  CI: ${layer.ciStatus ?? "unknown"}  review: ${layer.reviewStatus ?? "unknown"}` +
         (layer.vortexStatus ? `  Vortex: ${layer.vortexStatus}` : "") +
-        (layer.cycloneStatus ? `  Cyclone: ${layer.cycloneStatus}` : "") +
-        (layer.tempestStatus ? `  Tempest: ${layer.tempestStatus}` : ""),
+        (layer.cycloneStatus ? `  Cyclone: ${layer.cycloneStatus}` : ""),
     );
   }
   if (queueWait && !attention) lines.push(`  Queue: #${queueWait.prNumber} ${queueWait.text}`);

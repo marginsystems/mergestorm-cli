@@ -152,8 +152,15 @@ export function formatJobDetailLines(row: ReviewJobRow): string[] {
 /** Human labels for the Config tab and the static `settings` printout. */
 export const SETTINGS_LABELS = BEARER_SETTINGS_LABELS;
 
+export const STACKS_READY_LABEL = "Stacks, merge queue, Auto land";
+export const STACKS_READY_WORDS = {
+  on: "ready",
+  off: "not ready (install Mergestorm Surge)",
+} as const;
+
 /** Config rows in a stable order: writable toggles, then connected flags. */
 export function buildConfigRows(settings: SettingsResponse): TabsConfigRow[] {
+  const stacksReadyKnown = typeof settings.stacks_ready === "boolean";
   return [
     ...BEARER_BOOLEAN_SETTINGS_KEYS.map((key) => ({
       key,
@@ -161,9 +168,20 @@ export function buildConfigRows(settings: SettingsResponse): TabsConfigRow[] {
       value: settings[key] === true,
       writable: true,
     })),
+    ...(stacksReadyKnown
+      ? [
+          {
+            key: "stacks_ready",
+            label: STACKS_READY_LABEL,
+            value: settings.stacks_ready === true,
+            writable: false,
+            readOnlyWords: STACKS_READY_WORDS,
+          },
+        ]
+      : []),
     {
       key: "cyclone_connected",
-      label: "Cyclone",
+      label: stacksReadyKnown ? "Cyclone (auto patch)" : "Cyclone",
       value: settings.cyclone_connected === true,
       writable: false,
     },

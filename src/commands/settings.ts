@@ -8,6 +8,7 @@ import { BEARER_SETTINGS, BEARER_SETTINGS_FLAGS } from "../automation-catalog.js
 import { loadConfig } from "../config.js";
 import { CommandError } from "../errors.js";
 import { present } from "../ui/present.js";
+import { readOnlyRowWords, type TabsConfigRow } from "../ui/tabs.js";
 import { buildConfigRows, canBrowse, openTabsBrowser } from "./browse.js";
 
 /**
@@ -109,9 +110,7 @@ export function formatSettingsLines(settings: SettingsResponse): string[] {
       ? row.value
         ? "on"
         : "off"
-      : row.value
-        ? "connected"
-        : "not connected";
+      : readOnlyRowWords(row as TabsConfigRow);
     return `  ${row.label.padEnd(labelWidth + 2)}${value}`;
   });
 }
