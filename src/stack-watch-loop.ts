@@ -39,8 +39,14 @@ export type StackWatchLoopResult = {
   envelope: StackWatchEnvelope | null;
 };
 
+const ELAPSED_MINUTES = /\b\d+m\b/g;
+
+export function blockerWithoutElapsedMinutes(blocker: string | null | undefined): string {
+  return (blocker ?? "").replace(ELAPSED_MINUTES, "Nm");
+}
+
 export function stackWatchAttentionKey(envelope: Pick<StackWatchEnvelope, "prNumber" | "headSha" | "blocker">): string {
-  return `${envelope.prNumber ?? ""}|${envelope.headSha ?? ""}|${envelope.blocker ?? ""}`;
+  return `${envelope.prNumber ?? ""}|${envelope.headSha ?? ""}|${blockerWithoutElapsedMinutes(envelope.blocker)}`;
 }
 
 export function stackWatchAttentionLine(envelope: StackWatchEnvelope): string {

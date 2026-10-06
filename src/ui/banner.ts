@@ -177,6 +177,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.42": [
     "a running seam review is never reported as stuck",
   ],
+  "0.3.43": [
+    "watch --ignore holds a blocker as its minutes tick",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

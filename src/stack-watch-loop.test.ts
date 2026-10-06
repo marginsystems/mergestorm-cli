@@ -204,6 +204,22 @@ test("stack watch --ignore stays silent on the handed-off blocker until it chang
   assert.deepEqual(lines, [`MS-WATCH ATTENTION pr=12 head=${headA} blocker="CI failed — lint" repair=none`]);
 });
 
+test("stack watch --ignore keeps a timed blocker silent as its elapsed minutes grow", async () => {
+  const pending = (minutes: number) =>
+    attention(`CI pending for ${minutes}m — a check on this head has not finished, so Auto land will not queue it`);
+  const { run, lines } = harness([pending(46), pending(48), pending(51), envelope({}, "landed")], { ignore: ["CI pending for"] });
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.deepEqual(lines, [`MS-WATCH LANDED stack=${stackId} reason=landed`, "This stack is landed. The watch is done; stop calling stack_wait for it."]);
+});
+
+test("stack watch --until landed reports a timed blocker once while its elapsed minutes grow", async () => {
+  const pending = (minutes: number) => attention(`No green Vortex review for ${minutes}m — Auto land is waiting for an approving Vortex review at this head`);
+  const { run, lines } = harness([pending(30), pending(31), envelope({}, "landed")], { until: "landed" });
+  await run;
+  assert.equal(lines.filter((line) => line.startsWith("MS-WATCH ATTENTION")).length, 1);
+});
+
 test("stack watch --ignore silences a distinct blocker for each repeated flag", async () => {
   const { run, lines } = harness([
     attention("Seam findings"),
