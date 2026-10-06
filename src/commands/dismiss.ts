@@ -115,6 +115,12 @@ export function formatDismissResult(result: PrFindingDismissResult, watch: Stack
           : `Seam gate: not blocking (seam_state=${seam.state}).`,
     );
   }
+  const vortex = result.gate.vortex;
+  if (vortex?.cleared) {
+    lines.push("Vortex gate: cleared (every Vortex Blocker (error finding) at this head is dismissed). CI and Auto land policy still apply.");
+  } else if (vortex?.message && vortex.reason !== "review_findings_open") {
+    lines.push(`Vortex gate: not cleared. ${vortex.message}`);
+  }
   if (watch?.next) lines.push(`Next: ${watch.next.background} as a background command, or ${watch.next.command}`);
   return lines.join("\n");
 }

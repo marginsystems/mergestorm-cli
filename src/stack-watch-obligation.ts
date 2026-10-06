@@ -109,7 +109,7 @@ export function stackWatchObligation(input: StackWatchObligationInput): StackWat
   const background = stackWatchBackgroundCommand(input.stackId);
   const parts = [
     STACK_WATCH_NOT_DONE_SENTENCE,
-    `If your host has a confirmed notification that resumes this task, run \`${background}\` as a background command, notify on output matching ${STACK_WATCH_NOTIFY_PATTERN}, and end your turn. The command monitors the stack; it cannot wake an agent by itself. Without a confirmed notification, keep using stack_wait with the returned cursor, or report that automatic follow-up is unavailable before ending the turn.`,
+    `If your host has a confirmed notification that resumes this task, run \`${background}\` as a background command, notify on output matching ${STACK_WATCH_NOTIFY_PATTERN}, and end your turn. The command monitors the stack; it cannot wake an agent by itself, and a process left running is not a notification. Without a confirmed notification, keep using stack_wait with the returned cursor, or report that automatic follow-up is unavailable before ending the turn.`,
     `Watch stack ${input.stackId} as a whole until it lands or the human takes it back. A clean push, a submit, or one merged layer does not finish it: merging a lower layer can break a layer above it.`,
   ];
   if (reason === "rate_limited") {

@@ -1159,6 +1159,7 @@ export type PrFindingDismissResult = {
       cleared: boolean;
       blocking: boolean;
     } | null;
+    vortex?: { cleared: boolean; reason?: string | null; message?: string } | null;
     other_gates: "unchanged";
   };
   stack_id: string | null;

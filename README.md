@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.41`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.42`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,7 +48,7 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.41                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.42                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
@@ -130,7 +130,8 @@ Use `mergestorm dismiss` when a Vortex finding is wrong and you have checked it 
 - You need write access to the repository on GitHub, and the repository must be monitored by your Mergestorm account or the PR must be in one of your stacks.
 - `--head` must be the PR's live head and `--review` a Vortex review made at that head. A moved head, another review, or a finding id that is not in that review is refused, and nothing is written.
 - Retrying the same dismissal is safe; it reports the earlier record.
-- The seam gate clears only when every finding of that integration review is dismissed and the review is still the current seam verdict. CI, other reviews and Auto land policy still apply.
+- The seam gate clears only when every finding of that integration review is dismissed and the review is still the current seam verdict.
+- The Vortex gate at the head clears once every Vortex Blocker (error finding) at the live head is dismissed (every Core review merged into that head, not only the one named), and no Vortex review of the head is still running or incomplete: that head reads as approved for Auto land, the stack watch, the dashboard and Cyclone. A partial dismissal clears nothing. CI and Auto land policy still apply.
 - Vortex does not raise a dismissed finding again on the same diff (the same head, or a restack with an unchanged diff).
 - With `--json`, the result carries `gate` and, for a stack PR, `watch.next` (the next `stack_wait` call, plus `watch.next.background`, the `mg stack watch` command to run in the background instead).
 

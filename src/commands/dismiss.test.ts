@@ -144,5 +144,26 @@ test("formatDismissResult names the gate and the next command", () => {
     next: { tool: "stack_wait", args: { stack_id: "s", timeout_s: 45 }, command: "mg stack wait s --json", background: "mg stack watch s" },
   });
   assert.match(text, /Seam gate: cleared/);
+  assert.doesNotMatch(text, /Vortex gate/);
   assert.match(text, /Next: mg stack watch s as a background command, or mg stack wait s --json/);
+});
+
+test("formatDismissResult says when a Core review's dismissal cleared the Vortex gate", () => {
+  const core: PrFindingDismissResult = {
+    ...result,
+    review_kind: "core",
+    gate: { seam: null, vortex: { cleared: true }, other_gates: "unchanged" },
+  };
+  assert.match(formatDismissResult(core, null), /Vortex gate: cleared/);
+  assert.doesNotMatch(
+    formatDismissResult({ ...core, gate: { seam: null, vortex: { cleared: false, reason: "review_findings_open", message: "x" }, other_gates: "unchanged" } }, null),
+    /Vortex gate/,
+  );
+  assert.match(
+    formatDismissResult({
+      ...core,
+      gate: { seam: null, vortex: { cleared: false, reason: "other_findings_open", message: "Other Vortex findings at this head are still open." }, other_gates: "unchanged" },
+    }, null),
+    /Vortex gate: not cleared\. Other Vortex findings at this head are still open\./,
+  );
 });

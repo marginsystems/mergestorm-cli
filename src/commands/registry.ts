@@ -109,6 +109,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "  [--finding <id>]… | --all (every finding of that review)  [--evidence <url>] [--json]",
       "  Needs write access on GitHub; refuses a moved head, another review or an unknown id",
       "  Clears the seam gate only when every finding of that seam review is dismissed",
+      "  Clears the Vortex gate at the head once every Vortex Blocker (error finding) at that head is dismissed",
     ],
     async run(args) {
       await cmdDismiss(args);
@@ -201,7 +202,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     usage: [
       "mergestorm settings [--json]    Read the automation toggles (Config tab on a TTY)",
       "  [--auto-review on|off] [--auto-patch on|off] [--vortex-thinking on|off]",
-      "  [--repo-overview on|off] [--review-unit-land on|off]",
+      "  [--repo-overview on|off]",
       "  [--cyclone-skip-ci on|off]",
       "  [--cyclone-patch-unverified on|off]  Patch languages we cannot typecheck",
       "  [--vortex-seam on|off] [--vortex-skip-all-clear on|off]",

@@ -174,6 +174,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.41": [
     "the watch never reports a missing stack as landed",
   ],
+  "0.3.42": [
+    "a running seam review is never reported as stuck",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */
