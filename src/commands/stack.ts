@@ -91,7 +91,7 @@ export function stackWatchTextLines(watch: StackWatchObligation | null | undefin
   const next = watch.next;
   return [
     ...(next ? [
-      `Next: ${next.background} as a background command (notify on ${STACK_WATCH_NOTIFY_PATTERN}, then end your turn)`,
+      `Only with a confirmed host notification that resumes this task: run ${next.background} as a background command (notify on ${STACK_WATCH_NOTIFY_PATTERN}), then end your turn`,
       `Or poll: ${next.command} (MCP: stack_wait ${JSON.stringify(next.args)})`,
     ] : []),
     STACK_WATCH_NOT_DONE_SENTENCE,
@@ -114,7 +114,7 @@ const STACK_USAGE = `usage:
   mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--json]
     Loops stack wait with the cursor and stays silent while the stack is waiting or in progress.
     Prints one MS-WATCH ATTENTION line and exits 3 on attention or a repeated failed read; prints
-    MS-WATCH LANDED and exits 0 once the watch is done. Run it as a background command.
+    MS-WATCH LANDED and exits 0 only for a confirmed landing. Other terminal reasons exit 3 with ATTENTION. Run it as a background command.
     --json writes exactly one JSON document to stdout and sends the MS-WATCH lines to stderr.
   mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]
   mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
@@ -1320,7 +1320,9 @@ export async function cmdStackWatch(
     ? `Stopped watching stack ${stackId} after --max; it is not landed.`
     : result.outcome === "aborted"
       ? `Stopped watching stack ${stackId}; it is not landed.`
-      : `Stack ${stackId} needs attention; it is not landed.`;
+      : result.envelope?.watch.reason === "not_found"
+        ? `Stack ${stackId} was not found; landing is unconfirmed. Verify each PR before reporting it landed.`
+        : `Stack ${stackId} needs attention; it is not landed.`;
   throw new CommandError(reason, result.exitCode, result.outcome === "timeout" ? "review_timeout" : "stack_attention");
 }
 
@@ -1521,7 +1523,7 @@ async function cmdStackLand(args: string[]): Promise<void> {
       ansi.brightGreen(
         `  Promoted` +
           (pr != null ? ` #${pr}` : "") +
-          ` into U${uNumber}` +
+          ` into IU ${uNumber}` +
           (branch ? ` (${branch})` : "") +
           ` on ${id}`,
       ),

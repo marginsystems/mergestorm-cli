@@ -58,7 +58,7 @@ const DONE_MESSAGES: Readonly<Record<StackWatchDoneReason, string>> = {
   archived:
     "This stack is archived: the human took it back. The watch is done; stop calling stack_wait for it and do not push to its PRs.",
   not_found:
-    "No stack with this id exists for this account. Mergestorm deletes a stack once none of its layers is open, so a stack you were watching has most likely landed; a mistyped id or another account's stack reads the same. The watch is done; confirm each PR is merged (gh pr view <n> --json state) before reporting it landed.",
+    "No stack with this id exists for this account. Mergestorm deletes a stack once none of its layers is open, which can mean merged or closed; a mistyped id or another account's stack reads the same. Landing is unconfirmed. The watch is done; confirm each PR is merged (gh pr view <n> --json state) before reporting it landed.",
 };
 
 export function stackTerminalReason(
@@ -109,7 +109,7 @@ export function stackWatchObligation(input: StackWatchObligationInput): StackWat
   const background = stackWatchBackgroundCommand(input.stackId);
   const parts = [
     STACK_WATCH_NOT_DONE_SENTENCE,
-    `If you cannot hold a long turn open, run \`${background}\` as a background command instead, notify on output matching ${STACK_WATCH_NOTIFY_PATTERN}, and end your turn: it keeps calling stack_wait for you, stays silent while the stack waits, and wakes you on attention or when the watch is done.`,
+    `If your host has a confirmed notification that resumes this task, run \`${background}\` as a background command, notify on output matching ${STACK_WATCH_NOTIFY_PATTERN}, and end your turn. The command monitors the stack; it cannot wake an agent by itself. Without a confirmed notification, keep using stack_wait with the returned cursor, or report that automatic follow-up is unavailable before ending the turn.`,
     `Watch stack ${input.stackId} as a whole until it lands or the human takes it back. A clean push, a submit, or one merged layer does not finish it: merging a lower layer can break a layer above it.`,
   ];
   if (reason === "rate_limited") {

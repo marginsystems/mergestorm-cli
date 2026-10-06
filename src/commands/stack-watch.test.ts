@@ -106,11 +106,13 @@ test("CLI stack watch --json writes exactly one JSON document to stdout and the 
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   const status = await new Promise<number | null>((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
-  assert.equal(status, 0, stderr);
+  assert.equal(status, 3, stderr);
   const document = JSON.parse(stdout);
   assert.equal(document.stackId, stackId);
   assert.equal(document.watch.done, true);
   assert.equal(document.watch.reason, "not_found");
   assert.doesNotMatch(stdout, /MS-WATCH/);
-  assert.match(stderr, new RegExp(`^MS-WATCH LANDED stack=${stackId} reason=not_found$`, "m"));
+  assert.doesNotMatch(stderr, /MS-WATCH LANDED/);
+  assert.match(stderr, /landing is unconfirmed/);
+  assert.match(stderr, new RegExp(`^MS-WATCH ATTENTION stack=${stackId} reason=not_found$`, "m"));
 });

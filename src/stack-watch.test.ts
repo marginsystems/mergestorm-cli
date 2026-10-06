@@ -1154,7 +1154,9 @@ test("the obligation: not-done sentence first, exact next call, done only for te
   assert.match(open.message, /A clean push, a submit, or one merged layer does not finish it/);
   assert.deepEqual(open.next, { tool: "stack_wait", command: "mg stack wait stack --json", background: "mg stack watch stack",
     args: { stack_id: "stack", enrolled_head_sha: HEAD, after_finished_at: null, bounce_id: "b1", timeout_s: 45 } });
-  assert.match(open.message, /If you cannot hold a long turn open, run `mg stack watch stack` as a background command instead, notify on output matching MS-WATCH \(ATTENTION\|LANDED\), and end your turn/);
+  assert.match(open.message, /If your host has a confirmed notification that resumes this task/);
+  assert.match(open.message, /it cannot wake an agent by itself/);
+  assert.match(open.message, /Without a confirmed notification, keep using stack_wait with the returned cursor/);
   const attention = stackWatchObligation({ stackId: "stack", terminal: null, status: "attention", attention: { prNumber: 12, blocker: "Conflict" } });
   assert.match(attention.message, /or start `mg stack watch stack --head <pushed-sha>` in the background/);
   const limited = stackWatchObligation({ stackId: "stack", terminal: null, status: "rate_limited", retryAfterSeconds: 9 });

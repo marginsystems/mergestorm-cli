@@ -171,6 +171,9 @@ const WHATS_NEW: Record<string, string[]> = {
     "refusals name Surge when it is the App to install",
     "mg settings says whether stacks are ready",
   ],
+  "0.3.41": [
+    "the watch never reports a missing stack as landed",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

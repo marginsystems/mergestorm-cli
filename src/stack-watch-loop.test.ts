@@ -19,7 +19,7 @@ const stackId = "11111111-1111-4111-8111-111111111111";
 const headA = "a".repeat(40);
 const headB = "b".repeat(40);
 
-function envelope(overrides: Partial<StackWatchEnvelope> = {}, terminal: "landed" | "not_found" | null = null): StackWatchEnvelope {
+function envelope(overrides: Partial<StackWatchEnvelope> = {}, terminal: "landed" | "closed" | "archived" | "not_found" | null = null): StackWatchEnvelope {
   const cursor: StackWatchCursor = overrides.cursor ?? { stackId, enrolledHeadSha: headA };
   const base: StackWatchEnvelope = {
     schema: "mergestorm.stack_watch/v1", status: "waiting", stackId, blocker: null, bounceKind: null,
@@ -106,13 +106,22 @@ test("stack watch prints MS-WATCH LANDED and exits 0 when the watch is done", as
   assert.equal(lines.length, 2);
 });
 
-test("stack watch treats a vanished stack as done with reason not_found", async () => {
-  const gone = envelope({ status: "failed", assessment: "unavailable" }, "not_found");
-  const { run, lines } = harness([new StackWatchError("Stack not found or not owned by the current user", gone)]);
-  const result = await run;
-  assert.equal(result.exitCode, 0);
-  assert.equal(lines[0], `MS-WATCH LANDED stack=${stackId} reason=not_found`);
-});
+for (const terminal of ["not_found", "closed", "archived"] as const) {
+  for (const throws of [false, true]) {
+    test(`stack watch exits with attention for ${terminal} from ${throws ? "an error" : "a snapshot"}`, async () => {
+      const done = envelope({ status: "failed", assessment: "unavailable" }, terminal);
+      const step = throws ? new StackWatchError("Terminal stack", done) : done;
+      const { run, lines, calls, sleeps } = harness([step], { until: "landed", ignore: [terminal] });
+      const result = await run;
+      assert.equal(result.outcome, "attention");
+      assert.equal(result.exitCode, STACK_WATCH_EXIT.attention);
+      assert.equal(result.envelope, done);
+      assert.deepEqual(lines, [`MS-WATCH ATTENTION stack=${stackId} reason=${terminal}`, done.watch.message]);
+      assert.equal(calls.length, 1);
+      assert.deepEqual(sleeps, []);
+    });
+  }
+}
 
 test("stack watch retries one failed read, then keeps watching silently", async () => {
   const failed = envelope({ status: "failed", assessment: "unavailable" });

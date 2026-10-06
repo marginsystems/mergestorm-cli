@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.40`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.41`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,7 +48,7 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.40                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.41                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
@@ -106,12 +106,12 @@ mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --finding <id> --
 
 ### Watching a stack in the background
 
-`mg stack watch <stack-id>` is for agents that cannot hold a long turn open. Run it as a background command, have your host notify you on output matching `MS-WATCH (ATTENTION|LANDED)`, and end the turn. While it waits it spends no model tokens and talks only to the Mergestorm API, not GitHub.
+`mg stack watch <stack-id>` is for agents that cannot hold a long turn open. Run it as a background command only after confirming that your host can resume the task on completion or output matching `MS-WATCH (ATTENTION|LANDED)`. The process monitors the stack; it does not itself resume a Codex, Claude Code, or Cursor conversation. Without a notification mechanism, keep using bounded `stack_wait` calls or explicitly report that automatic follow-up is unavailable. While it waits it spends no model tokens and talks only to the Mergestorm API, not GitHub.
 
 - It calls `stack wait` in slices of at most 300s and carries the cursor (`enrolled_head_sha`, `after_finished_at`, `bounce_id`) from one slice to the next.
 - It prints nothing while the stack is `waiting` or `in_progress`, including while Cyclone or Vortex holds the blocked PR (`busy[]`, `actAfter: "agents_idle"`).
 - On attention it prints `MS-WATCH ATTENTION pr=<n> head=<sha> blocker="<blocker>" repair=<kind>` and exits 3.
-- When the watch is done it prints `MS-WATCH LANDED stack=<id> reason=<reason>` and exits 0. Only `reason=landed` is a landed stack; `closed`, `archived` and `not_found` end the watch without a land.
+- A confirmed landing prints `MS-WATCH LANDED stack=<id> reason=landed` and exits 0. `closed`, `archived` and `not_found` end the watch with `MS-WATCH ATTENTION stack=<id> reason=<reason>` and exit 3. A missing stack does not prove a landing; verify each PR before reporting it merged.
 - A failed read is retried once. If the retry fails too, it prints `MS-WATCH ATTENTION failed stack=<id> error="<message>"` and exits 3. A rate limit is waited out.
 - `--head <sha>` enrolls the SHA you just pushed. After fixing a blocker, restart the watcher with it.
 - `--ignore <text>` keeps it silent on the first attention whose blocker contains that text (case-insensitive), until the blocker, its PR or its head changes. Use it for a blocker a human has taken over. Repeat the flag for more than one.
@@ -140,7 +140,7 @@ Use `mergestorm dismiss` when a Vortex finding is wrong and you have checked it 
 
 If the parent branch is already a layer of a **registered** (submitted) stack, `create` and `submit` refuse unless you pass **`--extend`**. That blocks accidentally gluing an unrelated PR onto an open unit. Growing a registered stack on purpose: `mg stack create --onto <tip> --extend` → commit → `mg stack submit --extend`.
 
-`stack submit` walks the **active** local stack: `git push -u origin` each layer, opens a PR with `gh` (`--base` = parent or trunk; adopt then moves the bottom of a 2+ PR stack onto `mg-stack-<n>` — leave it there; skips heads that already have an open PR; body from the tip commit — Summary + Test plan, preserving Fixes/Closes/Resolves), registers the stack with `POST /api/v1/stacks/adopt` internally (Mergestorm API key), then drops that local stack entry so the next create onto trunk is clean. Push is always your local `git` credentials. PRs open as you when `gh` is installed and `gh api user` succeeds; otherwise `stack submit` asks the Mergestorm API (`POST /api/v1/stacks/pulls`) to open them as the Mergestorm infrastructure App on your behalf, after checking your GitHub account has write access, and assigns you. That App is Mergestorm Surge, or Cyclone on accounts not yet moved to Surge; stacks, the merge queue and Auto land run through it, and Cyclone is the auto-patch App. Without either, submit stops before pushing and prints the server's message, which names the App to install and links its install page. `mg settings` prints a `Stacks, merge queue, Auto land` line when the server reports whether that App is ready.
+`stack submit` walks the **active** local stack: `git push -u origin` each layer, opens a PR with `gh` (`--base` = parent or trunk; adopt then moves the bottom of a 2+ PR stack onto `mg-stack-<n>` — leave it there; skips heads that already have an open PR; body from the tip commit — Summary + Test plan, preserving Fixes/Closes/Resolves), registers the stack with `POST /api/v1/stacks/adopt` internally (Mergestorm API key), then drops that local stack entry so the next create onto trunk is clean. Push is always your local `git` credentials. PRs open as you when `gh` is installed and `gh api user` succeeds; otherwise `stack submit` asks the Mergestorm API (`POST /api/v1/stacks/pulls`) to open them as the Mergestorm Surge App on your behalf, after checking your GitHub account has write access, and assigns you. Stacks, the merge queue and Auto land run through Surge, and Cyclone is the auto-patch App. Without Surge, submit stops before pushing and prints the server's message, which names the App to install and links its install page. `mg settings` prints a `Stacks, merge queue, Auto land` line when the server reports whether that App is ready.
 
 Legacy repo-local `.mergestorm/stack.json` state migrates automatically on the next stack command. If local authoring state is stale or malformed, use `mg stack reset --force`; this clears only pre-submit CLI state and never deletes branches, PRs, or registered stacks.
 

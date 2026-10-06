@@ -91,10 +91,13 @@ export async function runStackWatch(
   const ignoredKeys = new Map<string, string>();
   let reportedKey: string | null = null;
 
-  const landed = (envelope: StackWatchEnvelope): StackWatchLoopResult => {
-    emit(stackWatchLandedLine(envelope), envelope, "landed");
+  const finished = (envelope: StackWatchEnvelope): StackWatchLoopResult => {
+    const landed = envelope.watch.reason === "landed";
+    const outcome = landed ? "landed" : "attention";
+    emit(landed ? stackWatchLandedLine(envelope)
+      : `${STACK_WATCH_MARKER} ATTENTION stack=${envelope.stackId} reason=${envelope.watch.reason}`, envelope, outcome);
     if (!opts.json) write(envelope.watch.message);
-    return { outcome: "landed", exitCode: STACK_WATCH_EXIT.landed, envelope };
+    return { outcome, exitCode: landed ? STACK_WATCH_EXIT.landed : STACK_WATCH_EXIT.attention, envelope };
   };
   const failed = async (message: string, envelope: StackWatchEnvelope | null): Promise<StackWatchLoopResult | null> => {
     failures += 1;
@@ -122,7 +125,7 @@ export async function runStackWatch(
           failures = 0;
           continue;
         }
-        if (err instanceof StackWatchError && err.lastEnvelope.watch.done) return landed(err.lastEnvelope);
+        if (err instanceof StackWatchError && err.lastEnvelope.watch.done) return finished(err.lastEnvelope);
         if (err instanceof StackWatchError && err.lastEnvelope.status === "rate_limited") {
           await pause(err.retryAfterSeconds !== undefined ? Math.max(1_000, err.retryAfterSeconds * 1000) : STACK_WATCH_RATE_LIMIT_WAIT_MS);
           continue;
@@ -134,7 +137,7 @@ export async function runStackWatch(
       }
       failures = 0;
       cursor = envelope.cursor;
-      if (envelope.watch.done) return landed(envelope);
+      if (envelope.watch.done) return finished(envelope);
       if (envelope.status === "attention") {
         const key = stackWatchAttentionKey(envelope);
         const blocker = (envelope.blocker ?? "").toLowerCase();

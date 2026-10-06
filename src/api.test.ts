@@ -498,7 +498,7 @@ test("openStackPull maps cyclone_not_installed to the actionable sentence with t
   mockFetch(400, {
     error: "cyclone_not_installed",
     message:
-      "Opening PRs needs either the GitHub CLI (gh auth login) or Cyclone installed on acme/widgets " +
+      "Opening PRs needs either the GitHub CLI (gh auth login) or Mergestorm Surge installed on acme/widgets " +
       "(https://github.com/apps/mergestorm-cyclone-staging/installations/new).",
   });
   await assert.rejects(
@@ -507,7 +507,7 @@ test("openStackPull maps cyclone_not_installed to the actionable sentence with t
       err instanceof CommandError &&
       err.code === "cyclone_not_installed" &&
       err.message ===
-        "Opening PRs needs either the GitHub CLI (gh auth login) or Cyclone installed on acme/widgets " +
+        "Opening PRs needs either the GitHub CLI (gh auth login) or Mergestorm Surge installed on acme/widgets " +
           "(https://github.com/apps/mergestorm-cyclone-staging/installations/new).",
   );
 });
@@ -520,7 +520,7 @@ test("findStackPull falls back to the canonical install link on a transport not-
       err instanceof CommandError &&
       err.code === "cyclone_not_installed" &&
       err.message.endsWith(
-        "Cyclone installed on acme/widgets (https://github.com/apps/mergestorm-cyclone/installations/new).",
+        "Mergestorm Surge installed on acme/widgets (https://github.com/apps/mergestorm-surge/installations/new).",
       ),
   );
 });
@@ -581,8 +581,8 @@ test("openStackPull keeps today's Cyclone sentence for a refusal without a Surge
         err.code === "cyclone_not_installed" &&
         err.reason === undefined &&
         err.message ===
-          "Opening PRs needs either the GitHub CLI (gh auth login) or Cyclone installed on acme/widgets " +
-            "(https://github.com/apps/mergestorm-cyclone/installations/new).",
+          "Opening PRs needs either the GitHub CLI (gh auth login) or Mergestorm Surge installed on acme/widgets " +
+            "(https://github.com/apps/mergestorm-surge/installations/new).",
     );
   }
 });

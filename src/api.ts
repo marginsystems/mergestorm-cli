@@ -820,18 +820,18 @@ export async function ensureUpperPark(
   };
 }
 
-export const CYCLONE_INSTALL_URL = "https://github.com/apps/mergestorm-cyclone/installations/new";
+export const SURGE_INSTALL_URL = "https://github.com/apps/mergestorm-surge/installations/new";
 
-export function cycloneNotInstalledMessage(owner: string, repo: string, installUrl = CYCLONE_INSTALL_URL): string {
+export function surgeNotInstalledMessage(owner: string, repo: string, installUrl = SURGE_INSTALL_URL): string {
   return (
-    `Opening PRs needs either the GitHub CLI (gh auth login) or Cyclone installed on ` +
+    `Opening PRs needs either the GitHub CLI (gh auth login) or Mergestorm Surge installed on ` +
     `${owner}/${repo} (${installUrl}).`
   );
 }
 
 function installUrlFrom(message: unknown): string {
-  if (typeof message !== "string") return CYCLONE_INSTALL_URL;
-  return message.match(GITHUB_APP_INSTALL_URL)?.[0] ?? CYCLONE_INSTALL_URL;
+  if (typeof message !== "string") return SURGE_INSTALL_URL;
+  return message.match(GITHUB_APP_INSTALL_URL)?.[0] ?? SURGE_INSTALL_URL;
 }
 
 function stackPullFailure(
@@ -853,7 +853,7 @@ function stackPullFailure(
     /not installed|installation[^\n]*not found/i.test(text)
   ) {
     return new CommandError(
-      cycloneNotInstalledMessage(owner, repo, installUrlFrom(rejection.message)),
+      surgeNotInstalledMessage(owner, repo, installUrlFrom(rejection.message)),
       1,
       "cyclone_not_installed",
     );

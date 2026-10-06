@@ -779,8 +779,8 @@ test("cmdStackSubmit opens a 3-layer stack onto the park through the API", async
 
 test("cmdStackSubmit stops before pushing when Cyclone is not installed and gh is not ready", async () => {
   const sentence =
-    "Opening PRs needs either the GitHub CLI (gh auth login) or Cyclone installed on acme/widgets " +
-    "(https://github.com/apps/mergestorm-cyclone/installations/new).";
+    "Opening PRs needs either the GitHub CLI (gh auth login) or Mergestorm Surge installed on acme/widgets " +
+    "(https://github.com/apps/mergestorm-surge/installations/new).";
   const { h } = apiOpenerHarness({
     findStackPull: async () => {
       throw new CommandError(sentence, 1, "cyclone_not_installed");
