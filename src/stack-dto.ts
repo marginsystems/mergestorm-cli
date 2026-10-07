@@ -178,7 +178,7 @@ function agentShaMayBeHead(sha: string | null | undefined, head: string | null |
 }
 
 export function deriveStackAgentsBusy(
-  layer: Pick<StackLayerDto, "headSha" | "vortexStatus" | "cycloneStatus" | "agentRuns" | "vortexReview" | "cycloneConflictPendingSince">,
+  layer: Pick<StackLayerDto, "headSha" | "vortexStatus" | "cycloneStatus" | "agentRuns" | "vortexReview" | "cycloneConflictPendingSince" | "cycloneCiPendingSince">,
   opts: { cycloneClaimed?: boolean; nowMs?: number } = {},
 ): StackAgentsBusy {
   const headSha = layer.headSha?.trim() || null;
@@ -196,12 +196,15 @@ export function deriveStackAgentsBusy(
     vortexRuns.some((run) => run.status === "reviewing") ||
     freshQueued ||
     (layer.agentRuns === undefined && review === undefined && layer.vortexStatus === "reviewing");
-  const pendingSince = Date.parse(layer.cycloneConflictPendingSince ?? "");
-  const conflictPending = Number.isFinite(pendingSince) && nowMs - pendingSince <= AUTO_RESOLVE_ENQUEUE_GRACE_MS;
+  const withinGrace = (since: string | null | undefined) => {
+    const sinceMs = Date.parse(since ?? "");
+    return Number.isFinite(sinceMs) && nowMs - sinceMs <= AUTO_RESOLVE_ENQUEUE_GRACE_MS;
+  };
   const cyclone = opts.cycloneClaimed === true || layer.cycloneStatus === "patching" ||
     runs.some((run) => run.agent === "cyclone" && run.status === "patching") ||
     runs.some((run) => run.agent === "cyclone" && agentShaMayBeHead(run.sha, headSha) && queuedFresh(run)) ||
-    conflictPending;
+    withinGrace(layer.cycloneConflictPendingSince) ||
+    withinGrace(layer.cycloneCiPendingSince);
   return { vortex, cyclone, headSha };
 }
 
@@ -305,6 +308,8 @@ export type StackLayerDto = {
   cycloneHandoff?: StackCycloneHandoff | null;
   cycloneConflictHandoff?: StackCycloneHandoff | null;
   cycloneConflictPendingSince?: string | null;
+  cycloneCiHandoff?: StackCycloneHandoff | null;
+  cycloneCiPendingSince?: string | null;
   conflictDetail: string | null;
   restackError?: RestackError | null;
   lastRestackedSha: string | null;
@@ -405,6 +410,8 @@ export type CyclonePatchOffReason = "stack_auto_patch_off" | "account_auto_patch
 
 export type CycloneConflictOffReason = "stack_auto_resolve_off" | "account_auto_resolve_off" | "cyclone_not_connected";
 
+export type CycloneCiOffReason = "stack_auto_fix_ci_off" | "account_auto_fix_ci_off" | "cyclone_not_connected";
+
 export type StackDto = {
   id: string;
   owner: string;
@@ -481,6 +488,7 @@ export type StackDto = {
   cycloneOwnerMatch?: CycloneOwnerMatch;
   cyclonePatchOff?: CyclonePatchOffReason;
   cycloneConflictOff?: CycloneConflictOffReason;
+  cycloneCiOff?: CycloneCiOffReason;
   infrastructureInstallUserId?: string | null;
   infrastructureOwnerMatch?: CycloneOwnerMatch;
   layers: StackLayerDto[];

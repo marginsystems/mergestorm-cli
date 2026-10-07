@@ -9,7 +9,7 @@ Use only these shipped Mergestorm MCP tools: `stack_wait`, `stack_status`, `queu
 
 ## Who fixes what
 
-Cyclone, with auto-patch on, patches only Vortex review findings: Core and seam review findings on any layer, the land PR included. It does not fix merge conflicts, restack conflicts, failing CI, or any other landing blocker by itself. Those are yours, whatever the auto-patch setting. With auto-resolve conflicts on for the stack, Cyclone resolves a layer conflict itself (never the land PR's conflict with main): while `busy[]` shows Cyclone, wait, and fix the conflict only after its handoff, when the watch returns `attention`. Do not turn auto-patch off to fix them; it changes nothing for them.
+Cyclone, with auto-patch on, patches only Vortex review findings: Core and seam review findings on any layer, the land PR included. It does not fix merge conflicts, restack conflicts, failing CI, or any other landing blocker by itself. Those are yours, whatever the auto-patch setting. With auto-resolve conflicts on for the stack, Cyclone resolves a layer conflict itself (never the land PR's conflict with main): while `busy[]` shows Cyclone, wait, and fix the conflict only after its handoff, when the watch returns `attention`. With auto-fix CI on for the stack, Cyclone fixes a settled red check on a layer itself (never the land PR), or asks Surge for one re-run of a flaky one: while `busy[]` shows Cyclone, wait, and fix the failure only after its handoff, when the watch returns `attention`. Do not turn auto-patch off to fix them; it changes nothing for them.
 
 ## Not done until landed
 

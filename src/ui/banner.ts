@@ -183,6 +183,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.44": [
     "Cyclone can auto-resolve stack conflicts",
   ],
+  "0.3.45": [
+    "Cyclone can auto-fix red stack CI",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

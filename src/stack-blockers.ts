@@ -90,6 +90,7 @@ export type StackRepairHint =
     branch: string;
     failingCheck: string | null;
     steps: string;
+    note?: string;
   }
   | {
     kind: "vortex_findings";
@@ -308,6 +309,19 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   auto_resolve_daily_cap: "Cyclone already resolved conflicts on this PR twice today, its daily cap",
   stack_auto_resolve_off: "auto-resolve conflicts is off for this stack",
   account_auto_resolve_off: "auto-resolve conflicts is off for the account and this stack does not turn it on",
+  ci_fix_did_not_hold: "CI still fails on Cyclone's own CI fix",
+  auto_fix_ci_daily_cap: "Cyclone already fixed CI on this PR twice today, its daily cap",
+  ci_billing_block: "GitHub Actions is blocked by billing, so no code change turns CI green",
+  ci_missing_secrets: "the failing job needs secrets its run does not have",
+  ci_red_on_base: "the same check also fails on the base branch",
+  ci_rerun_exhausted: "Cyclone already had Surge re-run this check once at this head",
+  ci_rerun_unavailable: "the failure looked flaky and Surge could not re-run it",
+  ci_unverified: "Cyclone could not confirm a fix locally, so it pushed nothing",
+  ci_unreadable: "Cyclone could not read the failing checks",
+  ci_needs_actions_read: "Cyclone's GitHub App cannot read the Actions logs on this repo",
+  ci_unresolved: "Cyclone's CI fix failed",
+  stack_auto_fix_ci_off: "auto-fix CI is off for this stack",
+  account_auto_fix_ci_off: "auto-fix CI is off for the account and this stack does not turn it on",
 };
 
 function cycloneHandoffWords(reason: string): string {
@@ -331,6 +345,23 @@ function conflictHandoffNote(stack: StackDto, layer: StackLayerDto): string | nu
   }
   if (stack.cycloneConflictOff) {
     return `Cyclone will not resolve this conflict by itself: ${cycloneHandoffWords(stack.cycloneConflictOff)}.`;
+  }
+  return null;
+}
+
+export function autoFixCiActive(stack: StackDto, layer: StackLayerDto): boolean {
+  return !stack.cycloneCiOff && !isLandPrLayer(stack, layer) &&
+    !sameHead(layer.cycloneCiHandoff?.headSha, layer.headSha);
+}
+
+function ciHandoffNote(stack: StackDto, layer: StackLayerDto): string | null {
+  if (isLandPrLayer(stack, layer)) return null;
+  const handoff = layer.cycloneCiHandoff;
+  if (handoff && sameHead(handoff.headSha, layer.headSha)) {
+    return `Cyclone tried to fix this failing CI at ${layer.headSha ?? handoff.headSha} and left it for a person (${cycloneHandoffWords(handoff.reason)}), so it will not try this head again.`;
+  }
+  if (stack.cycloneCiOff) {
+    return `Cyclone will not fix this failing CI by itself: ${cycloneHandoffWords(stack.cycloneCiOff)}.`;
   }
   return null;
 }
@@ -1013,6 +1044,7 @@ export function stackRepair(
   }
   if (reason === "ci_failed" || attention.bounceKind === "ci_failure") {
     const failingCheck = bounce?.bounceDetail?.failingCheck?.trim() || layer.checks?.failingName?.trim() || null;
+    const note = ciHandoffNote(stack, layer);
     return {
       kind: "ci_failure",
       prNumber: layer.prNumber,
@@ -1020,6 +1052,7 @@ export function stackRepair(
       branch: layer.branch,
       failingCheck,
       steps: `Read the failing ${failingCheck ? `check ${failingCheck}` : "checks"} on ${layer.branch} (gh run list --branch ${layer.branch}, then gh run view <run-id> --log-failed), fix it on ${layer.branch} with the smallest patch, run that check locally, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push. Do not retarget the PR base.`,
+      ...(note ? { note } : {}),
     };
   }
   return null;

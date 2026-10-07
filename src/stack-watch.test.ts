@@ -7,7 +7,7 @@ import {
   type PollStackWatchOptions, type StackWatchEnvelope,
 } from "./stack-watch.js";
 import {
-  agentsCannotClear, autoResolveActive, conflictLiveParent, conflictRepairSteps, landGateIsPending, mergeQueueWait,
+  agentsCannotClear, autoFixCiActive, autoResolveActive, conflictLiveParent, conflictRepairSteps, landGateIsPending, mergeQueueWait,
   stackBlockers, stackBlockersSummary, type StackBlockerReason,
 } from "./stack-blockers.js";
 import { STACK_WATCH_NOT_DONE_SENTENCE, stackTerminalReason, stackWatchObligation } from "./stack-watch-obligation.js";
@@ -2351,4 +2351,71 @@ test("autoResolveActive is off for the land PR, with the toggle off, and after a
   assert.equal(agentsCannotClear("restack_conflict", autoResolveOn([plain]), plain), false);
   assert.equal(agentsCannotClear("restack_failed", autoResolveOn([plain]), plain), true);
   assert.equal(agentsCannotClear("merge_conflict", land, plain), true);
+});
+
+const autoFixCiOff = (layers: StackLayerDto[]): StackDto => ({ ...stack(layers), cycloneCiOff: "stack_auto_fix_ci_off" });
+const queuedCiJob = (minutesAgo = 1): Partial<StackLayerDto> => ({
+  agentRuns: [{ agent: "cyclone", status: "queued", sha: HEAD, startedAt: new Date(Date.now() - minutesAgo * 60_000).toISOString() }],
+});
+const ciHandoff = (reason = "ci_unverified") => ({ cycloneCiHandoff: { headSha: HEAD, reason, at: null } });
+
+test("with auto-fix CI on, red CI while Cyclone's CI job is queued or the sweep is inside the enqueue grace is in_progress", async () => {
+  for (const extra of [queuedCiJob(), { cycloneCiPendingSince: new Date(Date.now() - 30_000).toISOString() }]) {
+    const result = await heldInProgress(harness(stack([layer({ ...redCi, ...extra })])).options);
+    assert.equal(result.blocker, null, JSON.stringify(extra));
+    assert.equal(result.actAfter, null);
+    assert.deepEqual(result.busy.map((entry) => entry.agent), ["cyclone"]);
+    assert.equal(result.repair, null);
+  }
+});
+
+test("red CI whose CI enqueue grace or queued job went stale is attention again", async () => {
+  for (const extra of [{ cycloneCiPendingSince: new Date(Date.now() - 3 * 60_000).toISOString() }, queuedCiJob(16)]) {
+    const result = await pollStackWatch(cfg, "stack", harness(stack([layer({ ...redCi, ...extra })])).options);
+    assert.equal(result.status, "attention", JSON.stringify(extra));
+    assert.equal(result.repair?.kind, "ci_failure");
+  }
+});
+
+test("after Cyclone hands the CI failure off at the head, the watch returns attention with the reason in the note", async () => {
+  const result = await pollStackWatch(cfg, "stack", harness(stack([layer({ ...redCi, ...ciHandoff("ci_rerun_exhausted") })])).options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.repair?.kind, "ci_failure");
+  const repair = result.repair?.kind === "ci_failure" ? result.repair : null;
+  assert.equal(repair?.note, `Cyclone tried to fix this failing CI at ${HEAD} and left it for a person (Cyclone already had Surge re-run this check once at this head), so it will not try this head again.`);
+  const plain = stackBlockers(stack([layer(redCi)])).repair;
+  assert.equal(repair?.steps, plain?.kind === "ci_failure" ? plain.steps : "");
+});
+
+test("with auto-fix CI off, red CI is attention with a note naming why, and the steps are unchanged", async () => {
+  const result = await pollStackWatch(cfg, "stack", harness(autoFixCiOff([layer(redCi)])).options);
+  assert.equal(result.status, "attention");
+  const repair = result.repair?.kind === "ci_failure" ? result.repair : null;
+  assert.equal(repair?.note, "Cyclone will not fix this failing CI by itself: auto-fix CI is off for this stack.");
+  const plain = stackBlockers(stack([layer(redCi)])).repair;
+  assert.equal(repair?.steps, plain?.kind === "ci_failure" ? plain.steps : "");
+  assert.equal(plain?.kind === "ci_failure" ? plain.note : "", undefined);
+  const account = stackBlockers({ ...stack([layer(redCi)]), cycloneCiOff: "account_auto_fix_ci_off" }).repair;
+  assert.match(account?.kind === "ci_failure" ? account.note ?? "" : "", /auto-fix CI is off for the account and this stack does not turn it on/);
+});
+
+test("a CI handoff never changes the findings or conflict handoffs, and ci_failed stays agent-clearable", () => {
+  assert.equal(stackBlockers(stack([changesRequested(ciHandoff())])).attention, null);
+  assert.equal(stackBlockers(autoResolveOn([layer({ ...restackConflict, ...ciHandoff() })])).repair?.kind, "restack_conflict");
+  const conflictRepair = stackBlockers(autoResolveOn([layer({ ...restackConflict, ...ciHandoff() })])).repair;
+  assert.equal(conflictRepair?.kind === "restack_conflict" ? conflictRepair.note : "", undefined);
+  assert.equal(agentsCannotClear("ci_failed", stack([layer(redCi)]), layer(redCi)), false);
+  const held = stackBlockers(stack([layer({ ...redCi, ...vortexBusy, ...ciHandoff() })]));
+  assert.equal(held.attention, null);
+  assert.equal(held.held, null);
+});
+
+test("autoFixCiActive is off for the land PR, with the toggle off, and after a CI handoff at the head", () => {
+  const plain = layer();
+  assert.equal(autoFixCiActive(stack([plain]), plain), true);
+  assert.equal(autoFixCiActive(autoFixCiOff([plain]), plain), false);
+  assert.equal(autoFixCiActive(stack([plain]), layer(ciHandoff())), false);
+  assert.equal(autoFixCiActive(stack([plain]), layer({ cycloneCiHandoff: { headSha: NEXT, reason: "x", at: null } })), true);
+  assert.equal(autoFixCiActive(stack([plain]), layer(conflictHandoff())), true);
+  assert.equal(autoFixCiActive(unitStack([plain], { landPrNumber: 42 }), plain), false);
 });
