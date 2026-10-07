@@ -476,6 +476,21 @@ test("setStackPolicy surfaces the API cyclone_not_connected PATCH message", asyn
       err.message === "Connect Cyclone to enable auto-patch.");
 });
 
+test("setStackPolicy sends the auto-resolve-conflicts and auto-fix-ci overrides", async () => {
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      autoResolveConflictsOverride: true,
+      autoFixCiOverride: null,
+    });
+    return Response.json({ autoResolveConflictsOverride: true, autoFixCiOverride: null });
+  };
+  assert.deepEqual(
+    await setStackPolicy("stack-1", { autoResolveConflictsOverride: true, autoFixCiOverride: null }, cfg),
+    { autoResolveConflictsOverride: true, autoFixCiOverride: null },
+  );
+});
+
 const PULL_INPUT = {
   owner: "acme",
   repo: "widgets",

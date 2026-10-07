@@ -19,6 +19,8 @@ const SETTINGS_BODY = {
   cyclone_patch_failure_check: "failure" as const,
   auto_review_enabled: true,
   auto_patch_enabled: false,
+  auto_resolve_conflicts_enabled: false,
+  auto_fix_ci_enabled: false,
   cyclone_connected: false,
   github_connected: true,
   vortex_show_thinking_traces: true,
@@ -40,6 +42,13 @@ const SETTINGS_BODY = {
 test("parseSettingsArgs maps --auto-patch off to auto_patch_enabled: false", () => {
   const parsed = parseSettingsArgs(["--auto-patch", "off"]);
   assert.deepEqual(parsed, { json: false, patch: { auto_patch_enabled: false } });
+});
+
+test("parseSettingsArgs maps the Cyclone automation flags", () => {
+  assert.deepEqual(parseSettingsArgs(["--auto-resolve-conflicts", "on", "--auto-fix-ci=off"]), {
+    json: false,
+    patch: { auto_resolve_conflicts_enabled: true, auto_fix_ci_enabled: false },
+  });
 });
 
 test("parseSettingsArgs maps --cyclone-skip-ci off to cyclone_skip_ci_enabled: false", () => {

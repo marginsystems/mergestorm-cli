@@ -647,6 +647,8 @@ export type StackPolicyPatch = {
   autoEnqueueWhenReady?: boolean;
   autoReviewOverride?: boolean | null;
   autoPatchOverride?: boolean | null;
+  autoResolveConflictsOverride?: boolean | null;
+  autoFixCiOverride?: boolean | null;
 };
 
 /** Drop undefined keys so the wire body only carries what was requested. */
@@ -660,6 +662,12 @@ export function stackPolicyBody(policy: StackPolicyPatch | undefined): StackPoli
   }
   if (policy?.autoPatchOverride !== undefined) {
     body.autoPatchOverride = policy.autoPatchOverride;
+  }
+  if (policy?.autoResolveConflictsOverride !== undefined) {
+    body.autoResolveConflictsOverride = policy.autoResolveConflictsOverride;
+  }
+  if (policy?.autoFixCiOverride !== undefined) {
+    body.autoFixCiOverride = policy.autoFixCiOverride;
   }
   return body;
 }

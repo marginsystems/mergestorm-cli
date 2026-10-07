@@ -39,12 +39,16 @@ export type LocalStack = {
   /** Per-open override carried from `stack create` to `stack submit`; absent = account flag. */
   autoReviewOverride?: boolean;
   autoPatchOverride?: boolean;
+  autoResolveConflictsOverride?: boolean;
+  autoFixCiOverride?: boolean;
 };
 
 const LOCAL_STACK_FLAGS = [
   "autoEnqueueWhenReady",
   "autoReviewOverride",
   "autoPatchOverride",
+  "autoResolveConflictsOverride",
+  "autoFixCiOverride",
 ] as const;
 
 type LocalStackFlag = (typeof LOCAL_STACK_FLAGS)[number];
@@ -287,6 +291,8 @@ export type LocalStackPolicy = {
   autoEnqueueWhenReady?: boolean;
   autoReviewOverride?: boolean;
   autoPatchOverride?: boolean;
+  autoResolveConflictsOverride?: boolean;
+  autoFixCiOverride?: boolean;
 };
 
 export function setActivePolicy(meta: StackMeta, policy: LocalStackPolicy): StackMeta {

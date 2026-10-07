@@ -82,7 +82,8 @@ export function stackHeldLine(held: StackHeldBlocker | null | undefined): string
 export function stackRepairLine(repair: StackRepairHint | null | undefined): string[] {
   if (!repair) return [];
   const files = "files" in repair && repair.files.length ? ` (files: ${repair.files.join(", ")})` : "";
-  return [`Repair #${repair.prNumber} ${repair.kind}${files}: ${repair.steps}`];
+  const note = "note" in repair && repair.note ? ` ${repair.note}` : "";
+  return [`Repair #${repair.prNumber} ${repair.kind}${files}: ${repair.steps}${note}`];
 }
 
 export function stackWatchTextLines(watch: StackWatchObligation | null | undefined): string[] {
@@ -103,8 +104,8 @@ export function openStackWatch(stackId: string, opts: { unread?: boolean } = {})
 }
 
 const STACK_USAGE = `usage:
-  mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
-  mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--rest] [--json]
+  mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--json]
+  mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--rest] [--json]
   mergestorm stack reset --force
   mergestorm stack list [--json]
   mergestorm stack status <stack-id> [--json]
@@ -116,12 +117,13 @@ const STACK_USAGE = `usage:
     Prints one MS-WATCH ATTENTION line and exits 3 on attention or a repeated failed read; prints
     MS-WATCH LANDED and exits 0 only for a confirmed landing. Other terminal reasons exit 3 with ATTENTION. Run it as a background command.
     --json writes exactly one JSON document to stdout and sends the MS-WATCH lines to stderr.
-  mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]
-  mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--json]
+  mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--auto-resolve-conflicts on|off|default] [--auto-fix-ci on|off|default] [--json]
+  mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--json]
   mergestorm stack restack <stack-id> [--json]
   mergestorm stack land <stack-id> [--json]
 
-  --auto-review / --auto-patch pin Vortex auto-review / Cyclone auto-patch for
+  --auto-review / --auto-patch / --auto-resolve-conflicts / --auto-fix-ci pin
+  Vortex auto-review and the Cyclone automations for
   one stack in either direction. Absent, or \`default\` on stack set, follows
   the account setting.
   stack submit opens PRs with a body generated from each layer tip commit.
@@ -268,7 +270,7 @@ export function buildStackListLines(stacks: StackDto[]): string[] {
 
 /** Short per-stack policy suffixes: Auto land when on, overrides when pinned. */
 export function stackPolicyLabels(
-  s: Pick<StackDto, "autoEnqueueWhenReady" | "autoReviewOverride" | "autoPatchOverride">,
+  s: Pick<StackDto, "autoEnqueueWhenReady" | "autoReviewOverride" | "autoPatchOverride" | "autoResolveConflictsOverride" | "autoFixCiOverride">,
 ): string[] {
   const labels: string[] = [];
   if (s.autoEnqueueWhenReady) labels.push("auto-land on");
@@ -277,6 +279,12 @@ export function stackPolicyLabels(
   }
   if (typeof s.autoPatchOverride === "boolean") {
     labels.push(`auto-patch ${s.autoPatchOverride ? "on" : "off"}`);
+  }
+  if (typeof s.autoResolveConflictsOverride === "boolean") {
+    labels.push(`auto-resolve-conflicts ${s.autoResolveConflictsOverride ? "on" : "off"}`);
+  }
+  if (typeof s.autoFixCiOverride === "boolean") {
+    labels.push(`auto-fix-ci ${s.autoFixCiOverride ? "on" : "off"}`);
   }
   return labels;
 }
@@ -310,6 +318,8 @@ export type StackOpenPolicyFlags = {
   autoLand?: boolean;
   autoReview?: boolean;
   autoPatch?: boolean;
+  autoResolveConflicts?: boolean;
+  autoFixCi?: boolean;
 };
 
 const OPEN_POLICY_FLAGS: ReadonlyArray<{
@@ -319,6 +329,8 @@ const OPEN_POLICY_FLAGS: ReadonlyArray<{
   { flag: "--auto-land", key: "autoLand" },
   { flag: "--auto-review", key: "autoReview" },
   { flag: "--auto-patch", key: "autoPatch" },
+  { flag: "--auto-resolve-conflicts", key: "autoResolveConflicts" },
+  { flag: "--auto-fix-ci", key: "autoFixCi" },
 ];
 
 /**
@@ -351,6 +363,10 @@ export function openPolicyPatch(flags: StackOpenPolicyFlags): StackPolicyPatch |
     ...(typeof flags.autoLand === "boolean" ? { autoEnqueueWhenReady: flags.autoLand } : {}),
     ...(typeof flags.autoReview === "boolean" ? { autoReviewOverride: flags.autoReview } : {}),
     ...(typeof flags.autoPatch === "boolean" ? { autoPatchOverride: flags.autoPatch } : {}),
+    ...(typeof flags.autoResolveConflicts === "boolean"
+      ? { autoResolveConflictsOverride: flags.autoResolveConflicts }
+      : {}),
+    ...(typeof flags.autoFixCi === "boolean" ? { autoFixCiOverride: flags.autoFixCi } : {}),
   };
   return Object.keys(patch).length > 0 ? patch : undefined;
 }
@@ -364,6 +380,8 @@ export function parseStackCreateArgs(args: string[]): {
   autoLand?: boolean;
   autoReview?: boolean;
   autoPatch?: boolean;
+  autoResolveConflicts?: boolean;
+  autoFixCi?: boolean;
   asJson: boolean;
 } {
   let name: string | undefined;
@@ -433,6 +451,8 @@ export function parseStackCreateArgs(args: string[]): {
     autoLand: policy.autoLand,
     autoReview: policy.autoReview,
     autoPatch: policy.autoPatch,
+    autoResolveConflicts: policy.autoResolveConflicts,
+    autoFixCi: policy.autoFixCi,
     asJson,
   };
 }
@@ -443,6 +463,8 @@ export function parseStackSubmitArgs(args: string[]): {
   autoLand?: boolean;
   autoReview?: boolean;
   autoPatch?: boolean;
+  autoResolveConflicts?: boolean;
+  autoFixCi?: boolean;
   rest: boolean;
   asJson: boolean;
 } {
@@ -470,7 +492,7 @@ export function parseStackSubmitArgs(args: string[]): {
       continue;
     }
     throw new CommandError(
-      "usage: mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--rest] [--json]",
+      "usage: mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--rest] [--json]",
     );
   }
   return {
@@ -478,6 +500,8 @@ export function parseStackSubmitArgs(args: string[]): {
     autoLand: policy.autoLand,
     autoReview: policy.autoReview,
     autoPatch: policy.autoPatch,
+    autoResolveConflicts: policy.autoResolveConflicts,
+    autoFixCi: policy.autoFixCi,
     rest,
     asJson,
   };
@@ -508,6 +532,8 @@ export function parseStackAdoptArgs(args: string[]): {
   autoLand?: boolean;
   autoReview?: boolean;
   autoPatch?: boolean;
+  autoResolveConflicts?: boolean;
+  autoFixCi?: boolean;
   asJson: boolean;
 } {
   const targetArgs: string[] = [];
@@ -535,6 +561,8 @@ export function parseStackAdoptArgs(args: string[]): {
     autoLand: policy.autoLand,
     autoReview: policy.autoReview,
     autoPatch: policy.autoPatch,
+    autoResolveConflicts: policy.autoResolveConflicts,
+    autoFixCi: policy.autoFixCi,
     asJson,
   };
 }
@@ -545,17 +573,21 @@ export type StackSetArgs = {
   autoLand?: boolean;
   autoReview?: boolean | null;
   autoPatch?: boolean | null;
+  autoResolveConflicts?: boolean | null;
+  autoFixCi?: boolean | null;
   asJson: boolean;
 };
 
 export function parseStackSetArgs(args: string[]): StackSetArgs {
   const usage =
-    "usage: mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--json]";
+    "usage: mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--auto-resolve-conflicts on|off|default] [--auto-fix-ci on|off|default] [--json]";
   const verb = "stack set <stack-id>";
   let stackId: string | undefined;
   let autoLand: boolean | undefined;
   let autoReview: boolean | null | undefined;
   let autoPatch: boolean | null | undefined;
+  let autoResolveConflicts: boolean | null | undefined;
+  let autoFixCi: boolean | null | undefined;
   let asJson = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -573,13 +605,31 @@ export function parseStackSetArgs(args: string[]): StackSetArgs {
       autoPatch = parseOnOffDefault(args[++i], "--auto-patch", verb);
     } else if (arg.startsWith("--auto-patch=")) {
       autoPatch = parseOnOffDefault(arg.slice("--auto-patch=".length), "--auto-patch", verb);
+    } else if (arg === "--auto-resolve-conflicts") {
+      autoResolveConflicts = parseOnOffDefault(args[++i], "--auto-resolve-conflicts", verb);
+    } else if (arg.startsWith("--auto-resolve-conflicts=")) {
+      autoResolveConflicts = parseOnOffDefault(
+        arg.slice("--auto-resolve-conflicts=".length),
+        "--auto-resolve-conflicts",
+        verb,
+      );
+    } else if (arg === "--auto-fix-ci") {
+      autoFixCi = parseOnOffDefault(args[++i], "--auto-fix-ci", verb);
+    } else if (arg.startsWith("--auto-fix-ci=")) {
+      autoFixCi = parseOnOffDefault(arg.slice("--auto-fix-ci=".length), "--auto-fix-ci", verb);
     } else if (arg.startsWith("-") || stackId !== undefined) {
       throw new CommandError(usage);
     } else {
       stackId = arg;
     }
   }
-  if (autoLand === undefined && autoReview === undefined && autoPatch === undefined) {
+  if (
+    autoLand === undefined &&
+    autoReview === undefined &&
+    autoPatch === undefined &&
+    autoResolveConflicts === undefined &&
+    autoFixCi === undefined
+  ) {
     throw new CommandError(usage);
   }
   return {
@@ -587,6 +637,8 @@ export function parseStackSetArgs(args: string[]): StackSetArgs {
     ...(autoLand !== undefined ? { autoLand } : {}),
     ...(autoReview !== undefined ? { autoReview } : {}),
     ...(autoPatch !== undefined ? { autoPatch } : {}),
+    ...(autoResolveConflicts !== undefined ? { autoResolveConflicts } : {}),
+    ...(autoFixCi !== undefined ? { autoFixCi } : {}),
     asJson,
   };
 }
@@ -629,6 +681,8 @@ export async function cmdStackCreate(
     autoLand,
     autoReview,
     autoPatch,
+    autoResolveConflicts,
+    autoFixCi,
     asJson,
   } = parseStackCreateArgs(args);
   const cwd = deps.cwd ?? process.cwd();
@@ -741,6 +795,8 @@ export async function cmdStackCreate(
       autoEnqueueWhenReady: autoLand,
       autoReviewOverride: autoReview,
       autoPatchOverride: autoPatch,
+      autoResolveConflictsOverride: autoResolveConflicts,
+      autoFixCiOverride: autoFixCi,
     });
   } catch (err) {
     throw new CommandError(err instanceof Error ? err.message : String(err));
@@ -830,7 +886,8 @@ export async function cmdStackSubmit(
   args: string[],
   deps: StackSubmitDeps = {},
 ): Promise<void> {
-  const { extend, autoLand, autoReview, autoPatch, rest, asJson } = parseStackSubmitArgs(args);
+  const { extend, autoLand, autoReview, autoPatch, autoResolveConflicts, autoFixCi, rest, asJson } =
+    parseStackSubmitArgs(args);
   const api: GithubApi = rest ? "rest" : githubApiFromEnv(deps.env ?? process.env);
   const progress = (message: string) => {
     if (asJson) console.error(message);
@@ -962,6 +1019,8 @@ export async function cmdStackSubmit(
     autoLand: pick(autoLand, stored?.autoEnqueueWhenReady),
     autoReview: pick(autoReview, stored?.autoReviewOverride),
     autoPatch: pick(autoPatch, stored?.autoPatchOverride),
+    autoResolveConflicts: pick(autoResolveConflicts, stored?.autoResolveConflictsOverride),
+    autoFixCi: pick(autoFixCi, stored?.autoFixCiOverride),
   });
 
   const existingPrs = new Map<string, number | null>();
@@ -1405,6 +1464,12 @@ export function stackSetSummary(parsed: StackSetArgs): string[] {
   if (parsed.autoPatch !== undefined) {
     lines.push(`Auto-patch ${tri(parsed.autoPatch)}`);
   }
+  if (parsed.autoResolveConflicts !== undefined) {
+    lines.push(`Auto-resolve merge conflicts ${tri(parsed.autoResolveConflicts)}`);
+  }
+  if (parsed.autoFixCi !== undefined) {
+    lines.push(`Auto-fix failing CI ${tri(parsed.autoFixCi)}`);
+  }
   return lines;
 }
 
@@ -1425,6 +1490,10 @@ export async function cmdStackSet(
       ...(parsed.autoLand !== undefined ? { autoEnqueueWhenReady: parsed.autoLand } : {}),
       ...(parsed.autoReview !== undefined ? { autoReviewOverride: parsed.autoReview } : {}),
       ...(parsed.autoPatch !== undefined ? { autoPatchOverride: parsed.autoPatch } : {}),
+      ...(parsed.autoResolveConflicts !== undefined
+        ? { autoResolveConflictsOverride: parsed.autoResolveConflicts }
+        : {}),
+      ...(parsed.autoFixCi !== undefined ? { autoFixCiOverride: parsed.autoFixCi } : {}),
     },
     cfg,
   );
@@ -1445,15 +1514,24 @@ export async function cmdStackSet(
 }
 
 async function cmdStackAdopt(args: string[]): Promise<void> {
-  const { owner, repo, prNumber, autoLand, autoReview, autoPatch, asJson } =
-    parseStackAdoptArgs(args);
+  const {
+    owner,
+    repo,
+    prNumber,
+    autoLand,
+    autoReview,
+    autoPatch,
+    autoResolveConflicts,
+    autoFixCi,
+    asJson,
+  } = parseStackAdoptArgs(args);
   const cfg = await loadConfig();
   const body = await adoptStack(
     owner,
     repo,
     prNumber,
     cfg,
-    openPolicyPatch({ autoLand, autoReview, autoPatch }),
+    openPolicyPatch({ autoLand, autoReview, autoPatch, autoResolveConflicts, autoFixCi }),
   );
   const adoptedId = typeof body === "object" && body !== null
     ? (body as { stack?: { id?: unknown } }).stack?.id

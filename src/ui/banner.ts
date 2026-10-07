@@ -180,6 +180,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.43": [
     "watch --ignore holds a blocker as its minutes tick",
   ],
+  "0.3.44": [
+    "Cyclone can auto-resolve stack conflicts",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

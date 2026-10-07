@@ -145,6 +145,7 @@ export {
   conflictLiveParent,
   stackRepair,
   agentsCannotClear,
+  autoResolveActive,
   type StackAgentBusy,
   type StackBlocker,
   type StackBusyAgent,

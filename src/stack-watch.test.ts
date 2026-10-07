@@ -7,8 +7,8 @@ import {
   type PollStackWatchOptions, type StackWatchEnvelope,
 } from "./stack-watch.js";
 import {
-  agentsCannotClear, conflictLiveParent, conflictRepairSteps, landGateIsPending, mergeQueueWait, stackBlockers,
-  stackBlockersSummary, type StackBlockerReason,
+  agentsCannotClear, autoResolveActive, conflictLiveParent, conflictRepairSteps, landGateIsPending, mergeQueueWait,
+  stackBlockers, stackBlockersSummary, type StackBlockerReason,
 } from "./stack-blockers.js";
 import { STACK_WATCH_NOT_DONE_SENTENCE, stackTerminalReason, stackWatchObligation } from "./stack-watch-obligation.js";
 
@@ -27,7 +27,8 @@ function layer(overrides: Partial<StackLayerDto> = {}): StackLayerDto {
   };
 }
 function stack(layers = [layer()]): StackDto {
-  return { id: "stack", owner: "owner", repo: "repo", trunkBranch: "main", landTarget: "main", archivedAt: null, layers };
+  return { id: "stack", owner: "owner", repo: "repo", trunkBranch: "main", landTarget: "main", archivedAt: null,
+    cycloneConflictOff: "account_auto_resolve_off", layers };
 }
 function bounce(overrides: Partial<MergeQueueEntryDto> = {}): MergeQueueEntryDto {
   return {
@@ -1192,6 +1193,7 @@ test("restack conflict on layer 3 after layer 2 merged into mg-stack-79 repairs 
   assert.deepEqual(result.repair, {
     kind: "restack_conflict", prNumber: 2858, headSha: HEAD, branch: "feat/c", liveParent: "mg-stack-79",
     files: ["api/src/a.ts", "api/src/b.ts"], steps: conflictRepairSteps("feat/c", "mg-stack-79"),
+    note: "Cyclone will not resolve this conflict by itself: auto-resolve conflicts is off for the account and this stack does not turn it on.",
   });
   assert.match(result.repair!.kind === "restack_conflict" ? result.repair!.steps : "", /git merge origin\/mg-stack-79/);
   assert.equal(result.watch.done, false);
@@ -2259,4 +2261,94 @@ test("attention, held and issues carry only the published blocker fields", () =>
   const held = stackBlockers(stack([layer({ ...dirtyMain, ...vortexBusy })]));
   assert.deepEqual(Object.keys(held.held ?? {}).sort(), ["actAfter", ...published, "waitingOn"].sort());
   for (const issue of held.issues) assert.deepEqual(Object.keys(issue).sort(), published);
+});
+
+const autoResolveOn = (layers: StackLayerDto[]): StackDto => ({ ...stack(layers), cycloneConflictOff: undefined });
+const restackConflict = {
+  state: "conflict" as const, conflictDetail: "conflict in api/src/a.ts",
+  restackError: { kind: "rebase_conflict" as const, detail: "conflict in api/src/a.ts", headSha: HEAD,
+    attemptedAt: new Date(Date.now() - 30_000).toISOString(), attempts: 1, backupRef: null },
+};
+const queuedConflictJob = (minutesAgo = 1): Partial<StackLayerDto> => ({
+  agentRuns: [{ agent: "cyclone", status: "queued", sha: HEAD, startedAt: new Date(Date.now() - minutesAgo * 60_000).toISOString() }],
+});
+const conflictHandoff = (reason = "conflict_needs_person") => ({ cycloneConflictHandoff: { headSha: HEAD, reason, at: null } });
+
+test("with auto-resolve on, a layer conflict while Cyclone's conflict job is queued is plain in_progress, not a held blocker", async () => {
+  for (const conflict of [restackConflict, dirtyMain]) {
+    const h = harness(autoResolveOn([layer({ ...conflict, ...queuedConflictJob() })]));
+    const result = await heldInProgress(h.options);
+    assert.equal(result.blocker, null);
+    assert.equal(result.actAfter, null);
+    assert.deepEqual(result.busy.map((entry) => entry.agent), ["cyclone"]);
+    assert.equal(result.repair, null);
+  }
+});
+
+test("with auto-resolve on, a conflict waiting for the sweep inside the enqueue grace is in_progress", async () => {
+  const h = harness(autoResolveOn([layer({ ...dirtyMain, cycloneConflictPendingSince: new Date(Date.now() - 30_000).toISOString() })]));
+  const result = await heldInProgress(h.options);
+  assert.equal(result.blocker, null);
+  assert.deepEqual(result.busy.map((entry) => entry.agent), ["cyclone"]);
+});
+
+test("a conflict whose enqueue grace or queued job went stale is attention again", async () => {
+  for (const extra of [
+    { cycloneConflictPendingSince: new Date(Date.now() - 3 * 60_000).toISOString() },
+    queuedConflictJob(16),
+  ]) {
+    const h = harness(autoResolveOn([layer({ ...dirtyMain, ...extra })]));
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention", JSON.stringify(extra));
+    assert.equal(result.blocker, "Merge conflicts vs main");
+    assert.equal(result.repair?.kind, "merge_conflict");
+  }
+});
+
+test("after Cyclone hands the conflict off at the head, the watch returns attention with the reason in the repair", async () => {
+  const h = harness(autoResolveOn([layer({ ...restackConflict, ...conflictHandoff("auto_resolve_daily_cap") })]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Conflict");
+  assert.equal(result.repair?.kind, "restack_conflict");
+  assert.match(result.repair?.kind === "restack_conflict" ? result.repair.note ?? "" : "", /left it for a person \(Cyclone already resolved conflicts on this PR twice today, its daily cap\)/);
+});
+
+test("a conflict handed off at the head stays named in the hold while Vortex is busy", async () => {
+  const h = harness(autoResolveOn([layer({ ...dirtyMain, ...vortexBusy, ...conflictHandoff() })]));
+  const result = await heldInProgress(h.options);
+  assert.equal(result.blocker, "Merge conflicts vs main");
+  assert.equal(result.actAfter, "agents_idle");
+  assert.match(result.repair?.kind === "merge_conflict" ? result.repair.note ?? "" : "", /Cyclone could not resolve the conflict and left it for a person/);
+});
+
+test("with auto-resolve off, a conflict is attention and held while an agent is busy, as before", async () => {
+  const off = (extra: Partial<StackLayerDto>) => ({ ...stack([layer({ ...dirtyMain, ...extra })]), cycloneConflictOff: "stack_auto_resolve_off" as const });
+  const attention = await pollStackWatch(cfg, "stack", harness(off({})).options);
+  assert.equal(attention.status, "attention");
+  assert.equal(attention.repair?.kind === "merge_conflict" ? attention.repair.steps : "", conflictRepairSteps("feature", "main"));
+  assert.equal(attention.repair?.kind === "merge_conflict" ? attention.repair.note : "", "Cyclone will not resolve this conflict by itself: auto-resolve conflicts is off for this stack.");
+  const held = await heldInProgress(harness(off(vortexBusy)).options);
+  assert.equal(held.actAfter, "agents_idle");
+  assert.equal(held.blocker, "Merge conflicts vs main");
+});
+
+test("a conflict handoff never marks Vortex findings as left for a person, and a findings handoff still does", () => {
+  assert.equal(stackBlockers(autoResolveOn([changesRequested(conflictHandoff())])).attention, null);
+  assert.equal(stackBlockers(autoResolveOn([changesRequested({ cycloneHandoff: { headSha: HEAD, reason: "hold", at: null } })])).attention?.blocker,
+    "Vortex findings need a person");
+});
+
+test("autoResolveActive is off for the land PR, with the toggle off, and after a handoff at the head", () => {
+  const plain = layer();
+  assert.equal(autoResolveActive(autoResolveOn([plain]), plain), true);
+  assert.equal(autoResolveActive(stack([plain]), plain), false);
+  assert.equal(autoResolveActive(autoResolveOn([plain]), layer(conflictHandoff())), false);
+  assert.equal(autoResolveActive(autoResolveOn([plain]), layer({ cycloneConflictHandoff: { headSha: NEXT, reason: "x", at: null } })), true);
+  const land = { ...unitStack([plain], { landPrNumber: 42 }), cycloneConflictOff: undefined };
+  assert.equal(autoResolveActive(land, plain), false);
+  assert.equal(agentsCannotClear("merge_conflict", autoResolveOn([plain]), plain), false);
+  assert.equal(agentsCannotClear("restack_conflict", autoResolveOn([plain]), plain), false);
+  assert.equal(agentsCannotClear("restack_failed", autoResolveOn([plain]), plain), true);
+  assert.equal(agentsCannotClear("merge_conflict", land, plain), true);
 });

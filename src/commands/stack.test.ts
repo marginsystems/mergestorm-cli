@@ -30,6 +30,7 @@ import {
   parseStackSubmitArgs,
   requireStackId,
   stackPolicyLabels,
+  stackRepairLine,
   stackSetSummary,
   type StackSubmitDeps,
   type StackCreateDeps,
@@ -201,6 +202,8 @@ test("parseStackCreateArgs parses name, onto, trunk, extend, json", () => {
     autoLand: undefined,
     autoReview: undefined,
     autoPatch: undefined,
+    autoResolveConflicts: undefined,
+    autoFixCi: undefined,
     asJson: true,
   });
   assert.deepEqual(parseStackCreateArgs(["--onto=ms/a", "--trunk", "master", "--extend"]), {
@@ -211,6 +214,8 @@ test("parseStackCreateArgs parses name, onto, trunk, extend, json", () => {
     autoLand: undefined,
     autoReview: undefined,
     autoPatch: undefined,
+    autoResolveConflicts: undefined,
+    autoFixCi: undefined,
     asJson: false,
   });
   assert.equal(parseStackCreateArgs(["--auto-land", "on"]).autoLand, true);
@@ -254,6 +259,65 @@ test("cmdStackCreate persists --auto-review / --auto-patch in the saved stack me
   assert.equal(saved[0]!.stacks[0]!.autoEnqueueWhenReady, undefined);
 });
 
+test("parseStackCreateArgs reads --auto-resolve-conflicts / --auto-fix-ci as on|off only", () => {
+  const parsed = parseStackCreateArgs(["--auto-resolve-conflicts", "on", "--auto-fix-ci=off"]);
+  assert.equal(parsed.autoResolveConflicts, true);
+  assert.equal(parsed.autoFixCi, false);
+  assert.equal(parseStackCreateArgs([]).autoFixCi, undefined);
+  assert.throws(() => parseStackCreateArgs(["--auto-fix-ci", "default"]), /--auto-fix-ci on\|off/);
+  assert.equal(parseStackSubmitArgs(["--auto-fix-ci", "on"]).autoFixCi, true);
+  assert.equal(parseStackSubmitArgs(["--auto-resolve-conflicts=off"]).autoResolveConflicts, false);
+  const adopt = parseStackAdoptArgs(["acme/widgets#12", "--auto-resolve-conflicts", "on"]);
+  assert.equal(adopt.autoResolveConflicts, true);
+  assert.equal(adopt.autoFixCi, undefined);
+});
+
+test("cmdStackCreate persists --auto-resolve-conflicts / --auto-fix-ci in the saved stack metadata", async () => {
+  const saved: StackMeta[] = [];
+  const deps: StackCreateDeps = {
+    cwd: "/tmp/fake-repo",
+    gitTopLevel: () => "/tmp/fake-repo",
+    worktreeDirty: () => false,
+    currentBranch: () => "main",
+    branchExists: (branch) => branch === "main",
+    defaultLayerBranchName: () => "feat/new",
+    createBranchFromHead: () => {},
+    deleteBranch: () => {},
+    discoverTrunk: () => "main",
+    loadStackMeta: async () => null,
+    saveStackMeta: async (meta) => {
+      saved.push(structuredClone(meta));
+    },
+    parseGithubOriginRepo: () => null,
+  };
+
+  await cmdStackCreate(["--auto-resolve-conflicts", "on", "--auto-fix-ci", "off", "--json"], deps);
+
+  assert.equal(saved[0]!.stacks[0]!.autoResolveConflictsOverride, true);
+  assert.equal(saved[0]!.stacks[0]!.autoFixCiOverride, false);
+});
+
+test("parseStackSetArgs reads auto-resolve-conflicts and auto-fix-ci tri-state", () => {
+  const stackId = "11111111-1111-4111-8111-111111111111";
+  assert.deepEqual(
+    parseStackSetArgs([stackId, "--auto-resolve-conflicts", "on", "--auto-fix-ci=default"]),
+    { stackId, autoResolveConflicts: true, autoFixCi: null, asJson: false },
+  );
+  assert.throws(() => parseStackSetArgs([stackId, "--auto-fix-ci", "maybe"]), /on\|off\|default/);
+  assert.deepEqual(
+    stackSetSummary({ stackId, autoResolveConflicts: true, autoFixCi: null, asJson: false }),
+    ["Auto-resolve merge conflicts on", "Auto-fix failing CI default (account setting)"],
+  );
+  assert.deepEqual(
+    openPolicyPatch({ autoResolveConflicts: true, autoFixCi: false }),
+    { autoResolveConflictsOverride: true, autoFixCiOverride: false },
+  );
+  assert.deepEqual(
+    stackPolicyLabels({ autoResolveConflictsOverride: true, autoFixCiOverride: false }),
+    ["auto-resolve-conflicts on", "auto-fix-ci off"],
+  );
+});
+
 test("parseStackCreateArgs rejects unknown flags", () => {
   assert.throws(() => parseStackCreateArgs(["--nope"]), CommandError);
 });
@@ -292,6 +356,8 @@ test("parseStackSubmitArgs accepts --extend and --json", () => {
     autoLand: undefined,
     autoReview: undefined,
     autoPatch: undefined,
+    autoResolveConflicts: undefined,
+    autoFixCi: undefined,
     rest: false,
     asJson: true,
   });
@@ -300,6 +366,8 @@ test("parseStackSubmitArgs accepts --extend and --json", () => {
     autoLand: undefined,
     autoReview: undefined,
     autoPatch: undefined,
+    autoResolveConflicts: undefined,
+    autoFixCi: undefined,
     rest: false,
     asJson: false,
   });
@@ -545,6 +613,8 @@ test("parseStackAdoptArgs parses Auto land without consuming the target", () => 
       autoLand: true,
       autoReview: undefined,
       autoPatch: undefined,
+      autoResolveConflicts: undefined,
+      autoFixCi: undefined,
       asJson: true,
     },
   );
@@ -565,6 +635,8 @@ test("parseStackAdoptArgs parses Auto land without consuming the target", () => 
       autoLand: undefined,
       autoReview: false,
       autoPatch: true,
+      autoResolveConflicts: undefined,
+      autoFixCi: undefined,
       asJson: false,
     },
   );
@@ -1391,7 +1463,7 @@ test("stack status prints the enriched stack as one JSON value", async () => {
 });
 
 test("stack status names a merge conflict held while Vortex reviews, to act on after the agents", async () => {
-  const stack = structuredClone(REGISTERED[0]!);
+  const stack = { ...structuredClone(REGISTERED[0]!), cycloneConflictOff: "account_auto_resolve_off" as const };
   const head = "abc1234567890";
   Object.assign(stack.layers[0]!, {
     headSha: head, mergeableHeadSha: head, mergeable: false, mergeableState: "dirty", parentBranch: "main",
@@ -1521,4 +1593,13 @@ test("stack status dispatch rejects missing ids, extra arguments and unknown fla
   for (const args of [[], ["not-a-uuid"], [REGISTERED[0]!.id, "extra"], [REGISTERED[0]!.id, "--wat"]]) {
     await assert.rejects(() => cmdStack(["status", ...args]), /usage: mergestorm stack status/);
   }
+});
+
+test("stack repair line prints a conflict note after the steps", () => {
+  const repair = {
+    kind: "merge_conflict" as const, prNumber: 7, headSha: "abc", branch: "feat/a", liveParent: "main", files: [],
+    steps: "Merge main into feat/a.", note: "Cyclone will not resolve this conflict by itself.",
+  };
+  assert.deepEqual(stackRepairLine(repair), ["Repair #7 merge_conflict: Merge main into feat/a. Cyclone will not resolve this conflict by itself."]);
+  assert.deepEqual(stackRepairLine({ ...repair, note: undefined }), ["Repair #7 merge_conflict: Merge main into feat/a."]);
 });

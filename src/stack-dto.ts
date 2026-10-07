@@ -168,6 +168,8 @@ export type StackAgentsBusy = {
 
 export const STACK_AGENT_QUEUED_STALE_MS = 15 * 60 * 1000;
 
+export const AUTO_RESOLVE_ENQUEUE_GRACE_MS = 2 * 60_000;
+
 function agentShaMayBeHead(sha: string | null | undefined, head: string | null | undefined): boolean {
   const left = sha?.trim().toLowerCase();
   const right = head?.trim().toLowerCase();
@@ -176,25 +178,30 @@ function agentShaMayBeHead(sha: string | null | undefined, head: string | null |
 }
 
 export function deriveStackAgentsBusy(
-  layer: Pick<StackLayerDto, "headSha" | "vortexStatus" | "cycloneStatus" | "agentRuns" | "vortexReview">,
+  layer: Pick<StackLayerDto, "headSha" | "vortexStatus" | "cycloneStatus" | "agentRuns" | "vortexReview" | "cycloneConflictPendingSince">,
   opts: { cycloneClaimed?: boolean; nowMs?: number } = {},
 ): StackAgentsBusy {
   const headSha = layer.headSha?.trim() || null;
   const nowMs = opts.nowMs ?? Date.now();
   const runs = (layer.agentRuns ?? []).filter((run) => !run.finishedAt);
   const vortexRuns = runs.filter((run) => run.agent === "vortex" && agentShaMayBeHead(run.sha, headSha));
-  const freshQueued = vortexRuns.some((run) => {
+  const queuedFresh = (run: StackAgentRun) => {
     const queuedAt = Date.parse(run.startedAt ?? "");
     return run.status === "queued" && Number.isFinite(queuedAt) && nowMs - queuedAt <= STACK_AGENT_QUEUED_STALE_MS;
-  });
+  };
+  const freshQueued = vortexRuns.some(queuedFresh);
   const review = layer.vortexReview;
   const reviewOnHead = !!review && agentShaMayBeHead(review.head_sha, headSha);
   const vortex = (reviewOnHead && review.status === "reviewing") ||
     vortexRuns.some((run) => run.status === "reviewing") ||
     freshQueued ||
     (layer.agentRuns === undefined && review === undefined && layer.vortexStatus === "reviewing");
+  const pendingSince = Date.parse(layer.cycloneConflictPendingSince ?? "");
+  const conflictPending = Number.isFinite(pendingSince) && nowMs - pendingSince <= AUTO_RESOLVE_ENQUEUE_GRACE_MS;
   const cyclone = opts.cycloneClaimed === true || layer.cycloneStatus === "patching" ||
-    runs.some((run) => run.agent === "cyclone" && run.status === "patching");
+    runs.some((run) => run.agent === "cyclone" && run.status === "patching") ||
+    runs.some((run) => run.agent === "cyclone" && agentShaMayBeHead(run.sha, headSha) && queuedFresh(run)) ||
+    conflictPending;
   return { vortex, cyclone, headSha };
 }
 
@@ -296,6 +303,8 @@ export type StackLayerDto = {
   vortexReview?: StackVortexReviewView;
   agentsBusy?: StackAgentsBusy | null;
   cycloneHandoff?: StackCycloneHandoff | null;
+  cycloneConflictHandoff?: StackCycloneHandoff | null;
+  cycloneConflictPendingSince?: string | null;
   conflictDetail: string | null;
   restackError?: RestackError | null;
   lastRestackedSha: string | null;
@@ -394,6 +403,8 @@ export type CycloneOwnerMatch = "same" | "different" | "none" | "lookup_failed";
 
 export type CyclonePatchOffReason = "stack_auto_patch_off" | "account_auto_patch_off" | "cyclone_not_connected";
 
+export type CycloneConflictOffReason = "stack_auto_resolve_off" | "account_auto_resolve_off" | "cyclone_not_connected";
+
 export type StackDto = {
   id: string;
   owner: string;
@@ -446,6 +457,8 @@ export type StackDto = {
    * account `auto_patch_enabled` flag; a boolean wins in both directions.
    */
   autoPatchOverride?: boolean | null;
+  autoResolveConflictsOverride?: boolean | null;
+  autoFixCiOverride?: boolean | null;
   /**
    * Bearer / stack-row user. Cyclone apply follows this user's auto-patch
    * policy and credits for an adopted stack (HOUSE-1), even when
@@ -467,6 +480,7 @@ export type StackDto = {
    */
   cycloneOwnerMatch?: CycloneOwnerMatch;
   cyclonePatchOff?: CyclonePatchOffReason;
+  cycloneConflictOff?: CycloneConflictOffReason;
   infrastructureInstallUserId?: string | null;
   infrastructureOwnerMatch?: CycloneOwnerMatch;
   layers: StackLayerDto[];

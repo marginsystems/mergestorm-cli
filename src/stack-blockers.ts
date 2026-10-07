@@ -81,6 +81,7 @@ export type StackRepairHint =
     liveParent: string | null;
     files: string[];
     steps: string;
+    note?: string;
   }
   | {
     kind: "ci_failure";
@@ -302,10 +303,36 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   unsupported_language: "the findings are in a language Cyclone does not patch",
   policy_owner_changed: "the stack's owner changed while the patch was queued",
   patch_job_lost: "Cyclone's patch job was lost before it finished",
+  conflict_needs_person: "Cyclone could not resolve the conflict and left it for a person",
+  conflict_unresolved: "Cyclone's conflict resolution failed",
+  auto_resolve_daily_cap: "Cyclone already resolved conflicts on this PR twice today, its daily cap",
+  stack_auto_resolve_off: "auto-resolve conflicts is off for this stack",
+  account_auto_resolve_off: "auto-resolve conflicts is off for the account and this stack does not turn it on",
 };
 
 function cycloneHandoffWords(reason: string): string {
   return CYCLONE_HANDOFF_WORDS[reason] ?? reason.replaceAll("_", " ");
+}
+
+function isLandPrLayer(stack: StackDto, layer: StackLayerDto): boolean {
+  return layer.prNumber === stack.unit?.landPrNumber || (!!stack.unit?.branch && layer.branch === stack.unit.branch);
+}
+
+export function autoResolveActive(stack: StackDto, layer: StackLayerDto): boolean {
+  return !stack.cycloneConflictOff && !isLandPrLayer(stack, layer) &&
+    !sameHead(layer.cycloneConflictHandoff?.headSha, layer.headSha);
+}
+
+function conflictHandoffNote(stack: StackDto, layer: StackLayerDto): string | null {
+  if (isLandPrLayer(stack, layer)) return null;
+  const handoff = layer.cycloneConflictHandoff;
+  if (handoff && sameHead(handoff.headSha, layer.headSha)) {
+    return `Cyclone tried to resolve this conflict at ${layer.headSha ?? handoff.headSha} and left it for a person (${cycloneHandoffWords(handoff.reason)}), so it will not try this head again.`;
+  }
+  if (stack.cycloneConflictOff) {
+    return `Cyclone will not resolve this conflict by itself: ${cycloneHandoffWords(stack.cycloneConflictOff)}.`;
+  }
+  return null;
 }
 
 function vortexFindingsLeftForPerson(stack: StackDto, layer: StackLayerDto): boolean {
@@ -789,7 +816,10 @@ const AGENTS_CANNOT_CLEAR: readonly StackBlockerReason[] = [
   "unit_abandoned",
 ];
 
-export function agentsCannotClear(reason: StackBlockerReason): boolean {
+const AUTO_RESOLVE_REASONS: readonly StackBlockerReason[] = ["restack_conflict", "merge_conflict"];
+
+export function agentsCannotClear(reason: StackBlockerReason, stack?: StackDto, layer?: StackLayerDto): boolean {
+  if (stack && layer && AUTO_RESOLVE_REASONS.includes(reason) && autoResolveActive(stack, layer)) return false;
   return AGENTS_CANNOT_CLEAR.includes(reason);
 }
 
@@ -818,6 +848,7 @@ export function stackRepair(
   const mergeConflict = reason === "merge_conflict";
   if (restackConflict || mergeConflict) {
     const liveParent = landPr ? landPrLiveParent(stack, layer) : conflictLiveParent(stack, layer);
+    const note = conflictHandoffNote(stack, layer);
     return {
       kind: restackConflict ? "restack_conflict" : "merge_conflict",
       prNumber: layer.prNumber,
@@ -826,6 +857,7 @@ export function stackRepair(
       liveParent,
       files: conflictFiles(layer, bounce),
       steps: conflictRepairSteps(layer.branch, liveParent),
+      ...(note ? { note } : {}),
     };
   }
   if (reason === "restack_failed" && layer.restackError) {
@@ -1140,7 +1172,7 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   const landGatePending: StackLandGatePending | null = landLayer && landing && landGateIsPending(landing)
     ? { prNumber: landLayer.prNumber, headSha: landLayer.headSha ?? null, reason: landing }
     : null;
-  if (busy.length && attention && classified && agentsCannotClear(classified.reason)) {
+  if (busy.length && attention && classified && agentsCannotClear(classified.reason, stack, attentionLayer)) {
     const held: StackHeldBlocker = { ...attention, actAfter: "agents_idle", waitingOn: busy.map((entry) => entry.agent) };
     return { attention: null, held, issues: [attention, ...issues], currentCandidate, bounce: undefined, busy, agents,
       repair: stackRepair(stack, classified, attentionLayer, undefined, queueWait), landGatePending, queueWait: queued };
