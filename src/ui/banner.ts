@@ -189,6 +189,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.46": [
     "Watch waits while GitHub delays a review",
   ],
+  "0.3.47": [
+    "New stack PRs are adopted on Work at submit",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

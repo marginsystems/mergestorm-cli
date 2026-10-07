@@ -15,6 +15,7 @@ import {
   listMergeQueueEntries,
   listStacks,
   openStackPull,
+  claimStackPulls,
   restackStack,
   setStackPolicy,
   type MergeQueueEntryDto,
@@ -114,8 +115,9 @@ const STACK_USAGE = `usage:
     (exit 5 on timeout), so do not merge the streams (2>&1) before parsing stdout.
   mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--json]
     Loops stack wait with the cursor and stays silent while the stack is waiting or in progress.
-    Prints one MS-WATCH ATTENTION line and exits 3 on attention or a repeated failed read; prints
-    MS-WATCH LANDED and exits 0 only for a confirmed landing. Other terminal reasons exit 3 with ATTENTION. Run it as a background command.
+    Prints one MS-WATCH ATTENTION line and exits 3 on attention or on reads that keep failing (a permanent
+    error twice, or 15 minutes of timeouts and 5xx, which it retries with backoff); prints MS-WATCH LANDED
+    and exits 0 only for a confirmed landing, including a stack Mergestorm deleted after its queue entry landed. Other terminal reasons exit 3 with ATTENTION. Run it as a background command.
     --json writes exactly one JSON document to stdout and sends the MS-WATCH lines to stderr.
   mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--auto-resolve-conflicts on|off|default] [--auto-fix-ci on|off|default] [--json]
   mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--json]
@@ -875,6 +877,7 @@ export type StackSubmitDeps = {
   createPrs?: typeof createPrs;
   findStackPull?: typeof findStackPull;
   openStackPull?: typeof openStackPull;
+  claimStackPulls?: typeof claimStackPulls;
   loadConfig?: typeof loadConfig;
   listStacks?: typeof listStacks;
   adoptStack?: typeof adoptStack;
@@ -910,6 +913,7 @@ export async function cmdStackSubmit(
   const createPrsFn = deps.createPrs ?? createPrs;
   const findStackPullFn = deps.findStackPull ?? findStackPull;
   const openStackPullFn = deps.openStackPull ?? openStackPull;
+  const claimStackPullsFn = deps.claimStackPulls ?? claimStackPulls;
   const loadConfigFn = deps.loadConfig ?? loadConfig;
   const listStacksFn = deps.listStacks ?? listStacks;
   const adoptStackFn = deps.adoptStack ?? adoptStack;
@@ -1026,6 +1030,24 @@ export async function cmdStackSubmit(
   const existingPrs = new Map<string, number | null>();
   for (const plan of plans) {
     existingPrs.set(plan.branch, await opener.findOpen(plan.branch));
+  }
+
+  const newHeads = plans
+    .filter((plan) => existingPrs.get(plan.branch) == null)
+    .map((plan) => plan.branch);
+  if (newHeads.length > 0) {
+    try {
+      const config = await loadConfigFn();
+      for (let i = 0; i < newHeads.length; i += 20) {
+        await claimStackPullsFn(config, { owner, repo, heads: newHeads.slice(i, i + 20) });
+      }
+    } catch (err) {
+      progress(
+        ansi.dim(
+          `  Could not hold the new PRs off the dashboard until adopt (${err instanceof Error ? err.message : String(err)}); continuing.`,
+        ),
+      );
+    }
   }
 
   for (const layer of layers) {
@@ -1381,7 +1403,9 @@ export async function cmdStackWatch(
       ? `Stopped watching stack ${stackId}; it is not landed.`
       : result.envelope?.watch.reason === "not_found"
         ? `Stack ${stackId} was not found; landing is unconfirmed. Verify each PR before reporting it landed.`
-        : `Stack ${stackId} needs attention; it is not landed.`;
+        : result.envelope?.watch.reason === "landing_unconfirmed"
+          ? `Stack ${stackId} is gone, but landing is unconfirmed. Verify each PR before reporting it landed.`
+          : `Stack ${stackId} needs attention; it is not landed.`;
   throw new CommandError(reason, result.exitCode, result.outcome === "timeout" ? "review_timeout" : "stack_attention");
 }
 

@@ -111,7 +111,11 @@ for (const terminal of ["not_found", "closed", "archived"] as const) {
     test(`stack watch exits with attention for ${terminal} from ${throws ? "an error" : "a snapshot"}`, async () => {
       const done = envelope({ status: "failed", assessment: "unavailable" }, terminal);
       const step = throws ? new StackWatchError("Terminal stack", done) : done;
-      const { run, lines, calls, sleeps } = harness([step], { until: "landed", ignore: [terminal] });
+      const { run, lines, calls, sleeps } = harness([step], {
+        until: "landed",
+        ignore: [terminal],
+        readLanded: async () => null,
+      });
       const result = await run;
       assert.equal(result.outcome, "attention");
       assert.equal(result.exitCode, STACK_WATCH_EXIT.attention);
@@ -140,15 +144,90 @@ test("stack watch retries one failed read, then keeps watching silently", async 
 test("stack watch exits 3 with MS-WATCH ATTENTION failed after a failed read and a failed retry", async () => {
   const failed = envelope({ status: "failed", assessment: "unavailable" });
   const { run, lines, calls, sleeps } = harness([
-    new StackWatchError("Stack poll failed (HTTP 500)", failed),
-    new Error("socket hang up"),
+    new StackWatchError("Stack poll failed (HTTP 401)", failed),
+    new StackWatchError("Stack poll failed (HTTP 403)", failed),
   ]);
   const result = await run;
   assert.equal(result.outcome, "failed");
   assert.equal(result.exitCode, 3);
   assert.equal(calls.length, 2);
   assert.equal(sleeps.length, 1);
-  assert.deepEqual(lines, [`MS-WATCH ATTENTION failed stack=${stackId} error="socket hang up"`]);
+  assert.deepEqual(lines, [`MS-WATCH ATTENTION failed stack=${stackId} error="Stack poll failed (HTTP 403)"`]);
+});
+
+test("stack watch rides out timeouts and 5xx reads, backing off, and keeps watching", async () => {
+  const failed = envelope({ status: "failed", assessment: "unavailable" });
+  const { run, lines, sleeps } = harness([
+    new Error("Request timed out after 30s. Check network connectivity and API status."),
+    new StackWatchError("Stack poll failed (HTTP 500)", failed),
+    new Error("socket hang up"),
+    new StackWatchError("Stack poll failed (HTTP 502)", failed),
+    new Error("Request timed out after 30s. Check network connectivity and API status."),
+    envelope({}, "landed"),
+  ]);
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.deepEqual(lines.filter((line) => line.includes("failed")), []);
+  assert.deepEqual(sleeps, [15_000, 30_000, 60_000, 60_000, 60_000]);
+});
+
+test("stack watch reports a failed read once transient failures have lasted fifteen minutes", async () => {
+  const steps: Step[] = Array.from({ length: 40 }, () => new Error("Request timed out after 30s. Check network connectivity and API status."));
+  const { run, lines } = harness(steps);
+  const result = await run;
+  assert.equal(result.outcome, "failed");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /^MS-WATCH ATTENTION failed /);
+});
+
+test("stack watch confirms a landing when the stack is gone but its merge queue entry landed", async () => {
+  const { run, lines } = harness([envelope({ prNumber: 4119 }, "not_found")], {
+    readLanded: async () => ({ state: "landed", finishedAt: "2026-10-07T19:03:58Z", landedPrNumbers: [4119] }) as never,
+  });
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.equal(result.exitCode, STACK_WATCH_EXIT.landed);
+  assert.equal(lines[0], `MS-WATCH LANDED stack=${stackId} reason=landed`);
+  assert.match(lines[1]!, /merge queue landed #4119/);
+});
+
+test("stack watch confirms only a landed entry for a PR it saw, and names a failed confirmation", async () => {
+  for (const [readLanded, expectedOutcome, expectedReason] of [
+    [async () => null, "attention", "not_found"],
+    [async () => ({ state: "landed", finishedAt: "1969-12-31T23:00:00Z", landedPrNumbers: [12] }) as never, "landed", "landed"],
+    [async () => ({ state: "landed", finishedAt: "2026-10-07T19:03:58Z", landedPrNumbers: [1] }) as never, "attention", "not_found"],
+    [async () => { throw new Error("queue read failed"); }, "attention", "landing_unconfirmed"],
+  ] as const) {
+    const { run, lines } = harness([envelope({}, "not_found")], { readLanded });
+    const result = await run;
+    assert.equal(result.outcome, expectedOutcome);
+    assert.equal(
+      lines[0],
+      `MS-WATCH ${expectedOutcome === "landed" ? "LANDED" : "ATTENTION"} stack=${stackId} reason=${expectedReason}`,
+    );
+  }
+});
+
+test("stack watch confirms a landing by the enrolled head when the stack vanished within its first slice", async () => {
+  const gone = envelope({ prNumber: null, headSha: null, cursor: { stackId, enrolledHeadSha: headA } }, "not_found");
+  for (const [verifyHeadSha, expected] of [[headA, "landed"], [headB, "attention"]] as const) {
+    const { run } = harness([new StackWatchError("Stack not found or not owned by the current user", gone)], {
+      readLanded: async () => ({ state: "landed", finishedAt: "2026-10-07T19:03:58Z", landedPrNumbers: [99], verifyHeadSha }) as never,
+    });
+    assert.equal((await run).outcome, expected);
+  }
+});
+
+test("stack watch remembers a PR from an earlier slice when the stack is later gone", async () => {
+  const { run, lines } = harness([
+    new StackWatchTimeoutError(envelope({ prNumber: 77 })),
+    envelope({ prNumber: null }, "not_found"),
+  ], {
+    readLanded: async () => ({ state: "landed", finishedAt: "2026-10-07T19:03:58Z", landedPrNumbers: [77] }) as never,
+  });
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.equal(lines[0], `MS-WATCH LANDED stack=${stackId} reason=landed`);
 });
 
 test("stack watch --json writes one fallback outcome document after two failed reads", async () => {

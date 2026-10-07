@@ -157,6 +157,7 @@ export async function pollStackWatch(
         });
       } catch (err) {
         if (opts.signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
+        lastEnvelope = { ...lastEnvelope, assessment: "unavailable" };
         if (now() >= deadline && timeoutMs !== 0) throw timeout();
         if (timeoutMs !== 0 && isTransientReviewPollError(err) && transientFailures < REVIEW_POLL_MAX_TRANSIENT_RETRIES) {
           transientFailures += 1;
@@ -168,6 +169,7 @@ export async function pollStackWatch(
           seal({ ...lastEnvelope, status: "failed", assessment: "unavailable" }), { cause: err });
       }
       if (response.status === 200) return response.body;
+      lastEnvelope = { ...lastEnvelope, assessment: "unavailable" };
       const retryWaitMs = transientRetryWaitMs({
         failureCount: transientFailures + 1, retryAfterSeconds: response.retryAfterSeconds, random: opts.random,
       });

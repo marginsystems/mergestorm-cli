@@ -875,6 +875,13 @@ function stackPullFailure(
   return new CommandError(`${failLabel} (HTTP ${status}): ${detail}`);
 }
 
+export async function readLandedQueueEntry(cfg: Config, stackId: string): Promise<MergeQueueEntryDto | null> {
+  const { status, body } = await apiFetch(cfg, `/api/v1/stacks/queue?stackId=${encodeURIComponent(stackId)}&landed=1`);
+  if (status !== 200) throw new CommandError(`Failed to read the landed merge queue entry (HTTP ${status})`);
+  const landed = (body as { landed?: MergeQueueEntryDto | null } | null)?.landed;
+  return landed && landed.state === "landed" ? landed : null;
+}
+
 export async function findStackPull(
   cfg: Config,
   input: { owner: string; repo: string; head: string },
@@ -886,6 +893,22 @@ export async function findStackPull(
   }
   const n = (body as { number?: unknown } | null)?.number;
   return typeof n === "number" && n > 0 ? n : null;
+}
+
+export async function claimStackPulls(
+  cfg: Config,
+  input: { owner: string; repo: string; heads: string[] },
+): Promise<void> {
+  const { status, body } = await apiFetch(cfg, "/api/v1/stacks/pull-claims", {
+    method: "POST",
+    json: input,
+  });
+  if (status !== 200) {
+    const detail = (body as { error?: unknown; message?: unknown } | null)?.message
+      ?? (body as { error?: unknown } | null)?.error
+      ?? `HTTP ${status}`;
+    throw new CommandError(`Could not claim ${input.heads.join(", ")}: ${String(detail)}`);
+  }
 }
 
 export async function openStackPull(

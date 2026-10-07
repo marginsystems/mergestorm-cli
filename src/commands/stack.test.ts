@@ -123,6 +123,9 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
       });
     },
     loadConfig: async () => ({ apiKey: "msk_live_test", apiBase: "https://api.example.test" }),
+    claimStackPulls: async (_cfg, input) => {
+      events.push(`claim:${input.heads.join(",")}`);
+    },
     listStacks: async () => [],
     adoptStack: async (owner, repo, prNumber, cfg, policy) => {
       events.push(`adopt:${prNumber}`);
@@ -677,6 +680,29 @@ test("cmdStackSubmit happy path pushes, creates PR, adopts, clears local state",
   assert.equal(h.saved[0]!.stacks[0]!.layers.length, 0);
 });
 
+test("cmdStackSubmit claims new heads before opening their PRs so Work never paints them unadopted", async () => {
+  const h = makeSubmitHarness();
+  await cmdStackSubmit([], h.deps);
+  assert.deepEqual(h.events, ["claim:feat/layer-1", "createPrs:1", "adopt:41"]);
+});
+
+test("cmdStackSubmit claims nothing for a layer whose PR is already open", async () => {
+  const h = makeSubmitHarness({ findOpenPrNumber: () => 99 });
+  await cmdStackSubmit([], h.deps);
+  assert.equal(h.events.some((event) => event.startsWith("claim:")), false);
+});
+
+test("cmdStackSubmit still opens and adopts when the claim fails", async () => {
+  const h = makeSubmitHarness({
+    claimStackPulls: async () => {
+      throw new CommandError("Could not claim feat/layer-1: HTTP 503");
+    },
+  });
+  await cmdStackSubmit([], h.deps);
+  assert.equal(h.createPrCalls, 1);
+  assert.equal(h.adoptCalls, 1);
+});
+
 test("cmdStackSubmit carries create-time Auto land metadata into a new stack", async () => {
   const meta: StackMeta = {
     ...structuredClone(SAMPLE_META),
@@ -1209,6 +1235,7 @@ test("cmdStackSubmit opens a fresh 7-layer stack in two GraphQL creates around t
     "mg-park-1-g1",
   ]);
   assert.deepEqual(h.events, [
+    "claim:feat/l1,feat/l2,feat/l3,feat/l4,feat/l5,feat/l6,feat/l7",
     "createPrs:2",
     "adopt:101",
     "ensureUpperPark",
@@ -1306,7 +1333,13 @@ test("cmdStackSubmit fails the upper wave on a GraphQL error after the first ado
     ensureUpperPark: async () => ({ freezeBranch: "mg-park-1-g1", created: true }),
   });
   await assert.rejects(() => cmdStackSubmit([], h.deps), /Head sha can't be blank/);
-  assert.deepEqual(h.events, ["createPrs:2", "adopt:101", "ensureUpperPark", "createPrs:5"]);
+  assert.deepEqual(h.events, [
+    "claim:feat/l1,feat/l2,feat/l3,feat/l4,feat/l5,feat/l6,feat/l7",
+    "createPrs:2",
+    "adopt:101",
+    "ensureUpperPark",
+    "createPrs:5",
+  ]);
   assert.equal(h.saved.length, 0);
 });
 

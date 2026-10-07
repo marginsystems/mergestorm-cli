@@ -11,7 +11,14 @@ export function stackWatchBackgroundCommand(stackId: string): string {
 
 export type StackWatchDoneReason = "landed" | "closed" | "archived" | "not_found";
 
-export type StackWatchReason = StackWatchDoneReason | "open" | "attention" | "unread" | "rate_limited" | "failed";
+export type StackWatchReason =
+  | StackWatchDoneReason
+  | "open"
+  | "attention"
+  | "unread"
+  | "rate_limited"
+  | "failed"
+  | "landing_unconfirmed";
 
 export type StackWatchNextArgs = {
   stack_id: string;
