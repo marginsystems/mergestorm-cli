@@ -401,7 +401,8 @@ const VORTEX_SKIP_BLOCKERS: Readonly<Record<string, string>> = {
 
 export function vortexRetryScheduled(layer: StackLayerDto): boolean {
   const review = layer.vortexReview;
-  return review?.skip_reason?.trim() === "retry_scheduled" && sameHead(review.head_sha, layer.headSha);
+  const reason = review?.skip_reason?.trim();
+  return (reason === "retry_scheduled" || reason === "post_delayed") && sameHead(review?.head_sha, layer.headSha);
 }
 
 function vortexIdleSkipBlocker(layer: StackLayerDto): { blocker: string; skipReason: string } | null {

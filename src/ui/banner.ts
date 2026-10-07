@@ -186,6 +186,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.45": [
     "Cyclone can auto-fix red stack CI",
   ],
+  "0.3.46": [
+    "Watch waits while GitHub delays a review",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

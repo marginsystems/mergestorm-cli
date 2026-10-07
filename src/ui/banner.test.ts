@@ -178,10 +178,10 @@ test("what's new covers the shipped package version (no empty pane)", () => {
   const rows = buildBannerRows(loggedIn(cliVersion()), 120);
   const text = stripAnsi(rows.join("\n"));
   assert.match(text, new RegExp(`New in v${cliVersion().replace(/\./g, "\\.")}`));
-  assert.match(text, /Cyclone can auto-fix red stack CI/);
+  assert.match(text, /Watch waits while GitHub delays a review/);
 
   const narrowText = stripAnsi(buildBannerRows(loggedIn(cliVersion()), 80).join("\n"));
-  assert.match(narrowText, /Cyclone can auto-fix red stack CI/);
+  assert.match(narrowText, /Watch waits while GitHub delays a review/);
 });
 
 test("idle banner paints every tornado row verbatim", () => {
