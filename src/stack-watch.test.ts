@@ -7,6 +7,7 @@ import {
   type PollStackWatchOptions, type StackWatchEnvelope,
 } from "./stack-watch.js";
 import {
+  CI_DID_NOT_FINISH_BLOCKER,
   agentsCannotClear, autoFixCiActive, autoResolveActive, conflictLiveParent, conflictRepairSteps, landGateIsPending, mergeQueueWait,
   stackBlockers, stackBlockersSummary, type StackBlockerReason,
 } from "./stack-blockers.js";
@@ -2418,4 +2419,15 @@ test("autoFixCiActive is off for the land PR, with the toggle off, and after a C
   assert.equal(autoFixCiActive(stack([plain]), layer({ cycloneCiHandoff: { headSha: NEXT, reason: "x", at: null } })), true);
   assert.equal(autoFixCiActive(stack([plain]), layer(conflictHandoff())), true);
   assert.equal(autoFixCiActive(unitStack([plain], { landPrNumber: 42 }), plain), false);
+});
+
+test("pending CI that Cyclone left for a person at the head is named, with re-run steps and the hand-off note", () => {
+  const cancelled = { ciStatus: "pending" as const, ...ciHandoff("ci_rerun_exhausted") };
+  const result = stackBlockers(stack([layer(cancelled)]));
+  assert.equal(result.attention?.blocker, CI_DID_NOT_FINISH_BLOCKER);
+  const repair = result.repair?.kind === "ci_failure" ? result.repair : null;
+  assert.match(repair?.steps ?? "", /gh run rerun <run-id>/);
+  assert.match(repair?.note ?? "", /left it for a person/);
+  assert.equal(stackBlockers(stack([layer({ ciStatus: "pending" })])).attention, null);
+  assert.equal(stackBlockers(stack([layer({ ciStatus: "pending", cycloneCiHandoff: { headSha: NEXT, reason: "x", at: null } })])).attention, null);
 });

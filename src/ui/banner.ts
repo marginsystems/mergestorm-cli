@@ -192,6 +192,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.47": [
     "New stack PRs are adopted on Work at submit",
   ],
+  "0.3.48": [
+    "Watch names CI Cyclone could not finish",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

@@ -592,12 +592,28 @@ export type MergeQueueBatchState =
   | "bounced"
   | "abandoned";
 
+export type MergeQueueBatchCiCheckState = "passed" | "skipped" | "failed" | "running" | "queued";
+
+export type MergeQueueBatchCiCheckDto = {
+  name: string;
+  state: MergeQueueBatchCiCheckState;
+  startedAt: string | null;
+  completedAt: string | null;
+};
+
+export type MergeQueueBatchCiDto = {
+  sha: string;
+  observedAt: string;
+  checks: MergeQueueBatchCiCheckDto[];
+};
+
 export type MergeQueueEntryBatchDto = {
   id: string;
   position: number;
   size: number;
   state: MergeQueueBatchState;
   landedCount: number;
+  ci?: MergeQueueBatchCiDto | null;
 };
 
 export type MergeQueueAheadDto = {
