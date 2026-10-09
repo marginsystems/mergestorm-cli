@@ -875,9 +875,19 @@ function stackPullFailure(
   return new CommandError(`${failLabel} (HTTP ${status}): ${detail}`);
 }
 
-export async function readLandedQueueEntry(cfg: Config, stackId: string): Promise<MergeQueueEntryDto | null> {
-  const { status, body } = await apiFetch(cfg, `/api/v1/stacks/queue?stackId=${encodeURIComponent(stackId)}&landed=1`);
-  if (status !== 200) throw new CommandError(`Failed to read the landed merge queue entry (HTTP ${status})`);
+export class LandedQueueReadError extends CommandError {
+  constructor(public readonly status: number, public readonly retryAfterSeconds?: number) {
+    super(`Failed to read the landed merge queue entry (HTTP ${status})`);
+  }
+}
+
+export async function readLandedQueueEntry(
+  cfg: Config,
+  stackId: string,
+  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<MergeQueueEntryDto | null> {
+  const { status, body, retryAfterSeconds } = await apiFetch(cfg, `/api/v1/stacks/queue?stackId=${encodeURIComponent(stackId)}&landed=1`, opts);
+  if (status !== 200) throw new LandedQueueReadError(status, retryAfterSeconds);
   const landed = (body as { landed?: MergeQueueEntryDto | null } | null)?.landed;
   return landed && landed.state === "landed" ? landed : null;
 }

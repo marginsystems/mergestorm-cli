@@ -72,6 +72,7 @@ import { ansi } from "../ui/ansi.js";
 import { runLineTabsBrowser } from "../ui/line-tabs.js";
 import { present } from "../ui/present.js";
 import { canBrowse } from "./browse.js";
+import { isTransientReviewPollError } from "./review-client.js";
 import { openHelpBrowser } from "./help.js";
 
 export function stackHeldLine(held: StackHeldBlocker | null | undefined): string[] {
@@ -143,6 +144,18 @@ const STACK_USAGE = `usage:
 
 /** Cap the registered-stack guard's API probe so it cannot stall local authoring. */
 const STACK_GUARD_TIMEOUT_MS = 8_000;
+
+async function listRegisteredStacksRetryingOnce(
+  list: typeof listStacks,
+  cfg: Awaited<ReturnType<typeof loadConfig>>,
+): Promise<StackDto[]> {
+  try {
+    return await list(cfg, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
+  } catch (err) {
+    if (!isTransientReviewPollError(err)) throw err;
+    return list(cfg, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
+  }
+}
 
 /** A registered stack layer that would become the parent of a new layer. */
 export type RegisteredParentHit = {
@@ -760,7 +773,7 @@ export async function cmdStackCreate(
   if (origin) {
     try {
       const cfg = await loadConfigFn();
-      const registered = await listStacksFn(cfg, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
+      const registered = await listRegisteredStacksRetryingOnce(listStacksFn, cfg);
       registeredHit = assertMayParentOntoRegistered(
         parentBranch,
         registered,
@@ -978,7 +991,7 @@ export async function cmdStackSubmit(
   let registered: StackDto[] = [];
   try {
     const cfg = await loadConfigFn();
-    registered = await listStacksFn(cfg, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
+    registered = await listRegisteredStacksRetryingOnce(listStacksFn, cfg);
     for (const parent of parents) {
       if (assertMayParentOntoRegistered(parent, registered, extend, "submit", owner, repo)) {
         registeredHits += 1;

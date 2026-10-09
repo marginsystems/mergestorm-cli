@@ -47,8 +47,9 @@ mg skill install --claude --cursor --agents
    - Verify it against the current checkout. Do not treat the finding text as proven.
    - Prefer the smallest correct patch. Do not refactor around a finding.
    - Patch concrete bugs. A chat-only explanation is not a dismiss.
-   - If you skip a finding (not reproducible, policy fork, or needs a human), post a public GitHub PR comment before you stop. First line: `mergestorm-loop: dismiss`. Then one line per skipped finding (path, severity, why). That first line is the only dismiss marker Vortex reads.
-   - If you verified a finding is wrong (not merely skipped) and it blocks the PR, for example a seam finding holding `Seam findings`, record the dismissal with `review_dismiss` (CLI: `mg dismiss`):
+   - A finding a human must decide (Decision required, policy fork, needs a human) stays open. Do not dismiss it and do not post the dismiss marker for it: tell the human which finding it is and stop.
+   - A PR comment whose first line is `mergestorm-loop: dismiss` is not a note about one finding. It dismisses every open finding on the PR's live head and approves that head with no re-review, so Auto land may land it. Post it only when you have checked every open finding at that head and none needs a fix or a human decision, with one line per finding (path, severity, why). Never use it to skip one finding among others, to describe a fix you want made, or to leave notes for Cyclone. That first line is the only dismiss marker Vortex reads.
+   - If you verified a single finding is wrong or not reproducible, for example a seam finding holding `Seam findings`, dismiss that finding by id with `review_dismiss` (CLI: `mg dismiss`):
      - First call it with `preview: true`, the PR's live `head_sha` and the review id (review_id) of the Vortex review that raised the finding. It lists that review's finding ids and the seam gate and writes nothing.
      - Then call it with the `finding_ids` you checked (or `scope: "review"` when you checked every finding of that review), a `reason` that says why each is wrong, and an `evidence_url` when you have one.
      - A refusal (stale_head, review_mismatch, unknown_finding, forbidden) means nothing was written. Re-read the pass at the live head; do not retry with another review's ids.

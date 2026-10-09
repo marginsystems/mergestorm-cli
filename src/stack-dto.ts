@@ -225,6 +225,8 @@ export type StackLayerChecks = {
    * them (#1602).
    */
   namedRunsSeeded?: boolean;
+  cancelledOnly?: boolean;
+  namedRunsCompleteHeadSha?: string;
   /**
    * True when the persisted `namedRuns` carries the reserved synthetic
    * "commit status" run at a pending/failure verdict. Webhook deliveries

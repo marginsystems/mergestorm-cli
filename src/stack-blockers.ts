@@ -357,7 +357,8 @@ export function autoFixCiActive(stack: StackDto, layer: StackLayerDto): boolean 
 export const CI_DID_NOT_FINISH_BLOCKER = "CI did not finish — left for a person";
 
 export function pendingCiLeftForPerson(stack: StackDto, layer: StackLayerDto): boolean {
-  return layer.ciStatus === "pending" && !isLandPrLayer(stack, layer) &&
+  return layer.ciStatus === "pending" && layer.checks?.cancelledOnly === true &&
+    sameHead(layer.checks.namedRunsCompleteHeadSha, layer.headSha) && !isLandPrLayer(stack, layer) &&
     sameHead(layer.cycloneCiHandoff?.headSha, layer.headSha);
 }
 
@@ -508,11 +509,11 @@ function layerAttention(
       const name = layer.checks?.failingName?.trim();
       return hardBlock(`CI failed${name ? ` — ${name}` : ""}`, "ci_failed");
     }
-    if (pendingCiLeftForPerson(stack, layer)) return hardBlock(CI_DID_NOT_FINISH_BLOCKER, "ci_failed");
     if (layer.vortexStatus === "failed" && !vortexRetryScheduled(layer) &&
       (!layer.vortexReview?.head_sha || sameHead(layer.vortexReview.head_sha, layer.headSha))) {
       return hardBlock(VORTEX_REVIEW_FAILED, "vortex_failed");
     }
+    if (pendingCiLeftForPerson(stack, layer)) return hardBlock(CI_DID_NOT_FINISH_BLOCKER, "ci_failed");
     if (quotaSkippedReview(layer)) return hardBlock(VORTEX_REVIEW_OUT_OF_QUOTA, "vortex_out_of_quota");
     const vortexSkip = vortexIdleSkipBlocker(layer);
     if (vortexSkip) return hardBlock(vortexSkip.blocker, "vortex_skipped");
@@ -1061,7 +1062,7 @@ export function stackRepair(
       branch: layer.branch,
       failingCheck,
       steps: pendingCiLeftForPerson(stack, layer)
-        ? `CI on ${layer.branch} at ${layer.headSha ?? "its live head"} ended cancelled or interrupted and did not finish after Cyclone's one re-run. Find the cancelled run (gh run list --branch ${layer.branch}), read why it stopped (gh run view <run-id>), and re-run it (gh run rerun <run-id>) if it was a runner or infrastructure stop. If the job itself cancels, fix that on ${layer.branch} and push. Do not retarget the PR base.`
+        ? `CI on ${layer.branch} at ${layer.headSha ?? "its live head"} has completed cancelled checks with no checks still running after Cyclone's handoff. Find the cancelled run (gh run list --branch ${layer.branch}), read why it stopped (gh run view <run-id>), and re-run it (gh run rerun <run-id>) if it was a runner or infrastructure stop. If the job itself cancels, fix that on ${layer.branch} and push. Do not retarget the PR base.`
         : `Read the failing ${failingCheck ? `check ${failingCheck}` : "checks"} on ${layer.branch} (gh run list --branch ${layer.branch}, then gh run view <run-id> --log-failed), fix it on ${layer.branch} with the smallest patch, run that check locally, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push. Do not retarget the PR base.`,
       ...(note ? { note } : {}),
     };

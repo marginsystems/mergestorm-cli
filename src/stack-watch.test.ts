@@ -2422,7 +2422,7 @@ test("autoFixCiActive is off for the land PR, with the toggle off, and after a C
 });
 
 test("pending CI that Cyclone left for a person at the head is named, with re-run steps and the hand-off note", () => {
-  const cancelled = { ciStatus: "pending" as const, ...ciHandoff("ci_rerun_exhausted") };
+  const cancelled = { ciStatus: "pending" as const, checks: { total: 1, success: 0, pending: 1, failure: 0, failingName: null, cancelledOnly: true, namedRunsCompleteHeadSha: HEAD }, ...ciHandoff("ci_rerun_exhausted") };
   const result = stackBlockers(stack([layer(cancelled)]));
   assert.equal(result.attention?.blocker, CI_DID_NOT_FINISH_BLOCKER);
   const repair = result.repair?.kind === "ci_failure" ? result.repair : null;
@@ -2430,4 +2430,41 @@ test("pending CI that Cyclone left for a person at the head is named, with re-ru
   assert.match(repair?.note ?? "", /left it for a person/);
   assert.equal(stackBlockers(stack([layer({ ciStatus: "pending" })])).attention, null);
   assert.equal(stackBlockers(stack([layer({ ciStatus: "pending", cycloneCiHandoff: { headSha: NEXT, reason: "x", at: null } })])).attention, null);
+});
+
+for (const checks of [null, { total: 1, success: 0, pending: 1, failure: 0, failingName: null }, { total: 2, success: 0, pending: 2, failure: 0, failingName: null, cancelledOnly: false }]) {
+  test(`active or legacy pending CI with a same-head handoff keeps waiting: ${JSON.stringify(checks)}`, () => {
+    const result = stackBlockers(stack([layer({ ciStatus: "pending", checks, ...ciHandoff("ci_unverified") })]));
+    assert.equal(result.attention, null);
+    assert.equal(result.repair, null);
+  });
+}
+
+test("pending rerun with a same-head CI handoff stays waiting until the existing pending timeout", async () => {
+  const current = layer({ ciStatus: "pending", ...ciHandoff("ci_unverified") });
+  const h = harness(stack([current]));
+  const result = await timedOut(h.options);
+  assert.equal(result.repair, null);
+  assert.equal(result.blocker, null);
+});
+test("cancelled evidence from an older head cannot turn a current handoff into attention", () => {
+  const current = layer({ ciStatus: "pending", checks: { total: 1, success: 0, pending: 1, failure: 0, failingName: null,
+    cancelledOnly: true, namedRunsCompleteHeadSha: NEXT }, ...ciHandoff() });
+  assert.equal(stackBlockers(stack([current])).attention, null);
+});
+
+for (const busy of [{ ...vortexBusy }, { agentsBusy: { vortex: false, cyclone: true, headSha: HEAD } }]) {
+  test(`proven cancelled CI keeps the existing busy agent hold: ${JSON.stringify(busy)}`, () => {
+    const current = layer({ ciStatus: "pending", checks: { total: 1, success: 0, pending: 1, failure: 0, failingName: null,
+      cancelledOnly: true, namedRunsCompleteHeadSha: HEAD }, ...ciHandoff(), ...busy });
+    assert.equal(stackBlockers(stack([current])).attention, null);
+  });
+}
+
+test("a failed current Vortex review is not hidden by a proven cancelled CI handoff", () => {
+  const current = layer({ ciStatus: "pending", vortexStatus: "failed", ...ciHandoff(),
+    checks: { total: 1, success: 0, pending: 1, failure: 0, failingName: null, cancelledOnly: true, namedRunsCompleteHeadSha: HEAD } });
+  const result = stackBlockers(stack([current]));
+  assert.equal(result.attention?.blocker, "Review failed");
+  assert.equal(result.repair?.kind, "vortex_failed");
 });

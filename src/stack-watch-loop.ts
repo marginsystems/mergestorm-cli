@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Config } from "./config.js";
-import { API_TIMEOUT_PREFIX, readLandedQueueEntry } from "./api.js";
+import { API_TIMEOUT_PREFIX, DEFAULT_API_TIMEOUT_MS, LandedQueueReadError, readLandedQueueEntry } from "./api.js";
 import { isTransientReviewPollError } from "./commands/review-client.js";
 import type { MergeQueueEntryDto } from "./stack-dto.js";
 import {
@@ -24,6 +24,7 @@ const TRANSIENT_WATCH_FAILURE = /HTTP (?:408|429|5\d\d)|snapshot missing|fetch f
 
 export function isTransientWatchFailure(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
+  if (err instanceof LandedQueueReadError) return err.status === 408 || err.status === 429 || (err.status >= 500 && err.status <= 599);
   if (isTransientReviewPollError(err)) return true;
   if (err.cause !== undefined && isTransientReviewPollError(err.cause)) return true;
   return err.message.startsWith(API_TIMEOUT_PREFIX) || TRANSIENT_WATCH_FAILURE.test(err.message);
@@ -43,7 +44,7 @@ export type RunStackWatchOptions = {
   write?: (line: string) => void;
   writeMarker?: (line: string) => void;
   poll?: typeof pollStackWatch;
-  readLanded?: (cfg: Config, stackId: string) => Promise<MergeQueueEntryDto | null>;
+  readLanded?: typeof readLandedQueueEntry;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
 };
@@ -122,18 +123,49 @@ export async function runStackWatch(
 
   const confirmedLanding = async (envelope: StackWatchEnvelope): Promise<StackWatchEnvelope> => {
     if (envelope.watch.reason !== "not_found") return envelope;
+    failures = 0;
+    permanentFailures = 0;
+    transientSince = null;
+    const unconfirmed = (failureMessage: string): StackWatchEnvelope => ({
+      ...envelope,
+      watch: {
+        ...envelope.watch,
+        reason: "landing_unconfirmed",
+        message: `The stack is gone, but its landed merge queue entry could not be read: ${failureMessage}. Landing is unconfirmed. Confirm a matching landed merge queue entry or that the actual land PR merged into its land target before reporting it landed. A layer PR merged into the owned trunk does not confirm landing. The watch is done; do not report it landed.`,
+      },
+    });
     let entry: MergeQueueEntryDto | null = null;
-    try {
-      entry = await readLanded(cfg, id);
-    } catch {
-      return {
-        ...envelope,
-        watch: {
-          ...envelope.watch,
-          reason: "landing_unconfirmed",
-          message: "The stack is gone, but its landed merge queue entry could not be read. Landing is unconfirmed. Confirm each PR is merged (gh pr view <n> --json state) before reporting it landed. The watch is done; do not report it landed.",
-        },
-      };
+    while (true) {
+      if (now() >= deadline) return unconfirmed("The watch deadline was reached before landing confirmation");
+      if (opts.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+      try {
+        entry = await readLanded(cfg, id, {
+          signal: opts.signal,
+          timeoutMs: Math.min(DEFAULT_API_TIMEOUT_MS, deadline - now(),
+            transientSince === null ? STACK_WATCH_TRANSIENT_WINDOW_MS : Math.max(1, STACK_WATCH_TRANSIENT_WINDOW_MS - (now() - transientSince))),
+        });
+        if (opts.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+        break;
+      } catch (err) {
+        if (isAbort(err, opts.signal)) throw err;
+        let failureMessage = err instanceof Error ? err.message : String(err);
+        if (isTransientWatchFailure(err)) {
+          failures += 1;
+          permanentFailures = 0;
+          transientSince ??= now();
+          const remaining = STACK_WATCH_TRANSIENT_WINDOW_MS - (now() - transientSince);
+          if (remaining > 0) {
+            const retryAfterSeconds = err instanceof LandedQueueReadError ? err.retryAfterSeconds : undefined;
+            await pause(Math.min(remaining, retryAfterSeconds !== undefined
+              ? Math.max(1_000, retryAfterSeconds * 1_000)
+              : Math.min(STACK_WATCH_TRANSIENT_MAX_WAIT_MS, STACK_WATCH_FAILED_RETRY_MS * 2 ** Math.min(failures - 1, 4))));
+            if (now() < deadline && now() - transientSince < STACK_WATCH_TRANSIENT_WINDOW_MS) continue;
+            if (now() >= deadline) return unconfirmed(`The watch deadline was reached while retrying landing confirmation: ${failureMessage}`);
+          }
+          failureMessage = `Transient landing confirmation retry budget exhausted: ${failureMessage}`;
+        }
+        return unconfirmed(failureMessage);
+      }
     }
     const enrolledHead = envelope.cursor?.enrolledHeadSha ?? null;
     const ours = Boolean(entry) && (
@@ -208,12 +240,14 @@ export async function runStackWatch(
         if (result) return result;
         continue;
       }
+      cursor = envelope.cursor;
+      notePrs(envelope);
+      if (envelope.watch.done) {
+        return await finished(envelope);
+      }
       failures = 0;
       permanentFailures = 0;
       transientSince = null;
-      cursor = envelope.cursor;
-      notePrs(envelope);
-      if (envelope.watch.done) return await finished(envelope);
       if (envelope.status === "attention") {
         const key = stackWatchAttentionKey(envelope);
         const blocker = (envelope.blocker ?? "").toLowerCase();

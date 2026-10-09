@@ -13,6 +13,7 @@ import {
   type StackWatchCursor,
   type StackWatchEnvelope,
 } from "./stack-watch.js";
+import { LandedQueueReadError } from "./api.js";
 import { stackWatchObligation } from "./stack-watch-obligation.js";
 
 const stackId = "11111111-1111-4111-8111-111111111111";
@@ -417,4 +418,211 @@ test("stack watch --json writes one outcome document when aborted", async () => 
   assert.equal(result.outcome, "aborted");
   assert.deepEqual(JSON.parse(lines.join("\n")), { stackId, outcome: "aborted" });
   assert.equal(lines.length, 1);
+});
+
+for (const error of [new LandedQueueReadError(429, 75), new LandedQueueReadError(503), new TypeError("fetch failed")]) {
+  test(`landing confirmation recovers from ${error.message}`, async () => {
+    let reads = 0;
+    const { run, sleeps, calls, lines } = harness([envelope({}, "not_found")], {
+      readLanded: async () => {
+        if (++reads === 1) throw error;
+        return { state: "landed", landedPrNumbers: [12] } as never;
+      },
+    });
+    assert.equal((await run).outcome, "landed");
+    assert.equal(reads, 2);
+    assert.deepEqual(sleeps, [error instanceof LandedQueueReadError && error.status === 429 ? 75_000 : 15_000]);
+    assert.equal(calls.length, 1);
+    assert.equal(lines.filter((line) => line.startsWith("MS-WATCH")).length, 1);
+  });
+}
+
+for (const error of [new LandedQueueReadError(403), new LandedQueueReadError(404), new Error("API key invalid or revoked")]) {
+  test(`landing confirmation stops on permanent ${error.message}`, async () => {
+    let reads = 0;
+    const { run, sleeps } = harness([envelope({}, "not_found")], {
+      readLanded: async () => { reads++; throw error; },
+    });
+    const result = await run;
+    assert.equal(result.envelope?.watch.reason, "landing_unconfirmed");
+    assert.ok(result.envelope?.watch.message.includes(error.message));
+    assert.ok(result.envelope?.watch.message.includes("actual land PR merged into its land target"));
+    assert.equal(reads, 1);
+    assert.deepEqual(sleeps, []);
+  });
+}
+
+test("landing confirmation exhausts its transient budget with one terminal marker", async () => {
+  let reads = 0;
+  const { run, sleeps, lines } = harness([envelope({}, "not_found")], {
+    readLanded: async () => { reads++; throw new LandedQueueReadError(503); },
+  });
+  const result = await run;
+  assert.equal(result.envelope?.watch.reason, "landing_unconfirmed");
+  assert.ok(result.envelope?.watch.message.includes("retry budget exhausted"));
+  assert.ok(result.envelope?.watch.message.includes("HTTP 503"));
+  assert.ok(reads > 2);
+  assert.equal(sleeps.reduce((sum, ms) => sum + ms, 0), 900_000);
+  assert.equal(lines.filter((line) => line.startsWith("MS-WATCH")).length, 1);
+});
+
+test("landing confirmation preserves disappearance when the overall deadline cuts off retries", async () => {
+  let reads = 0;
+  const { run, sleeps } = harness([envelope({}, "not_found")], {
+    maxMs: 10_000,
+    readLanded: async (_cfg, _id, opts) => {
+      reads++;
+      assert.equal(opts?.timeoutMs, 9_000);
+      throw new LandedQueueReadError(429, 600);
+    },
+  });
+  const result = await run;
+  assert.equal(result.outcome, "attention");
+  assert.equal(result.envelope?.watch.reason, "landing_unconfirmed");
+  assert.ok(result.envelope?.watch.message.includes("watch deadline"));
+  assert.ok(result.envelope?.watch.message.includes("HTTP 429"));
+  assert.equal(reads, 1);
+  assert.deepEqual(sleeps, [9_000]);
+});
+
+test("landing confirmation preserves cancellation during the read", async () => {
+  const controller = new AbortController();
+  const { run, sleeps } = harness([envelope({}, "not_found")], {
+    signal: controller.signal,
+    readLanded: async (_cfg, _id, opts) => {
+      assert.equal(opts?.signal, controller.signal);
+      controller.abort();
+      throw new DOMException("aborted", "AbortError");
+    },
+  });
+  assert.equal((await run).outcome, "aborted");
+  assert.deepEqual(sleeps, []);
+});
+
+for (const terminalAsError of [false, true]) {
+  test(`landing confirmation gets a fresh bounded window after a long poll outage (${terminalAsError ? "terminal error" : "terminal response"})`, async () => {
+    const pollFailures = Array.from({ length: 15 }, () => new Error("fetch failed"));
+    const gone = envelope({}, "not_found");
+    let reads = 0;
+    const { run, sleeps, calls } = harness([...pollFailures, terminalAsError ? new StackWatchError("Stack disappeared", gone) : gone], {
+      readLanded: async (_cfg, _id, opts) => {
+        reads++;
+        assert.equal(opts?.timeoutMs, reads === 1 ? 30_000 : 1_000);
+        if (reads === 1) throw new LandedQueueReadError(503, 899);
+        return { state: "landed", landedPrNumbers: [12] } as never;
+      },
+    });
+    assert.equal((await run).outcome, "landed");
+    assert.equal(reads, 2);
+    assert.equal(calls.length, 16);
+    assert.equal(sleeps.at(-1), 899_000);
+  });
+}
+
+for (const entry of [null, { state: "landed", landedPrNumbers: [99], verifyHeadSha: headB }]) {
+  test(`recovered landing confirmation rejects ${entry ? "unrelated" : "missing"} evidence`, async () => {
+    let reads = 0;
+    const { run, lines } = harness([envelope({}, "not_found")], {
+      readLanded: async () => {
+        if (++reads === 1) throw new LandedQueueReadError(503);
+        return entry as never;
+      },
+    });
+    const result = await run;
+    assert.equal(result.outcome, "attention");
+    assert.equal(result.envelope?.watch.reason, "not_found");
+    assert.equal(reads, 2);
+    assert.ok(lines.every((line) => !line.includes("MS-WATCH LANDED")));
+  });
+}
+
+test("landing confirmation aborts during its Retry-After wait", async () => {
+  const controller = new AbortController();
+  let reads = 0;
+  const { run } = harness([envelope({}, "not_found")], {
+    signal: controller.signal,
+    readLanded: async () => { reads++; throw new LandedQueueReadError(429, 60); },
+    sleep: async (_ms, signal) => {
+      assert.equal(signal, controller.signal);
+      controller.abort();
+      throw new DOMException("aborted", "AbortError");
+    },
+  });
+  assert.equal((await run).outcome, "aborted");
+  assert.equal(reads, 1);
+});
+
+test("landing confirmation retries preserve the JSON terminal contract", async () => {
+  let reads = 0;
+  const markers: string[] = [];
+  const { run, lines } = harness([envelope({}, "not_found")], {
+    json: true,
+    writeMarker: (line) => markers.push(line),
+    readLanded: async () => {
+      if (++reads === 1) throw new LandedQueueReadError(429, 1);
+      return { state: "landed", landedPrNumbers: [12] } as never;
+    },
+  });
+  assert.equal((await run).outcome, "landed");
+  assert.equal(lines.length, 1);
+  assert.equal(JSON.parse(lines[0]).watch.reason, "landed");
+  assert.deepEqual(markers, [`MS-WATCH LANDED stack=${stackId} reason=landed`]);
+});
+
+test("landing confirmation cancellation writes one aborted JSON document", async () => {
+  const controller = new AbortController();
+  const markers: string[] = [];
+  const { run, lines } = harness([envelope({}, "not_found")], {
+    json: true,
+    signal: controller.signal,
+    writeMarker: (line) => markers.push(line),
+    readLanded: async () => {
+      controller.abort();
+      throw new DOMException("aborted", "AbortError");
+    },
+  });
+  assert.equal((await run).outcome, "aborted");
+  assert.deepEqual(lines.map((line) => JSON.parse(line)), [{ stackId, outcome: "aborted" }]);
+  assert.deepEqual(markers, []);
+});
+
+for (const terminal of ["landed", "closed", "archived"] as const) {
+  test(`stack watch preserves known ${terminal} verdict at the deadline`, async () => {
+    const { run } = harness([envelope({}, terminal)], { maxMs: 1_000 });
+    const result = await run;
+    assert.equal(result.outcome, terminal === "landed" ? "landed" : "attention");
+    assert.equal(result.envelope?.watch.reason, terminal);
+  });
+}
+
+test("landing confirmation preserves matching evidence received at the deadline", async () => {
+  let clock = 0;
+  const { run } = harness([envelope({}, "not_found")], {
+    maxMs: 1_000,
+    now: () => clock,
+    readLanded: async (_cfg, _id, opts) => {
+      assert.equal(opts?.timeoutMs, 1_000);
+      clock = 1_000;
+      return { state: "landed", landedPrNumbers: [12] } as never;
+    },
+  });
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.equal(result.envelope?.watch.reason, "landed");
+});
+
+test("known stack disappearance at the deadline performs no reads and reports unconfirmed landing", async () => {
+  let reads = 0;
+  const { run, lines } = harness([envelope({}, "not_found")], {
+    maxMs: 1_000,
+    readLanded: async () => { reads++; return null; },
+  });
+  const result = await run;
+  assert.equal(result.outcome, "attention");
+  assert.equal(result.envelope?.watch.reason, "landing_unconfirmed");
+  assert.equal(result.envelope?.cursor?.enrolledHeadSha, headA);
+  assert.ok(result.envelope?.watch.message.includes("watch deadline"));
+  assert.ok(result.envelope?.watch.message.includes("do not report it landed"));
+  assert.equal(reads, 0);
+  assert.ok(lines.includes(`MS-WATCH ATTENTION stack=${stackId} reason=landing_unconfirmed`));
 });

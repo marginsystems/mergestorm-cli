@@ -195,6 +195,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.48": [
     "Watch names CI Cyclone could not finish",
   ],
+  "0.3.49": [
+    "Submit retries a stalled stacks check",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

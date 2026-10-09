@@ -1014,6 +1014,52 @@ test("cmdStackSubmit fails closed when registered stacks cannot be listed", asyn
   assert.equal(h.adoptCalls, 0);
 });
 
+test("cmdStackSubmit retries the registered-stack read once after a timeout", async () => {
+  let listCalls = 0;
+  const h = makeSubmitHarness({
+    listStacks: async () => {
+      listCalls += 1;
+      if (listCalls === 1) {
+        throw new CommandError(
+          "Request timed out after 8s. Check network connectivity and API status.",
+          1,
+          "api_timeout",
+        );
+      }
+      return [];
+    },
+  });
+  await cmdStackSubmit([], h.deps);
+  assert.equal(listCalls, 2);
+  assert.equal(h.createPrCalls, 1);
+});
+
+test("cmdStackSubmit reads registered stacks twice at most before refusing", async () => {
+  let listCalls = 0;
+  const h = makeSubmitHarness({
+    listStacks: async () => {
+      listCalls += 1;
+      throw new TypeError("fetch failed");
+    },
+  });
+  await assert.rejects(() => cmdStackSubmit([], h.deps), /registered stacks/);
+  assert.equal(listCalls, 2);
+  assert.equal(h.createPrCalls, 0);
+});
+
+test("cmdStackSubmit does not retry a registered-stack read the API rejected", async () => {
+  let listCalls = 0;
+  const h = makeSubmitHarness({
+    listStacks: async () => {
+      listCalls += 1;
+      throw new CommandError("Failed to list stacks (HTTP 500): {}");
+    },
+  });
+  await assert.rejects(() => cmdStackSubmit([], h.deps), /registered stacks/);
+  assert.equal(listCalls, 1);
+  assert.equal(h.createPrCalls, 0);
+});
+
 function extraLayer(
   branch: string,
   parentBranch: string | null,

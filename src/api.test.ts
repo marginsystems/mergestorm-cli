@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import {
   adoptStack,
+  LandedQueueReadError,
+  readLandedQueueEntry,
   apiFetch,
   cancelMergeQueueEntry,
   enqueueStack,
@@ -776,4 +778,32 @@ test("enqueueStack prints the server's Surge message and keeps other refusals as
 test("findStackPull returns null when no PR is open", async () => {
   mockFetch(200, { number: null, url: null });
   assert.equal(await findStackPull(cfg, { owner: "acme", repo: "widgets", head: "ms/feat-a" }), null);
+});
+
+test("landed queue reads retain HTTP status and the larger Retry-After", async () => {
+  mockFetch(429, { retry_after_seconds: 12 }, { "Retry-After": "7" });
+  await assert.rejects(readLandedQueueEntry(cfg, "stack"), (err: unknown) => {
+    assert.ok(err instanceof LandedQueueReadError);
+    assert.equal(err.status, 429);
+    assert.equal(err.retryAfterSeconds, 12);
+    return true;
+  });
+});
+
+test("landed queue reads retain auth failures", async () => {
+  mockFetch(401);
+  await assert.rejects(readLandedQueueEntry(cfg, "stack"), /API key invalid/);
+});
+
+test("landed queue reads enforce request deadlines", async () => {
+  mockHangingFetch();
+  await assert.rejects(readLandedQueueEntry(cfg, "stack", { timeoutMs: 10 }), /Request timed out/);
+});
+
+test("landed queue reads preserve caller cancellation", async () => {
+  mockHangingFetch();
+  const controller = new AbortController();
+  const request = readLandedQueueEntry(cfg, "stack", { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(request, { name: "AbortError" });
 });
