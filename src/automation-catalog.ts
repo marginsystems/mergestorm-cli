@@ -1,8 +1,8 @@
 export const BEARER_SETTINGS = [
   { key: "auto_review_enabled", flag: "--auto-review", label: "Auto review" },
   { key: "auto_patch_enabled", flag: "--auto-patch", label: "Auto patch" },
-  { key: "auto_resolve_conflicts_enabled", flag: "--auto-resolve-conflicts", label: "Auto-resolve merge conflicts" },
-  { key: "auto_fix_ci_enabled", flag: "--auto-fix-ci", label: "Auto-fix failing CI" },
+  { key: "auto_resolve_conflicts_enabled", flag: "--auto-resolve-conflicts", label: "Auto-resolve merge conflicts (alpha)" },
+  { key: "auto_fix_ci_enabled", flag: "--auto-fix-ci", label: "Auto-fix failing CI (alpha)" },
   { key: "vortex_show_thinking_traces", flag: "--vortex-thinking", label: "Vortex thinking traces" },
   { key: "repo_overview_enabled", flag: "--repo-overview", label: "Repo overview" },
   { key: "cyclone_skip_ci_enabled", flag: "--cyclone-skip-ci", label: "Skip CI on Cyclone commits" },

@@ -1,6 +1,15 @@
 import { spawn } from "node:child_process";
 import { platform } from "node:os";
-import { apiBase, configPath, loadConfig, saveConfig, type Config } from "../config.js";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
+import {
+  apiBase,
+  configPath,
+  loadConfig,
+  mergestormHome,
+  saveConfig,
+  type Config,
+} from "../config.js";
 import { devicePost, getMe, type MeResponse } from "../api.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
@@ -62,15 +71,62 @@ async function loginWithKey(): Promise<void> {
   await present("Login", [`  Verified ${prefix}… · saved to ${configPath()}`]);
 }
 
-export async function cmdLogin(args: string[]): Promise<void> {
-  if (args.includes("--key")) {
-    await loginWithKey();
-    return;
+type DeviceStart = {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  interval: number;
+  expires_in: number;
+};
+
+type PendingLogin = {
+  deviceCode: string;
+  userCode: string;
+  openUrl: string;
+  apiBase: string;
+  pollMs: number;
+  expiresAt: number;
+};
+
+export function pendingLoginPath(): string {
+  return path.join(mergestormHome(), "login-pending.json");
+}
+
+async function savePendingLogin(pending: PendingLogin): Promise<void> {
+  await mkdir(mergestormHome(), { recursive: true });
+  await writeFile(pendingLoginPath(), JSON.stringify(pending, null, 2) + "\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+async function loadPendingLogin(): Promise<PendingLogin | null> {
+  try {
+    const parsed = JSON.parse(await readFile(pendingLoginPath(), "utf8")) as Partial<PendingLogin>;
+    if (
+      typeof parsed.deviceCode !== "string" ||
+      typeof parsed.userCode !== "string" ||
+      typeof parsed.openUrl !== "string" ||
+      typeof parsed.apiBase !== "string" ||
+      typeof parsed.pollMs !== "number" ||
+      typeof parsed.expiresAt !== "number"
+    ) {
+      return null;
+    }
+    return parsed as PendingLogin;
+  } catch {
+    return null;
   }
+}
 
-  const cfg = await loadConfig();
-  const base = apiBase(cfg);
+async function clearPendingLogin(deviceCode: string): Promise<void> {
+  const pending = await loadPendingLogin();
+  if (pending?.deviceCode !== deviceCode) return;
+  await rm(pendingLoginPath(), { force: true });
+}
 
+async function startDeviceLogin(base: string): Promise<DeviceStart> {
   let start;
   let attempt = 0;
   do {
@@ -104,59 +160,55 @@ export async function cmdLogin(args: string[]): Promise<void> {
         `Run \`mergestorm login --key\` to paste an existing API key instead.`,
     );
   }
+  return start.body as DeviceStart;
+}
 
-  const {
-    device_code,
-    user_code,
-    verification_uri,
-    verification_uri_complete,
-    interval,
-    expires_in,
-  } = start.body as {
-    device_code: string;
-    user_code: string;
-    verification_uri: string;
-    verification_uri_complete: string;
-    interval: number;
-    expires_in: number;
+function pendingFromStart(base: string, start: DeviceStart): PendingLogin {
+  return {
+    deviceCode: start.device_code,
+    userCode: start.user_code,
+    openUrl: start.verification_uri_complete || start.verification_uri,
+    apiBase: base,
+    pollMs: Math.max(start.interval || 5, 2) * 1000,
+    expiresAt: Date.now() + (start.expires_in || 600) * 1000,
   };
+}
 
-  const openUrl = verification_uri_complete || verification_uri;
-  console.log("To sign in, open this URL and confirm the code:\n");
-  console.log(`  ${ansi.brightGreen(openUrl)}`);
-  console.log(`\n  Code: ${ansi.bold(user_code)}\n`);
-  openBrowser(openUrl);
-  console.log("Waiting for approval…");
-
-  const pollMs = Math.max(interval || 5, 2) * 1000;
-  const deadline = Date.now() + (expires_in || 600) * 1000;
-
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, pollMs));
+async function pollDeviceLogin(
+  pending: PendingLogin,
+  retryCommand: string,
+  recovery: string,
+): Promise<void> {
+  while (Date.now() < pending.expiresAt) {
     let poll;
     try {
-      poll = await devicePost(base, "/api/v1/cli/device/token", { device_code });
+      poll = await devicePost(pending.apiBase, "/api/v1/cli/device/token", {
+        device_code: pending.deviceCode,
+      });
     } catch {
       throw new CommandError(
-        "Login failed: network error. Check your connection and run `mergestorm login` again.",
+        `Login failed: network error. Check your connection and run \`${retryCommand}\` again.`,
       );
     }
     if (poll.status === 200 && poll.body?.api_key) {
       const next = await loadConfig();
       next.apiKey = poll.body.api_key as string;
+      next.apiBase = pending.apiBase;
       await saveConfig(next);
+      await clearPendingLogin(pending.deviceCode);
       await present("Login", [`  Logged in. Key saved to ${configPath()}`]);
       return;
     }
     const err = poll.body?.error;
     if (err === "authorization_pending") {
       process.stdout.write(".");
+      await new Promise((r) => setTimeout(r, pending.pollMs));
       continue;
     }
     if (err === "slow_down" || err === "rate_limited") {
       const backoff = Number(poll.body?.retry_after_seconds);
       await new Promise((r) =>
-        setTimeout(r, Number.isFinite(backoff) && backoff > 0 ? backoff * 1000 : pollMs),
+        setTimeout(r, Number.isFinite(backoff) && backoff > 0 ? backoff * 1000 : pending.pollMs),
       );
       continue;
     }
@@ -165,15 +217,75 @@ export async function cmdLogin(args: string[]): Promise<void> {
         "You have reached the max active API keys. Revoke one at https://mergestorm.ai/settings#api and try again.",
       );
     }
+    if (err === "expired_token" || err === "already_redeemed" || err === "access_denied") {
+      await clearPendingLogin(pending.deviceCode);
+    }
     if (err === "expired_token") {
-      throw new CommandError("Login code expired. Run `mergestorm login` again.");
+      throw new CommandError(`Login code expired. ${recovery}`);
     }
     if (err === "already_redeemed") {
-      throw new CommandError("This code was already used. Run `mergestorm login` again.");
+      throw new CommandError(`This code was already used. ${recovery}`);
     }
     throw new CommandError(
       `Login failed: ${typeof err === "string" ? err : JSON.stringify(poll.body)}`,
     );
   }
-  throw new CommandError("Login timed out. Run `mergestorm login` again.");
+  await clearPendingLogin(pending.deviceCode);
+  throw new CommandError(`Login timed out. ${recovery}`);
+}
+
+async function loginStart(): Promise<void> {
+  const cfg = await loadConfig();
+  const base = apiBase(cfg);
+  const pending = pendingFromStart(base, await startDeviceLogin(base));
+  await savePendingLogin(pending);
+  const minutes = Math.max(1, Math.round((pending.expiresAt - Date.now()) / 60_000));
+  console.log("Ask the account owner to open this URL, sign in, and approve the code:\n");
+  console.log(`  ${pending.openUrl}`);
+  console.log(`\n  Code: ${pending.userCode}\n`);
+  console.log(`The code expires in ${minutes} minutes.`);
+  console.log("After they approve, run `mergestorm login --finish` to store the API key.");
+}
+
+async function loginFinish(): Promise<void> {
+  const pending = await loadPendingLogin();
+  if (!pending) {
+    throw new CommandError("No login is waiting. Run `mergestorm login --start` first.");
+  }
+  if (Date.now() >= pending.expiresAt) {
+    await clearPendingLogin(pending.deviceCode);
+    throw new CommandError("Login code expired. Run `mergestorm login --start` again.");
+  }
+  console.log(`Waiting for approval of code ${pending.userCode} at ${pending.openUrl}`);
+  await pollDeviceLogin(
+    pending,
+    "mergestorm login --finish",
+    "Run `mergestorm login --start`, then `mergestorm login --finish`.",
+  );
+}
+
+export async function cmdLogin(args: string[]): Promise<void> {
+  if (args.includes("--key")) {
+    await loginWithKey();
+    return;
+  }
+  if (args.includes("--start")) {
+    await loginStart();
+    return;
+  }
+  if (args.includes("--finish")) {
+    await loginFinish();
+    return;
+  }
+
+  const cfg = await loadConfig();
+  const base = apiBase(cfg);
+  const pending = pendingFromStart(base, await startDeviceLogin(base));
+
+  console.log("To sign in, open this URL and confirm the code:\n");
+  console.log(`  ${ansi.brightGreen(pending.openUrl)}`);
+  console.log(`\n  Code: ${ansi.bold(pending.userCode)}\n`);
+  openBrowser(pending.openUrl);
+  console.log("Waiting for approval…");
+  await pollDeviceLogin(pending, "mergestorm login", "Run `mergestorm login` again.");
 }

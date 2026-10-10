@@ -44,7 +44,7 @@ export function buildHelpTabs(): LineTab[] {
         cmd("thread <slug>", "jobs in a review thread"),
         "",
         rule("Account"),
-        cmd("login", "browser sign-in (or login --key)"),
+        cmd("login", "sign in (--key; agents: --start)"),
         cmd("whoami", "key · plan · API"),
         cmd("settings", "automation toggles · Config tab"),
         cmd("logout", "forget the stored key"),

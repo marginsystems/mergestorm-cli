@@ -46,6 +46,8 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     summary: "Sign in via browser (or paste a key)",
     usage: [
       "mergestorm login                Sign in via browser and store an API key",
+      "mergestorm login --start        Print a sign-in URL and code, then exit (agents)",
+      "mergestorm login --finish       Store the API key once the code from --start is approved",
       "mergestorm login --key          Paste an existing API key instead (headless/CI)",
     ],
     async run(args, ctx) {

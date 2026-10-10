@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.49`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.50`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,7 +48,7 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.49                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.50                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
@@ -79,6 +79,8 @@ One-shot subcommands work the same inside the shell and from argv (scripts/CI):
 mergestorm                      Interactive shell (TTY only)
 mergestorm shell                Explicit shell entry
 mergestorm login                Sign in via browser; stores an API key in ~/.mergestorm/config.json
+mergestorm login --start        Print a sign-in URL and code, then exit (agents)
+mergestorm login --finish       Store the API key once the code from --start is approved
 mergestorm login --key          Paste an existing API key instead (headless/CI)
 mergestorm logout               Remove the stored API key
 mergestorm review [base] [head] Review git diff base...head (default: origin/HEAD or main or master)
@@ -150,6 +152,8 @@ Legacy repo-local `.mergestorm/stack.json` state migrates automatically on the n
 Runs a browser device-authorization flow: prints a short code, opens `https://mergestorm.ai/cli/auth`, and — once you approve — mints and stores an API key in `~/.mergestorm/config.json` (mode `600`). No key copy/paste needed.
 
 For headless or CI environments, use `mergestorm login --key` to paste an existing `msk_live_…` key (create one on the dashboard [Settings → API](https://mergestorm.ai/settings#api)). On a TTY the paste is hidden (not echoed); the CLI verifies the key with the API before saving.
+
+For an agent, which cannot sit in a prompt while a person signs in, use two steps. `mergestorm login --start` prints the URL and the short code and exits. Give both to the account owner, who opens [mergestorm.ai/cli/auth](https://mergestorm.ai/cli/auth) on any device, signs in, and approves the code. Then `mergestorm login --finish` stores the API key. The code lasts 10 minutes, and `--finish` can be run again if it is interrupted before the approval.
 
 ### `logout`
 
