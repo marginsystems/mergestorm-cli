@@ -286,6 +286,11 @@ export async function cmdLogin(args: string[]): Promise<void> {
   console.log(`  ${ansi.brightGreen(pending.openUrl)}`);
   console.log(`\n  Code: ${ansi.bold(pending.userCode)}\n`);
   openBrowser(pending.openUrl);
+  if (!process.stdout.isTTY) {
+    console.log(
+      "No terminal here. If this command may be cut off before the approval, use `mergestorm login --start`, then `mergestorm login --finish`.",
+    );
+  }
   console.log("Waiting for approval…");
   await pollDeviceLogin(pending, "mergestorm login", "Run `mergestorm login` again.");
 }

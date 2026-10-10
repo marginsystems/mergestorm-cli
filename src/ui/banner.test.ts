@@ -178,10 +178,10 @@ test("what's new covers the shipped package version (no empty pane)", () => {
   const rows = buildBannerRows(loggedIn(cliVersion()), 120);
   const text = stripAnsi(rows.join("\n"));
   assert.match(text, new RegExp(`New in v${cliVersion().replace(/\./g, "\\.")}`));
-  assert.match(text, /Watch names findings held on a throttled head/);
+  assert.match(text, /Sign-in errors name the agent login/);
 
   const narrowText = stripAnsi(buildBannerRows(loggedIn(cliVersion()), 80).join("\n"));
-  assert.match(narrowText, /Watch names findings held on a throttled head/);
+  assert.match(narrowText, /Sign-in errors name the agent login/);
 });
 
 test("idle banner paints every tornado row verbatim", () => {

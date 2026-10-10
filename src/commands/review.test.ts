@@ -334,7 +334,7 @@ test("isTransientReviewPollError retries network/timeout, not auth", () => {
   );
   assert.equal(
     isTransientReviewPollError(
-      new CommandError("API key invalid or revoked. Run `mergestorm login`.", 1, "auth_invalid"),
+      new CommandError("API key invalid or revoked. Run `mergestorm login` (agents: `mergestorm login --start`, then `--finish`).", 1, "auth_invalid"),
     ),
     false,
   );

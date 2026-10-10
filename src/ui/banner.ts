@@ -204,6 +204,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.51": [
     "Watch names findings held on a throttled head",
   ],
+  "0.3.52": [
+    "Sign-in errors name the agent login",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

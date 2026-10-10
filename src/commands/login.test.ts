@@ -261,3 +261,24 @@ test("login --finish drops a code the server reports expired and saves no key", 
   assert.equal(await readJson(pendingLoginPath()), null);
   assert.equal(await readJson(path.join(home, ".mergestorm", "config.json")), null);
 });
+
+test("plain login with no terminal points at --start and --finish", async (t) => {
+  await withTempHome(t);
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) =>
+    new URL(String(input)).pathname === "/api/v1/cli/device"
+      ? json(200, { ...deviceStart, expires_in: 1 })
+      : json(400, { error: "authorization_pending" });
+  const lines: string[] = [];
+  const log = console.log;
+  const wasTty = process.stdout.isTTY;
+  process.stdout.isTTY = false;
+  console.log = (...parts: unknown[]) => void lines.push(parts.join(" "));
+  t.after(async () => {
+    console.log = log;
+    process.stdout.isTTY = wasTty;
+  });
+
+  await assert.rejects(() => cmdLogin([]), /timed out/i);
+  assert.match(lines.join("\n"), /login --start`, then `mergestorm login --finish/);
+});

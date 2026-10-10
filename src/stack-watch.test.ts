@@ -1934,6 +1934,15 @@ for (const reason of ["failed", "left_for_human", "infra_failure", "pr_state_una
   });
 }
 
+test("the repair for a fix Cyclone held names the hold, and a plain failure says nothing was pushed", async () => {
+  const held = "rewrites existing test assertions (src/a.test.ts: changes a test's inputs, not its assertions)";
+  const named = await pollStackWatch(cfg, "stack", harness(stack([importantFindings({ cycloneHandoff: { headSha: HEAD, reason: "failed", at: null, detail: held } })])).options);
+  assert.ok((named.repair?.steps ?? "").includes(`Cyclone left them for a person (Cyclone wrote a fix and held it, so it pushed nothing: ${held})`));
+  assert.equal(named.repair?.kind === "vortex_findings" ? named.repair.handoff : null, "failed");
+  const plain = await pollStackWatch(cfg, "stack", harness(stack([importantFindings({ cycloneHandoff: { headSha: HEAD, reason: "failed", at: null } })])).options);
+  assert.ok((plain.repair?.steps ?? "").includes("(Cyclone's patch failed, so it pushed nothing)"));
+});
+
 test("Important findings Cyclone did not hold at the head are not attention", () => {
   const held = { headSha: HEAD, reason: "failed", at: null };
   assert.equal(stackBlockers(stack([importantFindings()])).attention, null);

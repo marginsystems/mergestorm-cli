@@ -141,7 +141,7 @@ export async function apiFetch(
   const key = resolveApiKey(cfg);
   if (!key) {
     throw new CommandError(
-      "No API key. Run `mergestorm login` or set MERGESTORM_API_KEY.",
+      "No API key. Run `mergestorm login` (agents: `mergestorm login --start`, then `--finish`) or set MERGESTORM_API_KEY.",
       1,
       "missing_api_key",
     );
@@ -175,7 +175,7 @@ export async function apiFetch(
   }
   if (res.status === 401) {
     throw new CommandError(
-      "API key invalid or revoked. Run `mergestorm login`.",
+      "API key invalid or revoked. Run `mergestorm login` (agents: `mergestorm login --start`, then `--finish`).",
       1,
       "auth_invalid",
     );

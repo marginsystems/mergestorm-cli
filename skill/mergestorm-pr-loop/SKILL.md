@@ -22,7 +22,7 @@ mg skill install --claude --cursor --agents
 1. There is an already-open GitHub PR on a Vortex-monitored repo. No PR, wrong skill.
 2. Auto-patch (Cyclone) must be off for this PR so you are the only patcher. Do not take anyone's word for it: the settings API and the PR's stack are the source of truth, and step 1 of the loop verifies them before anything else runs. Cyclone is off for the PR when its adopted stack has `autoPatchOverride` `false`, or when that override is unset and the account `auto_patch_enabled` is `false`.
 3. The Bearer key and the Cyclone GitHub App install must be the same Mergestorm account. `stack_list` / `stack_status` expose `keyUserId`, `cycloneInstallUserId`, and `cycloneOwnerMatch`. Cyclone apply always uses the install account, not the key. If those identities differ, your `settings_get` mute reading is about the wrong person.
-4. `whoami` works on the `mergestorm` MCP server (or `mg whoami --json` exits 0). Otherwise stop and ask for install/login.
+4. `whoami` works on the `mergestorm` MCP server (or `mg whoami --json` exits 0). Otherwise stop and ask for install, or sign in yourself: run `mg login --start`, send the person the link it prints, and after they approve it run `mg login --finish`.
 
 ## Loop (in order)
 

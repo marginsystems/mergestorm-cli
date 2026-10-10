@@ -82,7 +82,7 @@ test("apiFetch throws friendly CommandError on HTTP 401", async () => {
     (err: unknown) =>
       err instanceof CommandError &&
       err.code === "auth_invalid" &&
-      err.message === "API key invalid or revoked. Run `mergestorm login`.",
+      err.message === "API key invalid or revoked. Run `mergestorm login` (agents: `mergestorm login --start`, then `--finish`).",
   );
 });
 

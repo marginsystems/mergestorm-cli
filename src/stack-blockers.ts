@@ -297,6 +297,7 @@ function cycloneHandoffAtHead(stack: StackDto, layer: StackLayerDto): string | n
 }
 
 const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
+  failed: "Cyclone's patch failed, so it pushed nothing",
   auto_patch_off: "auto-patch is off for this stack",
   stack_auto_patch_off: "auto-patch is off for this stack",
   account_auto_patch_off: "auto-patch is off for the account and this stack does not turn it on",
@@ -328,8 +329,13 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   account_auto_fix_ci_off: "auto-fix CI is off for the account and this stack does not turn it on",
 };
 
-function cycloneHandoffWords(reason: string): string {
+function cycloneHandoffWords(reason: string, detail?: string | null): string {
+  if (reason === "failed" && detail?.trim()) return `Cyclone wrote a fix and held it, so it pushed nothing: ${detail.trim()}`;
   return CYCLONE_HANDOFF_WORDS[reason] ?? reason.replaceAll("_", " ");
+}
+
+function cycloneHandoffDetailAtHead(layer: StackLayerDto): string | null {
+  return sameHead(layer.cycloneHandoff?.headSha, layer.headSha) ? layer.cycloneHandoff!.detail ?? null : null;
 }
 
 function isLandPrLayer(stack: StackDto, layer: StackLayerDto): boolean {
@@ -1069,7 +1075,7 @@ export function stackRepair(
       branch: layer.branch,
       handoff,
       findings,
-      steps: `Vortex ${vortexImportantFindingsHeldAtHead(layer) ? "left Important findings" : "requested changes"} on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them for a person${handoff ? ` (${cycloneHandoffWords(handoff)})` : ""}, so nothing will patch them and Auto land waits. Read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). If a finding is wrong, tell the human; mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> dismisses that review. Do not retarget the PR base.`,
+      steps: `Vortex ${vortexImportantFindingsHeldAtHead(layer) ? "left Important findings" : "requested changes"} on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them for a person${handoff ? ` (${cycloneHandoffWords(handoff, cycloneHandoffDetailAtHead(layer))})` : ""}, so nothing will patch them and Auto land waits. Read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). If a finding is wrong, tell the human; mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> dismisses that review. Do not retarget the PR base.`,
     };
   }
   if (reason === "ci_failed" || attention.bounceKind === "ci_failure") {

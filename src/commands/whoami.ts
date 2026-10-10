@@ -13,7 +13,7 @@ export async function cmdWhoami(
   const cfg = await loadConfig();
   const key = resolveApiKey(cfg);
   if (!key) {
-    throw new CommandError("Not logged in. Run `mergestorm login`.");
+    throw new CommandError("Not logged in. Run `mergestorm login` (agents: `mergestorm login --start`, then `--finish`).");
   }
   if (!asJson && canBrowse()) {
     await openTabsBrowser("status");

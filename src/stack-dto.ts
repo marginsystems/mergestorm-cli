@@ -120,6 +120,7 @@ export type StackCycloneHandoff = {
   headSha: string;
   reason: string;
   at: string | null;
+  detail?: string | null;
 };
 
 export type StackAgentName = "vortex" | "cyclone";
@@ -158,6 +159,7 @@ export type StackAgentRun = {
    * resting Vortex `incomplete` runs, so the chip tooltip can say 21/32.
    */
   coverage?: { reviewed: number; total: number } | null;
+  detail?: string | null;
 };
 
 export type StackAgentsBusy = {
