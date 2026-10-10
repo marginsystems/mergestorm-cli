@@ -281,10 +281,14 @@ function coreReviewDoneAtHead(layer: StackLayerDto): boolean {
 
 export const VORTEX_FINDINGS_NEED_PERSON = "Vortex findings need a person";
 
-function vortexChangesRequestedAtHead(layer: StackLayerDto): boolean {
+function vortexFindingsRestAtHead(layer: StackLayerDto): boolean {
   const review = layer.vortexReview;
   if (review && !(review.status === "done" && sameHead(review.head_sha, layer.headSha))) return false;
-  return layer.vortexStatus === "findings" && layer.reviewStatus === "changes_requested";
+  return layer.vortexStatus === "findings" || layer.vortexStatus === "throttled";
+}
+
+function vortexChangesRequestedAtHead(layer: StackLayerDto): boolean {
+  return vortexFindingsRestAtHead(layer) && layer.reviewStatus === "changes_requested";
 }
 
 function cycloneHandoffAtHead(stack: StackDto, layer: StackLayerDto): string | null {
@@ -374,9 +378,25 @@ function ciHandoffNote(stack: StackDto, layer: StackLayerDto): string | null {
   return null;
 }
 
+const CYCLONE_HELD_FINDINGS_REASONS: readonly string[] = [
+  "failed",
+  "left_for_human",
+  "infra_failure",
+  "pr_state_unavailable",
+  "vortex_patch_cap",
+  "patch_job_lost",
+];
+
+function vortexImportantFindingsHeldAtHead(layer: StackLayerDto): boolean {
+  return vortexFindingsRestAtHead(layer) && layer.reviewStatus === "reviewed" &&
+    sameHead(layer.cycloneHandoff?.headSha, layer.headSha) &&
+    CYCLONE_HELD_FINDINGS_REASONS.includes(layer.cycloneHandoff!.reason);
+}
+
 function vortexFindingsLeftForPerson(stack: StackDto, layer: StackLayerDto): boolean {
-  return vortexChangesRequestedAtHead(layer) && !layerAgentsBusy(layer).cyclone &&
-    cycloneHandoffAtHead(stack, layer) !== null;
+  if (layerAgentsBusy(layer).cyclone) return false;
+  return vortexImportantFindingsHeldAtHead(layer) ||
+    (vortexChangesRequestedAtHead(layer) && cycloneHandoffAtHead(stack, layer) !== null);
 }
 
 function quotaSkippedReview(layer: StackLayerDto): boolean {
@@ -1049,7 +1069,7 @@ export function stackRepair(
       branch: layer.branch,
       handoff,
       findings,
-      steps: `Vortex requested changes on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them for a person${handoff ? ` (${cycloneHandoffWords(handoff)})` : ""}, so nothing will patch them and Auto land waits. Read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). If a finding is wrong, tell the human; mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> dismisses that review. Do not retarget the PR base.`,
+      steps: `Vortex ${vortexImportantFindingsHeldAtHead(layer) ? "left Important findings" : "requested changes"} on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them for a person${handoff ? ` (${cycloneHandoffWords(handoff)})` : ""}, so nothing will patch them and Auto land waits. Read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). If a finding is wrong, tell the human; mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> dismisses that review. Do not retarget the PR base.`,
     };
   }
   if (reason === "ci_failed" || attention.bounceKind === "ci_failure") {

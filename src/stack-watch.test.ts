@@ -1917,6 +1917,67 @@ for (const reason of ["vortex_patch_cap", "hold", "auto_patch_off", "no_billing"
   });
 }
 
+const importantFindings = (extra: Partial<StackLayerDto> = {}) => layer({
+  vortexStatus: "findings", reviewStatus: "reviewed", vortexReview: done(HEAD), ...extra,
+});
+
+for (const reason of ["failed", "left_for_human", "infra_failure", "pr_state_unavailable", "vortex_patch_cap", "patch_job_lost"]) {
+  test(`Important findings Cyclone held at the head (${reason}) are attention with a repair hint`, async () => {
+    const h = harness(stack([importantFindings({ cycloneHandoff: { headSha: HEAD, reason, at: null } })]));
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, "Vortex findings need a person");
+    assert.equal(result.prNumber, 42);
+    assert.equal(result.repair?.kind, "vortex_findings");
+    assert.equal(result.repair?.kind === "vortex_findings" ? result.repair.handoff : null, reason);
+    assert.match(result.repair?.steps ?? "", /Vortex left Important findings on/);
+  });
+}
+
+test("Important findings Cyclone did not hold at the head are not attention", () => {
+  const held = { headSha: HEAD, reason: "failed", at: null };
+  assert.equal(stackBlockers(stack([importantFindings()])).attention, null);
+  assert.equal(stackBlockers({ ...stack([importantFindings()]), autoPatchOverride: false }).attention, null);
+  assert.equal(stackBlockers({ ...stack([importantFindings()]), cyclonePatchOff: "account_auto_patch_off" }).attention, null);
+  for (const reason of ["no_changes", "auto_patch_off", "hold", "unsupported_language", "credits_exhausted"]) {
+    assert.equal(stackBlockers(stack([importantFindings({ cycloneHandoff: { ...held, reason } })])).attention, null, reason);
+  }
+  assert.equal(stackBlockers(stack([importantFindings({ cycloneHandoff: { ...held, headSha: "0".repeat(40) } })])).attention, null);
+  assert.equal(stackBlockers(stack([layer({ vortexStatus: "all_clear", reviewStatus: "approved", vortexReview: done(HEAD), cycloneHandoff: held })])).attention, null);
+});
+
+test("a Governance-throttled head with changes requested that Cyclone held is attention while Auto land waits on Vortex", async () => {
+  const throttled = changesRequested({ vortexStatus: "throttled", cycloneHandoff: { headSha: HEAD, reason: "hold", at: null } });
+  const h = harness({
+    ...stack([throttled]),
+    autoEnqueueWhenReady: true,
+    autoLandWait: { reason: "vortex_not_green", prNumber: 42, headSha: HEAD, since: new Date(0).toISOString(), attempts: null, detail: null },
+  });
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Vortex findings need a person");
+  assert.equal(result.prNumber, 42);
+  assert.equal(result.repair?.kind, "vortex_findings");
+  assert.equal(result.repair?.kind === "vortex_findings" ? result.repair.handoff : null, "hold");
+});
+
+test("a Governance-throttled head names findings only when Cyclone left them and is idle", () => {
+  const held = { headSha: HEAD, reason: "hold", at: null };
+  assert.equal(stackBlockers(stack([changesRequested({ vortexStatus: "throttled" })])).attention, null);
+  assert.equal(stackBlockers(stack([changesRequested({ vortexStatus: "throttled", cycloneHandoff: { ...held, headSha: "0".repeat(40) } })])).attention, null);
+  assert.equal(stackBlockers(stack([changesRequested({ vortexStatus: "throttled", cycloneHandoff: held, cycloneStatus: "patching" })])).attention, null);
+  assert.equal(stackBlockers(stack([layer({ vortexStatus: "throttled", reviewStatus: "approved", vortexReview: done(HEAD), cycloneHandoff: held })])).attention, null);
+  assert.equal(stackBlockers(stack([importantFindings({ vortexStatus: "throttled", cycloneHandoff: held })])).attention, null);
+  assert.equal(
+    stackBlockers(stack([importantFindings({ vortexStatus: "throttled", cycloneHandoff: { ...held, reason: "left_for_human" } })])).attention?.blocker,
+    "Vortex findings need a person",
+  );
+  assert.equal(
+    stackBlockers({ ...stack([changesRequested({ vortexStatus: "throttled" })]), cyclonePatchOff: "account_auto_patch_off" }).attention?.blocker,
+    "Vortex findings need a person",
+  );
+});
+
 test("a stack with auto-patch off names Vortex findings at the head with no Cyclone row", () => {
   const off = { ...stack([changesRequested()]), autoPatchOverride: false };
   assert.equal(stackBlockers(off).attention?.blocker, "Vortex findings need a person");
