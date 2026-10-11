@@ -36,17 +36,20 @@ export {
   getPrVortexReview,
   getReview,
   getSettings,
+  getStackPublication,
   landNextStack,
   listJobs,
   listMergeQueueEntries,
   listStacks,
   listThreads,
+  openStackIssue,
   parseRetryAfterSeconds,
   patchSettings,
   restackStack,
   setStackAutoLand,
   setStackPolicy,
   stackPolicyBody,
+  submitStackPublication,
   type ApiFetchInit,
   type ApiFetchResult,
   type JobListItem,
@@ -69,6 +72,9 @@ export {
   type SettingsWritableKey,
   type StackDto,
   type StackPolicyPatch,
+  type StackPublication,
+  type StackPublicationRequest,
+  type StackPublicationStatus,
   type ThreadDetail,
   type ThreadListItem,
 } from "../api.js";
@@ -122,6 +128,8 @@ export {
 
 export { discoverTrunk } from "../git-stack.js";
 
+export { parseGithubOriginRepo } from "../git.js";
+
 export { BOUNCE_KIND_LABELS, deriveStackAgentsBusy, mergeQueueBounceLabel, type StackAgentsBusy } from "../stack-dto.js";
 
 export {
@@ -170,3 +178,11 @@ export {
   type StackWatchObligationInput,
   type StackWatchReason,
 } from "../stack-watch-obligation.js";
+
+export {
+  publishBranchServerSide,
+  publishWorkingBranch,
+  workingBranchPublication,
+  type ServerPublishResult,
+  type WorkingBranchInput,
+} from "../server-publish.js";

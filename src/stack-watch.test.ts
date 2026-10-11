@@ -141,7 +141,7 @@ test("stale bounce uses current head, not verify or enrolled head", async () => 
   assert.equal(attention.bounceKind, "ci_failure");
 });
 
-test("a ci_failure bounce clears once the failed check is rerun green on the same head", async () => {
+test("a ci_failure bounce waits while its failed check is rerun on the same head and clears once it is green", async () => {
   const red = { total: 2, success: 1, pending: 0, failure: 1, failingName: "Workspace tests" };
   const rerun = { total: 2, success: 1, pending: 1, failure: 0, failingName: null };
   const green = { total: 2, success: 2, pending: 0, failure: 0, failingName: null };
@@ -149,7 +149,14 @@ test("a ci_failure bounce clears once the failed check is rerun green on the sam
   const atRed = stackBlockers(stack([layer({ ciStatus: "failure", checks: red })]), [ciBounce]);
   assert.equal(atRed.attention?.blocker, "CI failed — Workspace tests");
   const atRerun = stackBlockers(stack([layer({ ciStatus: "pending", checks: rerun })]), [ciBounce]);
-  assert.equal(atRerun.attention?.blocker, "CI failed — Workspace tests");
+  assert.equal(atRerun.attention, null);
+  assert.equal(atRerun.repair, null);
+  const rerunning = await timedOut(harness(stack([layer({ ciStatus: "pending", checks: rerun })]), [ciBounce]).options);
+  assert.notEqual(rerunning.status, "attention");
+  assert.equal(rerunning.blocker, null);
+  const stillRedBesideRerun = { total: 3, success: 1, pending: 1, failure: 1, failingName: "lint" };
+  const atPartRerun = stackBlockers(stack([layer({ ciStatus: "failure", checks: stillRedBesideRerun })]), [ciBounce]);
+  assert.equal(atPartRerun.attention?.blocker, "CI failed — lint");
   const atGreen = stackBlockers(stack([layer({ ciStatus: "success", checks: green })]), [ciBounce]);
   assert.equal(atGreen.attention, null);
   assert.equal(atGreen.repair, null);

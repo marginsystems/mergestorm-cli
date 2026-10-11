@@ -499,6 +499,11 @@ function headChecksAllGreen(layer: StackLayerDto): boolean {
     checks.failure === 0 && checks.pending === 0 && checks.success > 0;
 }
 
+function headChecksRerunning(layer: StackLayerDto): boolean {
+  const checks = layer.checks;
+  return layer.ciStatus === "pending" && !!checks && checks.failure === 0 && checks.pending > 0 && checks.cancelledOnly !== true;
+}
+
 type LayerAttention =
   | { blocker: null; reason: null; bounceKind: null; bounce?: undefined }
   | { blocker: string; reason: StackBlockerReason; bounceKind: string | null; bounce?: MergeQueueEntryDto };
@@ -560,7 +565,7 @@ function layerAttention(
   // Compare with the observed promote/land head, never the enrollment or verify head.
   if (!sameHead(bounce.bounceDetail?.headSha ?? bounce.verifyHeadSha, layer.headSha) ||
     (bounce.bounceDetail?.prNumber != null && bounce.bounceDetail.prNumber !== layer.prNumber)) return none;
-  if (kind === "ci_failure" && !bounce.bounceDetail?.batch && headChecksAllGreen(layer)) return none;
+  if (kind === "ci_failure" && !bounce.bounceDetail?.batch && (headChecksAllGreen(layer) || headChecksRerunning(layer))) return none;
   const label = mergeQueueBounceLabel(bounce);
   return { blocker: label, reason: "bounce", bounceKind: kind, bounce };
 }

@@ -18,6 +18,7 @@ import {
   cmdStackStatus,
   cmdStackCreate,
   cmdStackSet,
+  cmdStackPublish,
   cmdStackSubmit,
   openStackWatch,
   findRegisteredParent,
@@ -25,6 +26,7 @@ import {
   parseAdoptTarget,
   parseStackAdoptArgs,
   parseStackCreateArgs,
+  parseStackPublishArgs,
   parseStackResetArgs,
   parseStackSetArgs,
   parseStackSubmitArgs,
@@ -35,7 +37,12 @@ import {
   type StackSubmitDeps,
   type StackCreateDeps,
 } from "./stack.js";
-import type { StackDto } from "../api.js";
+import type { StackDto, StackPublication, StackPublicationRequest } from "../api.js";
+import { publishBranchServerSide, type ServerPublishInput, type ServerPublishResult } from "../server-publish.js";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const SAMPLE_META: StackMeta = {
   version: 2,
@@ -362,6 +369,7 @@ test("parseStackSubmitArgs accepts --extend and --json", () => {
     autoResolveConflicts: undefined,
     autoFixCi: undefined,
     rest: false,
+    serverSide: false,
     asJson: true,
   });
   assert.deepEqual(parseStackSubmitArgs([]), {
@@ -372,6 +380,7 @@ test("parseStackSubmitArgs accepts --extend and --json", () => {
     autoResolveConflicts: undefined,
     autoFixCi: undefined,
     rest: false,
+    serverSide: false,
     asJson: false,
   });
   assert.equal(parseStackSubmitArgs(["--rest"]).rest, true);
@@ -1681,4 +1690,244 @@ test("stack repair line prints a conflict note after the steps", () => {
   };
   assert.deepEqual(stackRepairLine(repair), ["Repair #7 merge_conflict: Merge main into feat/a. Cyclone will not resolve this conflict by itself."]);
   assert.deepEqual(stackRepairLine({ ...repair, note: undefined }), ["Repair #7 merge_conflict: Merge main into feat/a."]);
+});
+
+function serverSideHarness(meta: StackMeta = SAMPLE_META) {
+  const published: ServerPublishInput[] = [];
+  const policies: Array<{ stackId: string; policy: unknown }> = [];
+  const forbidden = (name: string) => () => {
+    throw new Error(`${name} must not run with --server-side`);
+  };
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => structuredClone(meta),
+    ghReady: forbidden("gh auth status"),
+    pushBranch: forbidden("git push"),
+    fetchRemoteBranch: forbidden("git fetch"),
+    findOpenPrNumber: forbidden("gh pr list"),
+    createPrs: forbidden("gh pr create"),
+    findStackPull: async () => null,
+    openStackPull: forbidden("the pulls endpoint"),
+    adoptStack: forbidden("the adopt endpoint"),
+    getStackPublication: forbidden("the parent publication read"),
+    setStackPolicy: async (stackId, policy) => {
+      policies.push({ stackId, policy });
+      return {};
+    },
+    publishBranchServerSide: async (input): Promise<ServerPublishResult> => {
+      published.push(input);
+      const n = published.length;
+      return {
+        state: "registered",
+        owner: input.owner,
+        repo: input.repo,
+        branch: input.branch,
+        base: { branch: input.baseBranch, sha: "b".repeat(40) },
+        baseBranch: input.baseBranch,
+        head: { sha: String(n).repeat(40), tree: "e".repeat(40) },
+        commits: [],
+        branchCreated: true,
+        branchUpdated: false,
+        pr: { number: 50 + n, url: `https://github.com/acme/widgets/pull/${50 + n}`, created: true },
+        stack: { id: "22222222-2222-4222-8222-222222222222", autoPatchOverride: false, autoLand: true },
+      };
+    },
+  });
+  return { h, published, policies };
+}
+
+const TWO_LAYER_META: StackMeta = {
+  version: 2,
+  trunk: "main",
+  stacks: [
+    {
+      layers: [
+        { branch: "feat/layer-1", parentBranch: "main" },
+        { branch: "feat/layer-2", parentBranch: "feat/layer-1" },
+      ],
+    },
+  ],
+  active: 0,
+};
+
+test("parseStackSubmitArgs reads --server-side", () => {
+  assert.equal(parseStackSubmitArgs(["--server-side"]).serverSide, true);
+  assert.equal(parseStackSubmitArgs([]).serverSide, false);
+});
+
+test("cmdStackSubmit --server-side publishes each layer through Mergestorm and never runs gh, git push or adopt", async () => {
+  const { h, published, policies } = serverSideHarness(TWO_LAYER_META);
+  const captured = await captureStackOutput(() => cmdStackSubmit(["--server-side", "--json"], h.deps));
+  assert.equal(captured.error, null);
+  assert.deepEqual(h.pushCalls, []);
+  assert.equal(h.createPrCalls, 0);
+  assert.equal(h.adoptCalls, 0);
+  assert.deepEqual(published.map((input) => [input.branch, input.baseBranch]), [
+    ["feat/layer-1", "main"],
+    ["feat/layer-2", "feat/layer-1"],
+  ]);
+  assert.equal(published[0]!.localBaseRef, undefined);
+  assert.equal(published[0]!.remoteBaseSha, undefined);
+  assert.equal(published[1]!.localBaseRef, "feat/layer-1");
+  assert.equal(published[1]!.remoteBaseSha, "1".repeat(40));
+  assert.equal(published[0]!.title, "feat: layer one");
+  assert.equal(published[0]!.autoLand, undefined);
+  assert.deepEqual(policies, []);
+  const output = JSON.parse(captured.stdout.join("\n")) as {
+    serverSide: boolean;
+    autoPatchOverride: boolean;
+    stackId: string;
+    layers: Array<{ prNumber: number; head: string }>;
+    watch: { done: boolean };
+  };
+  assert.equal(output.serverSide, true);
+  assert.equal(output.autoPatchOverride, false);
+  assert.equal(output.stackId, "22222222-2222-4222-8222-222222222222");
+  assert.deepEqual(output.layers.map((layer) => layer.prNumber), [51, 52]);
+  assert.equal(output.watch.done, false);
+  assert.equal(h.saved.length, 1);
+});
+
+test("cmdStackSubmit --server-side refuses --auto-patch on and a layer that needs a park freeze before publishing anything", async () => {
+  const patched = serverSideHarness();
+  await assert.rejects(() => cmdStackSubmit(["--server-side", "--auto-patch", "on"], patched.h.deps), /keeps Auto patch off/);
+  assert.deepEqual(patched.published, []);
+
+  const deep = serverSideHarness({
+    ...TWO_LAYER_META,
+    stacks: [{ layers: [...TWO_LAYER_META.stacks[0]!.layers, { branch: "feat/layer-3", parentBranch: "feat/layer-2" }] }],
+  });
+  await assert.rejects(
+    () => cmdStackSubmit(["--server-side"], deep.h.deps),
+    (err) => err instanceof CommandError && err.code === "unsupported_publication" && /feat\/layer-3/.test(err.message),
+  );
+  assert.deepEqual(deep.published, []);
+  assert.equal(deep.h.saved.length, 0);
+});
+
+test("cmdStackSubmit --server-side passes Auto land through and applies the other pins after the stack exists", async () => {
+  const { h, published, policies } = serverSideHarness();
+  await captureStackOutput(() => cmdStackSubmit(["--server-side", "--auto-land", "off", "--auto-review", "off", "--auto-patch", "off"], h.deps));
+  assert.equal(published[0]!.autoLand, false);
+  assert.deepEqual(policies, [{ stackId: "22222222-2222-4222-8222-222222222222", policy: { autoReviewOverride: false } }]);
+});
+
+test("parseStackPublishArgs reads its flags and rejects a short head SHA", () => {
+  assert.deepEqual(parseStackPublishArgs(["--branch", "a", "--base", "main", "--title", "T", "--auto-land", "off", "--json"]), {
+    branch: "a",
+    base: "main",
+    title: "T",
+    autoLand: false,
+    status: false,
+    asJson: true,
+  });
+  assert.equal(parseStackPublishArgs(["--status"]).status, true);
+  assert.equal(parseStackPublishArgs(["--replace-head", "a".repeat(40)]).replaceHead, "a".repeat(40));
+  assert.throws(() => parseStackPublishArgs(["--replace-head", "abc123"]), /40-character/);
+  assert.throws(() => parseStackPublishArgs(["--branch"]), /usage: mergestorm stack publish/);
+  assert.throws(() => parseStackPublishArgs(["--wat"]), /usage: mergestorm stack publish/);
+});
+
+test("stack submit --server-side and stack publish reach GitHub only through Mergestorm: no gh and no git push, fetch or remote write is spawned", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "mg-no-gh-"));
+  const previousPath = process.env.PATH;
+  try {
+    const work = path.join(root, "work");
+    const bin = path.join(root, "bin");
+    mkdirSync(work);
+    mkdirSync(bin);
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    const git = (args: string[]) => {
+      const result = spawnSync(realGit, args, { cwd: work, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" } });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout.trim();
+    };
+    git(["init", "-q", "--initial-branch=main", "."]);
+    git(["config", "user.name", "Dot Agent"]);
+    git(["config", "user.email", "dot@example.com"]);
+    git(["remote", "add", "origin", "https://github.com/acme/widgets.git"]);
+    writeFileSync(path.join(work, "README.md"), "# widgets\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "Initial commit"]);
+    git(["checkout", "-q", "-b", "feat/layer-1"]);
+    writeFileSync(path.join(work, "logo.bin"), Buffer.from([0, 255, 1, 254]));
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "feat: layer one"]);
+    const tree = git(["rev-parse", "feat/layer-1^{tree}"]);
+
+    const ghMarker = path.join(root, "gh-was-called");
+    const gitLog = path.join(root, "git-calls.log");
+    writeFileSync(path.join(bin, "gh"), `#!/bin/sh\necho "$@" >> "${ghMarker}"\nexit 1\n`);
+    writeFileSync(path.join(bin, "git"), `#!/bin/sh\necho "$@" >> "${gitLog}"\nexec "${realGit}" "$@"\n`);
+    chmodSync(path.join(bin, "gh"), 0o755);
+    chmodSync(path.join(bin, "git"), 0o755);
+    process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ""}`;
+
+    const requests: StackPublicationRequest[] = [];
+    let remoteHead: { sha: string; tree: string } | null = null;
+    const publish = (input: ServerPublishInput) =>
+      publishBranchServerSide(input, {
+        getStackPublication: async () => ({
+          state: remoteHead ? "registered" : "absent",
+          owner: "acme",
+          repo: "widgets",
+          branch: input.branch,
+          head: remoteHead,
+          pr: remoteHead ? { number: 77, url: "https://github.com/acme/widgets/pull/77", base: "main" } : null,
+          stack: null,
+        }),
+        submitStackPublication: async (_cfg, request): Promise<StackPublication> => {
+          requests.push(request);
+          remoteHead = { sha: "a".repeat(40), tree: request.commits.at(-1)?.tree ?? remoteHead!.tree };
+          return {
+            state: "registered",
+            owner: request.owner,
+            repo: request.repo,
+            branch: request.branch,
+            base: request.base,
+            head: remoteHead,
+            commits: [],
+            branchCreated: request.expectedHead === null,
+            branchUpdated: request.expectedHead !== null,
+            pr: { number: 77, url: "https://github.com/acme/widgets/pull/77", created: request.expectedHead === null },
+            stack: { id: "33333333-3333-4333-8333-333333333333", autoPatchOverride: false, autoLand: true },
+          };
+        },
+      });
+    const loadConfig = async () => ({ apiKey: "msk_live_test", apiBase: "https://api.example.test" });
+
+    const submitted = await captureStackOutput(() =>
+      cmdStackSubmit(["--server-side", "--json"], {
+        cwd: work,
+        loadStackMeta: async () => structuredClone(SAMPLE_META),
+        saveStackMeta: async () => {},
+        loadConfig,
+        listStacks: async () => [],
+        findStackPull: async () => null,
+        claimStackPulls: async () => {},
+        publishBranchServerSide: publish,
+      }),
+    );
+    assert.equal(submitted.error, null);
+    assert.equal(requests[0]!.commits[0]!.tree, tree);
+    assert.equal(requests[0]!.expectedHead, null);
+
+    writeFileSync(path.join(work, "fix.txt"), "fix\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "Fix a review finding"]);
+    const followUp = await captureStackOutput(() => cmdStackPublish(["--json"], { cwd: work, loadConfig, publishBranchServerSide: publish }));
+    assert.equal(followUp.error, null);
+    assert.equal(requests[1]!.onto, "head");
+    assert.equal(requests[1]!.expectedHead, "a".repeat(40));
+    assert.deepEqual(requests[1]!.commits.map((entry) => entry.message), ["Fix a review finding\n"]);
+
+    assert.equal(existsSync(ghMarker), false, "gh was spawned");
+    const spawned = readFileSync(gitLog, "utf8").trim().split("\n").map((line) => line.split(" ")[0]);
+    assert.ok(spawned.length > 0);
+    for (const verb of spawned) {
+      assert.ok(!["push", "fetch", "pull", "ls-remote", "clone", "send-pack"].includes(verb!), `git ${verb} was spawned`);
+    }
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

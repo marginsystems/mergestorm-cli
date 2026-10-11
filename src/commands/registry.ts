@@ -5,6 +5,7 @@ import { cmdBranches, cmdChain } from "./branches.js";
 import { canBrowse, openTabsBrowser } from "./browse.js";
 import { cmdCredits } from "./credits.js";
 import { cmdDismiss } from "./dismiss.js";
+import { cmdIssue } from "./issue.js";
 import { cmdJobs, cmdThread } from "./jobs.js";
 import { cmdLogin } from "./login.js";
 import { cmdLogout } from "./logout.js";
@@ -115,6 +116,18 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     ],
     async run(args) {
       await cmdDismiss(args);
+    },
+  },
+  {
+    name: "issue",
+    summary: "Open a GitHub issue through Mergestorm, no gh needed",
+    usage: [
+      "mergestorm issue create --title <title> [--body <text> | --body-file <path>] [--label <name>]… [--repo <owner/repo>] [--json]",
+      "  Opens the issue as the Surge App; needs write access on GitHub, uses existing labels only",
+      "  The same title again returns the open issue it already made when it is among the newest 100 open issues; an older one, or two calls at once, can still create a duplicate",
+    ],
+    async run(args) {
+      await cmdIssue(args);
     },
   },
   {
@@ -264,7 +277,8 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     summary: "Stacks: /stack how-to, list yours, create → submit",
     usage: [
       "mergestorm stack create [name]  New local layer ([--onto] [--trunk] [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off])",
-      "mergestorm stack submit         Push/open active stack ([--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off])",
+      "mergestorm stack submit         Push/open active stack ([--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--server-side])",
+      "mergestorm stack publish        Publish this branch through Mergestorm, no GitHub login ([--branch] [--base] [--title] [--replace-head <sha>] [--auto-land on|off] [--status] [--json])",
       "mergestorm stack reset --force  Clear this repo's pre-submit authoring state",
       "mergestorm stack list [--json]  List registered stacks",
       "mergestorm stack status <stack-id> [--json]  Enriched stack status",

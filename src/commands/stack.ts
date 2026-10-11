@@ -11,6 +11,7 @@ import {
   ensureUpperPark,
   findStackPull,
   getEnrichedStack,
+  getStackPublication,
   landNextStack,
   listMergeQueueEntries,
   listStacks,
@@ -48,6 +49,12 @@ import {
   worktreeDirty,
 } from "../git-stack.js";
 import { buildPrBodyFromCommit } from "../pr-body.js";
+import {
+  publishBranchServerSide,
+  publishWorkingBranch,
+  workingBranchPublication,
+  type WorkingBranchDeps,
+} from "../server-publish.js";
 import { gitTopLevel } from "../repo-identity.js";
 import {
   activeLayers,
@@ -107,7 +114,8 @@ export function openStackWatch(stackId: string, opts: { unread?: boolean } = {})
 
 const STACK_USAGE = `usage:
   mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--json]
-  mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--rest] [--json]
+  mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--rest] [--server-side] [--json]
+  mergestorm stack publish [--branch <branch>] [--base <branch>] [--title <title>] [--replace-head <sha>] [--auto-land on|off] [--status] [--json]
   mergestorm stack reset --force
   mergestorm stack list [--json]
   mergestorm stack status <stack-id> [--json]
@@ -137,6 +145,16 @@ const STACK_USAGE = `usage:
   trunk.
   stack submit talks to GitHub GraphQL and falls back to the REST API when
   GraphQL is blocked; --rest (or MERGESTORM_GITHUB_API=rest) forces REST.
+  stack submit --server-side and stack publish need no GitHub credentials: mg
+  reads your commits from the local repository and sends them to Mergestorm,
+  which writes the commits and the branch on GitHub as the Surge App, opens the
+  pull request, and registers the stack with Auto patch pinned off. They never
+  run gh, git push or git fetch. stack publish does this for one branch and is
+  how you send later commits to a branch that is already published. Mergestorm
+  refuses to move a branch whose head on GitHub matches no local commit unless
+  you name that head with --replace-head. stack publish --status reads how far
+  a branch got (absent, pushed, opened, registered) without changing anything;
+  after a lost response or a failure, run the same command again to resume.
   Parenting onto a branch that already belongs to a registered (submitted)
   stack requires --extend on create and submit — otherwise mg starts a new
   stack from trunk. stack land promotes into the review unit when one exists;
@@ -481,10 +499,12 @@ export function parseStackSubmitArgs(args: string[]): {
   autoResolveConflicts?: boolean;
   autoFixCi?: boolean;
   rest: boolean;
+  serverSide: boolean;
   asJson: boolean;
 } {
   let extend = false;
   let rest = false;
+  let serverSide = false;
   const policy: StackOpenPolicyFlags = {};
   let asJson = false;
   for (let i = 0; i < args.length; i++) {
@@ -501,13 +521,17 @@ export function parseStackSubmitArgs(args: string[]): {
       rest = true;
       continue;
     }
+    if (a === "--server-side") {
+      serverSide = true;
+      continue;
+    }
     const next = takeOpenPolicyFlag(args, i, policy, "stack submit");
     if (next !== null) {
       i = next - 1;
       continue;
     }
     throw new CommandError(
-      "usage: mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--rest] [--json]",
+      "usage: mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--rest] [--server-side] [--json]",
     );
   }
   return {
@@ -518,6 +542,7 @@ export function parseStackSubmitArgs(args: string[]): {
     autoResolveConflicts: policy.autoResolveConflicts,
     autoFixCi: policy.autoFixCi,
     rest,
+    serverSide,
     asJson,
   };
 }
@@ -891,6 +916,9 @@ export type StackSubmitDeps = {
   findStackPull?: typeof findStackPull;
   openStackPull?: typeof openStackPull;
   claimStackPulls?: typeof claimStackPulls;
+  publishBranchServerSide?: typeof publishBranchServerSide;
+  getStackPublication?: typeof getStackPublication;
+  setStackPolicy?: typeof setStackPolicy;
   loadConfig?: typeof loadConfig;
   listStacks?: typeof listStacks;
   adoptStack?: typeof adoptStack;
@@ -902,7 +930,7 @@ export async function cmdStackSubmit(
   args: string[],
   deps: StackSubmitDeps = {},
 ): Promise<void> {
-  const { extend, autoLand, autoReview, autoPatch, autoResolveConflicts, autoFixCi, rest, asJson } =
+  const { extend, autoLand, autoReview, autoPatch, autoResolveConflicts, autoFixCi, rest, serverSide, asJson } =
     parseStackSubmitArgs(args);
   const api: GithubApi = rest ? "rest" : githubApiFromEnv(deps.env ?? process.env);
   const progress = (message: string) => {
@@ -959,7 +987,7 @@ export async function cmdStackSubmit(
     create: (prs: readonly NewPr[]) => Promise<{ number: number; created: boolean }[]>;
   };
   let opener: PrOpener;
-  if (ghReadyFn(cwd)) {
+  if (!serverSide && ghReadyFn(cwd)) {
     opener = {
       findOpen: async (branch) => findOpenPrNumberFn(owner, repo, branch, cwd, { api }),
       create: async (prs) =>
@@ -1061,6 +1089,94 @@ export async function cmdStackSubmit(
         ),
       );
     }
+  }
+
+  if (serverSide) {
+    if (autoPatch === true) {
+      throw new CommandError(
+        "--server-side publishes your own commits and keeps Auto patch off for the stack. Drop --auto-patch on, or submit without --server-side.",
+        REVIEW_EXIT.usage,
+        "usage",
+      );
+    }
+    const parked = plans.find((plan) => plan.githubBase == null);
+    if (parked) {
+      throw new CommandError(
+        `Layer ${parked.branch} opens onto a park freeze, which --server-side does not mint. ` +
+          `Submit the first two layers with --server-side, then add this layer once they are registered.`,
+        1,
+        "unsupported_publication",
+      );
+    }
+    const publishFn = deps.publishBranchServerSide ?? publishBranchServerSide;
+    const publicationFn = deps.getStackPublication ?? getStackPublication;
+    const config = await loadConfigFn();
+    const remoteHeads = new Map<string, string>();
+    const published: Array<{ branch: string; base: string; prNumber: number; created: boolean; head: string; tree: string }> = [];
+    let publishedStackId: string | null = null;
+    for (const plan of plans) {
+      if (!branchExistsFn(plan.branch, cwd)) {
+        throw new CommandError(`Stack layer branch missing locally: ${plan.branch}`);
+      }
+      const base = plan.githubBase as string;
+      let parentHead: { localBaseRef: string; remoteBaseSha: string } | null = null;
+      if (plan.gitParent !== meta.trunk) {
+        const remoteBaseSha =
+          remoteHeads.get(plan.gitParent) ??
+          (await publicationFn(config, { owner, repo, branch: plan.gitParent })).head?.sha;
+        if (!remoteBaseSha) {
+          throw new CommandError(`Parent branch ${plan.gitParent} is not on GitHub yet; publish it first.`);
+        }
+        parentHead = { localBaseRef: plan.gitParent, remoteBaseSha };
+      }
+      progress(ansi.dim(`  Publishing ${plan.branch} → ${base} through Mergestorm …`));
+      const result = await publishFn({
+        cfg: config,
+        cwd,
+        owner,
+        repo,
+        branch: plan.branch,
+        baseBranch: base,
+        ...(parentHead ?? {}),
+        title: tipCommitSubjectFn(plan.branch, cwd),
+        body: buildPrBodyFn(tipCommitMessageFn(plan.branch, cwd)),
+        ...(typeof policy?.autoEnqueueWhenReady === "boolean" ? { autoLand: policy.autoEnqueueWhenReady } : {}),
+      });
+      remoteHeads.set(plan.branch, result.head.sha);
+      publishedStackId = result.stack.id;
+      published.push({
+        branch: plan.branch,
+        base: result.baseBranch,
+        prNumber: result.pr.number,
+        created: result.pr.created,
+        head: result.head.sha,
+        tree: result.head.tree,
+      });
+    }
+    const { autoEnqueueWhenReady: _autoLand, autoPatchOverride: _autoPatch, ...otherOverrides } = policy ?? {};
+    if (publishedStackId && Object.keys(otherOverrides).length > 0) {
+      await (deps.setStackPolicy ?? setStackPolicy)(publishedStackId, otherOverrides, config);
+    }
+    await saveStackMetaFn(removeActiveStack(meta), cwd);
+    const watch = publishedStackId ? openStackWatch(publishedStackId) : null;
+    if (asJson) {
+      console.log(
+        JSON.stringify(
+          { owner, repo, layers: published, stackId: publishedStackId, trunk: meta.trunk, chain: null, serverSide: true, autoPatchOverride: false, watch },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    const lines = published.map((row) =>
+      ansi.brightGreen(`  #${row.prNumber}  ${row.branch} → ${row.base}  (${row.created ? "opened" : "exists"}, head ${row.head.slice(0, 12)})`),
+    );
+    if (publishedStackId) lines.push(ansi.brightGreen(`  Registered stack ${publishedStackId} with Auto patch off`));
+    lines.push(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
+    if (watch) lines.push(...stackWatchTextLines(watch).map((line) => `  ${line}`));
+    await present("Stack", lines);
+    return;
   }
 
   for (const layer of layers) {
@@ -1253,6 +1369,99 @@ export async function cmdStackSubmit(
   summary.push(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
   if (stackId) summary.push(...stackWatchTextLines(openStackWatch(stackId)).map((line) => `  ${line}`));
   await present("Stack", summary);
+}
+
+export function parseStackPublishArgs(args: string[]): {
+  branch?: string;
+  base?: string;
+  title?: string;
+  replaceHead?: string;
+  autoLand?: boolean;
+  status: boolean;
+  asJson: boolean;
+} {
+  const usage =
+    "usage: mergestorm stack publish [--branch <branch>] [--base <branch>] [--title <title>] [--replace-head <sha>] [--auto-land on|off] [--status] [--json]";
+  const out: ReturnType<typeof parseStackPublishArgs> = { status: false, asJson: false };
+  const valued: Record<string, "branch" | "base" | "title" | "replaceHead"> = {
+    "--branch": "branch",
+    "--base": "base",
+    "--title": "title",
+    "--replace-head": "replaceHead",
+  };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--json") {
+      out.asJson = true;
+      continue;
+    }
+    if (a === "--status") {
+      out.status = true;
+      continue;
+    }
+    if (a === "--auto-land") {
+      out.autoLand = parseOnOff(args[++i], "--auto-land", "stack publish");
+      continue;
+    }
+    const key = valued[a];
+    const value = args[i + 1];
+    if (!key || !value || value.startsWith("--")) throw new CommandError(usage, REVIEW_EXIT.usage, "usage");
+    out[key] = value;
+    i += 1;
+  }
+  if (out.replaceHead && !/^[0-9a-f]{40}$/.test(out.replaceHead)) {
+    throw new CommandError("--replace-head takes the full 40-character commit SHA the branch has on GitHub.", REVIEW_EXIT.usage, "usage");
+  }
+  return out;
+}
+
+export type StackPublishDeps = WorkingBranchDeps & { cwd?: string };
+
+export async function cmdStackPublish(args: string[], deps: StackPublishDeps = {}): Promise<void> {
+  const parsed = parseStackPublishArgs(args);
+  const { cwd, ...publishDeps } = deps;
+  const target = {
+    ...(cwd ? { cwd } : {}),
+    ...(parsed.branch ? { branch: parsed.branch } : {}),
+    ...(parsed.base ? { base: parsed.base } : {}),
+  };
+  if (parsed.status) {
+    const status = await workingBranchPublication(target, publishDeps);
+    if (parsed.asJson) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    await present("Stack", [
+      `  ${status.branch}: ${status.state}`,
+      ...(status.head ? [ansi.dim(`  head ${status.head.sha} (tree ${status.head.tree ?? "unknown"})`)] : []),
+      ...(status.pr ? [ansi.dim(`  #${status.pr.number} → ${status.pr.base}  ${status.pr.url}`)] : []),
+      ...(status.stack
+        ? [ansi.dim(`  stack ${status.stack.id}  auto-patch ${status.stack.autoPatchOverride === false ? "off" : "not pinned off"}  auto-land ${status.stack.autoLand ? "on" : "off"}`)]
+        : []),
+    ]);
+    return;
+  }
+  const result = await publishWorkingBranch(
+    {
+      ...target,
+      ...(parsed.title ? { title: parsed.title } : {}),
+      ...(typeof parsed.autoLand === "boolean" ? { autoLand: parsed.autoLand } : {}),
+      ...(parsed.replaceHead ? { replaceHead: parsed.replaceHead } : {}),
+    },
+    publishDeps,
+  );
+  const watch = openStackWatch(result.stack.id);
+  if (parsed.asJson) {
+    console.log(JSON.stringify({ ...result, watch }, null, 2));
+    return;
+  }
+  const moved = result.branchCreated ? "created" : result.branchUpdated ? "updated" : "already current";
+  await present("Stack", [
+    ansi.brightGreen(`  ${result.branch} ${moved} at ${result.head.sha.slice(0, 12)} (tree ${result.head.tree.slice(0, 12)})`),
+    ansi.brightGreen(`  #${result.pr.number}  ${result.branch} → ${result.baseBranch}  (${result.pr.created ? "opened" : "exists"})  ${result.pr.url}`),
+    ansi.brightGreen(`  Registered stack ${result.stack.id} with Auto patch off`),
+    ...stackWatchTextLines(watch).map((line) => `  ${line}`),
+  ]);
 }
 
 async function cmdStackReset(args: string[]): Promise<void> {
@@ -1669,6 +1878,7 @@ export async function cmdStack(args: string[], options: { signal?: AbortSignal }
   }
   if (sub === "create") return cmdStackCreate(rest);
   if (sub === "submit") return cmdStackSubmit(rest);
+  if (sub === "publish") return cmdStackPublish(rest);
   if (sub === "reset") return cmdStackReset(rest);
   if (sub === "list" || sub === "ls") return cmdStackList(rest);
   if (sub === "status") return cmdStackStatus(rest);

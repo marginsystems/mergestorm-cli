@@ -23,7 +23,7 @@ export function parseGithubOriginRepo(
     const url = git(["remote", "get-url", "origin"], cwd).trim();
     if (!url) return null;
     const m = url.match(
-      /^(?:https?:\/\/|git@)?github\.com[:/]([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i,
+      /^(?:https?:\/\/|ssh:\/\/(?:git@)?|git@)?github\.com[:/]([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i,
     );
     if (!m?.[1] || !m[2]) return null;
     return { owner: m[1], repo: m[2] };

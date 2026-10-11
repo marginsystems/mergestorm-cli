@@ -26,7 +26,15 @@ export type CommandErrorCode =
   | "busy"
   | "adopt_failed"
   | "github_unreadable"
-  | "stack_attention";
+  | "stack_attention"
+  | "head_changed"
+  | "base_changed"
+  | "tree_mismatch"
+  | "protected_branch"
+  | "payload_too_large"
+  | "unsupported_publication"
+  | "publication_failed"
+  | "unknown_label";
 
 /** Stable one-shot exit codes for machine callers of `mergestorm review`. */
 export const REVIEW_EXIT = {

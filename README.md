@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.53`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.54`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.53                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.54                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
 │     ▝▀▀▘      review a diff · usage for tabs · /help for all commands        │
-│       ▀       New in v0.3.53: Busy queue no longer reads as stuck            │
+│       ▀       New in v0.3.54: Publish without gh: stack submit --server-side │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -93,8 +93,10 @@ mergestorm chain [slug]         Branch review-chain timeline (default: current b
 mergestorm whoami [--json]      Key prefix, plan, API base, config path
 mergestorm skill install --claude|--cursor|--agents  Copy the Mergestorm skills into this repo
 mergestorm thread <slug>        Jobs in a review thread
+mergestorm issue create --title <t>  Open a GitHub issue through Mergestorm, no `gh` (`--body`, `--body-file`, `--label`, `--repo`)
 mergestorm stack create [name]  New local stack layer (optional `--onto` / `--trunk` / `--extend`)
-mergestorm stack submit         Push layers, open PRs (`gh`), register via adopt (optional `--extend`)
+mergestorm stack submit         Push layers, open PRs (`gh`), register via adopt (optional `--extend`, `--server-side`)
+mergestorm stack publish        Publish the current branch through Mergestorm with no GitHub credentials (`--status` to read it)
 mergestorm stack list [--json]  List registered stacks
 mergestorm stack adopt <owner/repo>#<pr>  Import an existing open PR chain
 mergestorm stack restack <stack-id>  Restack descendants
@@ -144,6 +146,28 @@ Use `mergestorm dismiss` when a Vortex finding is wrong and you have checked it 
 If the parent branch is already a layer of a **registered** (submitted) stack, `create` and `submit` refuse unless you pass **`--extend`**. That blocks accidentally gluing an unrelated PR onto an open unit. Growing a registered stack on purpose: `mg stack create --onto <tip> --extend` → commit → `mg stack submit --extend`.
 
 `stack submit` walks the **active** local stack: `git push -u origin` each layer, opens a PR with `gh` (`--base` = parent or trunk; adopt then moves the bottom of a 2+ PR stack onto `mg-stack-<n>` — leave it there; skips heads that already have an open PR; body from the tip commit — Summary + Test plan, preserving Fixes/Closes/Resolves), registers the stack with `POST /api/v1/stacks/adopt` internally (Mergestorm API key), then drops that local stack entry so the next create onto trunk is clean. Push is always your local `git` credentials. PRs open as you when `gh` is installed and `gh api user` succeeds; otherwise `stack submit` asks the Mergestorm API (`POST /api/v1/stacks/pulls`) to open them as the Mergestorm Surge App on your behalf, after checking your GitHub account has write access, and assigns you. Stacks, the merge queue and Auto land run through Surge, and Cyclone is the auto-patch App. Without Surge, submit stops before pushing and prints the server's message, which names the App to install and links its install page. `mg settings` prints a `Stacks, merge queue, Auto land` line when the server reports whether that App is ready.
+
+#### Publishing without GitHub credentials
+
+`mg stack submit --server-side` and `mg stack publish` are for a machine that can reach Mergestorm but cannot authenticate to GitHub, such as a cloud coding sandbox. They never run `gh`, `git push` or `git fetch`. `mg` reads your commits from the local repository and sends them to Mergestorm with your API key; Mergestorm writes those exact commits and the branch on GitHub as the Surge App, opens a ready pull request, and registers the stack. Surge must be installed on the repository and your linked GitHub account needs write access to it.
+
+These are your own changes, not Cyclone's: the stack is registered with **Auto patch pinned off**, Auto land on for a new stack (`--auto-land off` to keep it off), and Auto review left to your account setting. `--auto-patch on` is refused in this mode. Fix review findings yourself and send the new commits with `mg stack publish`.
+
+```bash
+mg issue create --title "The thing is broken" --body-file issue.md --label bug --json   # no gh
+mg stack create my-fix --onto main      # local only
+git commit -am "Fix the thing"
+mg stack submit --server-side --json    # branch, PR and stack, no gh and no push
+git commit -am "Address a finding"
+mg stack publish --json                 # appends the new commit to the published branch
+mg stack publish --status               # absent | pushed | opened | registered
+```
+
+- **Issues too.** `mg issue create` opens the issue a PR needs through the same Surge App, with existing labels only. Running it again with the same title returns the issue it already opened. Put `Fixes #<n>` in the commit message; `stack submit` carries it into the PR body.
+- **Exact contents.** Every commit travels with its Git tree SHA and the whole content of each changed file, so binaries, deletions, renames, executable bits and symlinks arrive unchanged. Mergestorm moves the branch only when GitHub builds the same tree, and `mg` checks the returned tree against your local branch.
+- **Never overwrites surprises.** `mg` looks at the branch on GitHub first. If its files match one of your local commits, only the commits after that one are appended. If they match none (someone else pushed, or you rebased), `mg` stops with `head_changed`; `--replace-head <sha>` replaces exactly that head and nothing else. Mergestorm refuses `main`, `master`, the default branch, protected branches and its own `mg-stack-*`, `mg-park-*` and `mq-batch-*` branches.
+- **Safe to run again.** After a timeout or an error, run the same command again. It finds the branch, pull request and stack it already made and finishes the missing step; it does not create duplicates.
+- **Limits.** 20 commits, 500 changed paths, 2 MiB a file and 8 MiB in total per publication. Submodules and merge commits are refused with the path or the reason. `stack submit --server-side` publishes the first two layers of a stack; a third layer needs a park freeze, which this mode does not create, so add it once the first two are registered.
 
 Legacy repo-local `.mergestorm/stack.json` state migrates automatically on the next stack command. If local authoring state is stale or malformed, use `mg stack reset --force`; this clears only pre-submit CLI state and never deletes branches, PRs, or registered stacks.
 

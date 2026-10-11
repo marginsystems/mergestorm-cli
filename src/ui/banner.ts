@@ -210,6 +210,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.53": [
     "Busy queue no longer reads as stuck",
   ],
+  "0.3.54": [
+    "Publish without gh: stack submit --server-side",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

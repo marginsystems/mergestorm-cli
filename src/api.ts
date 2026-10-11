@@ -943,6 +943,145 @@ export async function openStackPull(
   };
 }
 
+export type StackPublicationIdentity = { name: string; email: string; date: string };
+
+export type StackPublicationChange =
+  | { path: string; deleted: true }
+  | { path: string; mode: "100644" | "100755" | "120000"; sha: string; content: string };
+
+export type StackPublicationCommit = {
+  message: string;
+  author: StackPublicationIdentity;
+  committer: StackPublicationIdentity;
+  tree: string;
+  changes: StackPublicationChange[];
+};
+
+export type StackPublicationRequest = {
+  owner: string;
+  repo: string;
+  branch: string;
+  base: { branch: string; sha: string };
+  expectedHead: string | null;
+  onto: "base" | "head";
+  commits: StackPublicationCommit[];
+  pr: { title: string; body: string };
+  autoLand?: boolean;
+};
+
+export type StackPublicationStack = { id: string; autoPatchOverride: boolean | null; autoLand: boolean };
+
+export type StackPublicationStatus = {
+  state: "absent" | "pushed" | "opened" | "registered";
+  owner: string;
+  repo: string;
+  branch: string;
+  head: { sha: string; tree: string | null } | null;
+  pr: { number: number; url: string; base: string } | null;
+  stack: StackPublicationStack | null;
+};
+
+export type StackPublication = {
+  state: "registered";
+  owner: string;
+  repo: string;
+  branch: string;
+  base: { branch: string; sha: string };
+  head: { sha: string; tree: string };
+  commits: Array<{ sha: string; tree: string }>;
+  branchCreated: boolean;
+  branchUpdated: boolean;
+  pr: { number: number; url: string; created: boolean };
+  stack: StackPublicationStack;
+};
+
+export const STACK_PUBLICATION_TIMEOUT_MS = 180_000;
+
+const PUBLICATION_ERROR_CODES: readonly CommandErrorCode[] = [
+  "head_changed",
+  "base_changed",
+  "tree_mismatch",
+  "protected_branch",
+  "payload_too_large",
+  "rate_limited",
+];
+
+function stackPublicationFailure(
+  status: number,
+  body: unknown,
+  owner: string,
+  repo: string,
+  failLabel: string,
+  retryAfterSeconds?: number,
+): CommandError {
+  const rejection = (body && typeof body === "object" ? body : {}) as { error?: unknown; state?: unknown };
+  if (status === 404) {
+    return new CommandError(
+      "This Mergestorm server does not publish branches server-side yet.",
+      1,
+      "publication_failed",
+    );
+  }
+  const code = PUBLICATION_ERROR_CODES.find((known) => known === rejection.error);
+  if (!code) {
+    const failure = stackPullFailure(status, body, owner, repo, failLabel);
+    if (failure.code) return failure;
+    const reached = typeof rejection.state === "string" ? ` Reached state: ${rejection.state}. Run the same command again to resume.` : "";
+    return new CommandError(`${failure.message}${reached}`, 1, "publication_failed");
+  }
+  const message = serverMessage((body as { message?: unknown }).message) ?? `${failLabel} (HTTP ${status})`;
+  return new CommandError(message, 1, code, retryAfterSeconds !== undefined ? { retryAfterSeconds } : undefined);
+}
+
+export async function getStackPublication(
+  cfg: Config,
+  input: { owner: string; repo: string; branch: string },
+): Promise<StackPublicationStatus> {
+  const query = new URLSearchParams(input).toString();
+  const { status, body, retryAfterSeconds } = await apiFetch(cfg, `/api/v1/stacks/publications?${query}`);
+  if (status !== 200) {
+    throw stackPublicationFailure(status, body, input.owner, input.repo, `Failed to read the publication of ${input.branch}`, retryAfterSeconds);
+  }
+  return body as StackPublicationStatus;
+}
+
+export async function submitStackPublication(
+  cfg: Config,
+  request: StackPublicationRequest,
+): Promise<StackPublication> {
+  const { status, body, retryAfterSeconds } = await apiFetch(cfg, "/api/v1/stacks/publications", {
+    method: "POST",
+    json: request,
+    timeoutMs: STACK_PUBLICATION_TIMEOUT_MS,
+  });
+  const publication = body as Partial<StackPublication> | null;
+  if ((status !== 200 && status !== 201) || publication?.state !== "registered" || !publication.head || !publication.pr || !publication.stack) {
+    throw stackPublicationFailure(status, body, request.owner, request.repo, `Failed to publish ${request.branch}`, retryAfterSeconds);
+  }
+  return publication as StackPublication;
+}
+
+export async function openStackIssue(
+  input: { owner: string; repo: string; title: string; body: string; labels: string[] },
+  cfg?: Config,
+): Promise<{ number: number; url: string; created: boolean }> {
+  const { status, body, retryAfterSeconds } = await apiFetch(cfg ?? (await loadConfig()), "/api/v1/stacks/issues", { method: "POST", json: input });
+  const row = (body ?? {}) as { number?: unknown; url?: unknown; created?: unknown; error?: unknown; message?: unknown };
+  if ((status !== 200 && status !== 201) || typeof row.number !== "number" || row.number <= 0) {
+    if (status === 404) {
+      throw new CommandError("This Mergestorm server does not open issues yet.", 1, "publication_failed");
+    }
+    if (status === 429 || row.error === "rate_limited") {
+      throw new CommandError(rateLimitedMessage(retryAfterSeconds), REVIEW_EXIT.rate_limited, "rate_limited", retryAfterSeconds !== undefined ? { retryAfterSeconds } : undefined);
+    }
+    if (row.error === "unknown_label") {
+      throw new CommandError(typeof row.message === "string" ? row.message : "Unknown label", 1, "unknown_label");
+    }
+    throw stackPullFailure(status, body, input.owner, input.repo, `Failed to open the issue on ${input.owner}/${input.repo}`);
+  }
+  return { number: row.number, url: typeof row.url === "string" ? row.url : "", created: row.created === true };
+}
+
 async function stackMutation(
   stackId: string,
   pathSuffix: string,
