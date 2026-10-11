@@ -321,7 +321,7 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   ci_red_on_base: "the same check also fails on the base branch",
   ci_rerun_exhausted: "Cyclone already had Surge re-run this check once at this head",
   ci_rerun_unavailable: "the failure looked flaky and Surge could not re-run it",
-  ci_unverified: "Cyclone could not confirm a fix locally, so it pushed nothing",
+  ci_unverified: "Cyclone's static checks did not cover its fix, so it pushed nothing",
   ci_unreadable: "Cyclone could not read the failing checks",
   ci_needs_actions_read: "Cyclone's GitHub App cannot read the Actions logs on this repo",
   ci_unresolved: "Cyclone's CI fix failed",
@@ -760,6 +760,7 @@ export type MergeQueueWait = {
   waitReason: string | null;
   aheadStackId: string | null;
   aheadOther: boolean;
+  idleSince?: string | null;
 };
 
 function minutesOf(ms: number | null): number {
@@ -775,11 +776,22 @@ export function mergeQueueWait(queue: readonly MergeQueueEntryDto[], nowMs: numb
     const queuedFor = minutesOf(queuedMs);
     const ahead = entry.aheadInRepo;
     if (!ahead) {
+      const progressAt = entry.repoQueue?.progressAt ?? null;
+      const progressMs = progressAt ? waitedMs(progressAt, nowMs) : null;
+      const idleMs = queuedMs != null && progressMs != null ? Math.min(queuedMs, progressMs) : queuedMs;
+      const queuedAhead = entry.repoQueue?.queuedAhead ?? 0;
+      const turn = queuedAhead > 0
+        ? `behind ${queuedAhead} older queued ${queuedAhead === 1 ? "entry" : "entries"}`
+        : "not picked up yet";
+      const moved = progressMs != null && queuedMs != null && progressMs < queuedMs
+        ? `; the queue last moved ${minutesOf(progressMs)}m ago`
+        : "";
       return {
-        text: `Queued ${queuedFor}m in the merge queue, not picked up yet${reason ? ` (last note: ${reason})` : ""}`,
-        stalled: queuedMs != null && queuedMs >= MERGE_QUEUE_STALL_ATTENTION_MS,
+        text: `Queued ${queuedFor}m in the merge queue, ${turn}${moved}${reason ? ` (last note: ${reason})` : ""}`,
+        stalled: idleMs != null && idleMs >= MERGE_QUEUE_STALL_ATTENTION_MS,
         notPickedUp: true,
         since: entry.enqueuedAt, waitReason: reason, aheadStackId: null, aheadOther: false,
+        idleSince: moved ? progressAt : null,
       };
     }
     const aheadMs = ahead.claimedAt ? waitedMs(ahead.claimedAt, nowMs) : null;
@@ -810,7 +822,7 @@ function queueStalledSteps(stack: StackDto, layer: StackLayerDto, wait: MergeQue
     return `#${layer.prNumber} is waiting in the merge queue behind another entry in ${stack.owner}/${stack.repo} that has made no progress since ${wait.since ?? "it was claimed"}. Nothing on ${layer.branch} needs a change. ${ahead} If it stays stuck, tell the human: the queue for this repo is held by that entry.`;
   }
   if (wait.notPickedUp) {
-    return `#${layer.prNumber} has been queued in the merge queue for ${stack.owner}/${stack.repo} since ${wait.since ?? "it was enqueued"} and nothing is working on it or on an entry ahead of it${wait.waitReason ? `; its last note is: ${wait.waitReason}` : ""}. Nothing on ${layer.branch} needs a change: do not patch or push for this. If the note says the base branch keeps moving, the queue is waiting for a quiet moment on it and continues by itself once pushes to that branch pause. Otherwise tell the human: the merge queue is not picking this entry up; they can take the stack out of the queue and enqueue it again (mg queue rm ${stack.id}, then mg queue add ${stack.id}). Do not retarget the PR base.`;
+    return `#${layer.prNumber} has been queued in the merge queue for ${stack.owner}/${stack.repo} since ${wait.since ?? "it was enqueued"} and nothing is working on it or on an entry ahead of it${wait.idleSince ? `: the queue last claimed or finished an entry at ${wait.idleSince}` : ""}${wait.waitReason ? `; its last note is: ${wait.waitReason}` : ""}. Nothing on ${layer.branch} needs a change: do not patch or push for this. If the note says the base branch keeps moving, the queue is waiting for a quiet moment on it and continues by itself once pushes to that branch pause. Otherwise tell the human: the merge queue is not picking this entry up; they can take the stack out of the queue and enqueue it again (mg queue rm ${stack.id}, then mg queue add ${stack.id}). Do not retarget the PR base.`;
   }
   return `The merge queue has held #${layer.prNumber} at ${layer.headSha ?? "its head"} since ${wait.since ?? "it was claimed"} without landing or bouncing it${wait.waitReason ? `; its last note is: ${wait.waitReason}` : ", and it recorded no reason"}. If the note names a failing check or a conflict on ${layer.branch}, fix that with an ordinary push. If it waits on CI, list the head's checks (gh run list --branch ${layer.branch}) and re-run the one that never finished (gh run rerun <run-id>). If nothing moves after that, tell the human: they can take the stack out of the queue and enqueue it again (mg queue rm ${stack.id}, then mg queue add ${stack.id}). Do not retarget the PR base.`;
 }

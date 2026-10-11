@@ -1285,6 +1285,50 @@ for (const reason of ["ci_pending", "some_new_gate_running"]) {
   });
 }
 
+test("a land PR with a Vortex Blocker that Cyclone left for a person is attention at once", async () => {
+  for (const reason of ["hold", "left_for_human", "failed"]) {
+    const land = layer({
+      branch: "mg-land-79", parentBranch: "main", prNumber: 2874, position: 1,
+      vortexStatus: "findings", reviewStatus: "changes_requested", vortexReview: done(HEAD),
+      cycloneHandoff: { headSha: HEAD, reason, at: null },
+    });
+    const h = harness(unitStack([land], { state: "growing", landPrNumber: 2874 }));
+    h.options.timeoutMs = 0;
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention", reason);
+    assert.equal(result.blocker, "Vortex findings need a person", reason);
+    assert.equal(result.prNumber, 2874, reason);
+    assert.equal(result.repair?.kind, "vortex_findings", reason);
+  }
+});
+
+test("a land PR whose Important findings Cyclone held is attention at once", async () => {
+  const land = layer({
+    branch: "mg-land-79", parentBranch: "main", prNumber: 2874, position: 1,
+    vortexStatus: "findings", reviewStatus: "reviewed", vortexReview: done(HEAD),
+    cycloneHandoff: { headSha: HEAD, reason: "failed", at: null },
+  });
+  const h = harness(unitStack([land], { state: "growing", landPrNumber: 2874 }));
+  h.options.timeoutMs = 0;
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, "Vortex findings need a person");
+});
+
+test("Auto land waiting on the land PR's Vortex review is attention after 30 minutes when nothing else names it", () => {
+  const land = layer({ branch: "mg-land-79", parentBranch: "main", prNumber: 2874, position: 1 });
+  const held: StackDto = {
+    ...unitStack([land], { state: "growing", landPrNumber: 2874 }),
+    autoEnqueueWhenReady: true,
+    autoLandWait: { reason: "vortex_not_green", prNumber: 2874, headSha: HEAD, since: new Date(0).toISOString(), attempts: null, detail: null },
+  };
+  assert.equal(stackBlockers(held, [], {}, 29 * MINUTE).attention, null);
+  const late = stackBlockers(held, [], {}, 31 * MINUTE);
+  assert.match(late.attention?.blocker ?? "", /^No green Vortex review for 31m/);
+  assert.equal(late.repair?.kind, "vortex_not_green");
+  assert.equal(late.repair?.kind === "vortex_not_green" ? late.repair.prNumber : null, 2874);
+});
+
 test("a failed land gate is still attention", async () => {
   const land = layer({ branch: "mg-land-79", parentBranch: "main", prNumber: 2874, position: 1 });
   const h = harness(unitStack([land], { state: "landing", landPrNumber: 2874,
@@ -2100,6 +2144,32 @@ test("a queued entry with nothing live ahead is a wait for 44 minutes after it w
   assert.match(result.repair?.steps ?? "", /nothing is working on it or on an entry ahead of it; its last note is: main keeps moving/);
   assert.match(result.repair?.steps ?? "", /do not patch or push for this/);
   assert.match(result.repair?.steps ?? "", /mg queue rm stack, then mg queue add stack/);
+});
+
+test("a queued entry waiting its turn in a queue that keeps moving is a wait, not a stall", async () => {
+  const note = "held out of batches: touches workflow files; runs alone once the 2 older entries ahead of it have landed or bounced";
+  const held = (progressMinutes: number) => bounce({ state: "queued", bounceDetail: null, finishedAt: null,
+    enqueuedAt: minutesBefore(67), waitReason: note, repoQueue: { queuedAhead: 2, progressAt: minutesBefore(progressMinutes) } });
+  const h = harness(stack(), [held(1)]);
+  h.options.now = () => QUEUE_NOW;
+  h.options.timeoutMs = 0;
+  const moving = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(moving.status, "in_progress");
+  assert.equal(moving.blocker, null);
+  assert.equal(moving.queueWait?.text,
+    `Queued 67m in the merge queue, behind 2 older queued entries; the queue last moved 1m ago (last note: ${note})`);
+
+  const idle = stackBlockers(stack(), [held(46)], {}, QUEUE_NOW);
+  assert.equal(idle.repair?.kind, "queue_stalled");
+  assert.match(idle.attention?.blocker ?? "", /^Merge queue stuck: Queued 67m in the merge queue, behind 2 older queued entries; the queue last moved 46m ago/);
+  assert.match(idle.repair?.steps ?? "", new RegExp(`the queue last claimed or finished an entry at ${minutesBefore(46)}`));
+});
+
+test("queue progress older than the entry does not shorten its stall clock", () => {
+  const queued = bounce({ state: "queued", bounceDetail: null, finishedAt: null, enqueuedAt: minutesBefore(50),
+    repoQueue: { queuedAhead: 0, progressAt: minutesBefore(300) } });
+  const result = stackBlockers(stack(), [queued], {}, QUEUE_NOW);
+  assert.equal(result.attention?.blocker, "Merge queue stuck: Queued 50m in the merge queue, not picked up yet");
 });
 
 test("a running entry without a claim timestamp has an unknown age", () => {

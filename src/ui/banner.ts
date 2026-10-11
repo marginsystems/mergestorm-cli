@@ -207,6 +207,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.52": [
     "Sign-in errors name the agent login",
   ],
+  "0.3.53": [
+    "Busy queue no longer reads as stuck",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

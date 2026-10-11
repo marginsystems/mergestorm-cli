@@ -627,6 +627,11 @@ export type MergeQueueAheadDto = {
   waitReason: string | null;
 };
 
+export type MergeQueueRepoQueueDto = {
+  queuedAhead: number;
+  progressAt: string | null;
+};
+
 export type MergeQueueEntryDto = {
   id: string;
   stackId: string;
@@ -652,4 +657,5 @@ export type MergeQueueEntryDto = {
   finishedAt: string | null;
   claimedAt?: string | null;
   aheadInRepo?: MergeQueueAheadDto | null;
+  repoQueue?: MergeQueueRepoQueueDto | null;
 };
