@@ -2046,6 +2046,8 @@ test("a stack with auto-patch off names Vortex findings at the head with no Cycl
 
 for (const [reason, words] of [
   ["account_auto_patch_off", /auto-patch is off for the account/],
+  ["repo_auto_patch_off", /auto-patch is off for this repository and this stack does not turn it on/],
+  ["repo_setting_unavailable", /repository's auto-patch setting could not be read/],
   ["cyclone_not_connected", /Cyclone is not connected to this repo/],
   ["stack_auto_patch_off", /auto-patch is off for this stack/],
 ] as const) {
@@ -2239,6 +2241,32 @@ for (const [skipReason, blocker, step] of [
     assert.match(result.repair?.steps ?? "", step);
   });
 }
+
+for (const [vortexReviewOff, words] of [
+  ["stack_auto_review_off", /Vortex auto-review is off for this stack, so it skipped #42/],
+  ["repo_auto_review_off", /Vortex auto-review is off for the repository [^ ]+\/[^ ]+, so it skipped #42 .*Turning it on for the repository \(mg settings --repo [^ ]+\/[^ ]+ --auto-review on\) applies from the next push and queues nothing/],
+  ["account_auto_review_off", /Vortex auto-review is off for the account, so it skipped #42/],
+] as const) {
+  test(`a review skipped because auto-review is off says which level turned it off (${vortexReviewOff})`, async () => {
+    const h = harness({
+      ...stack([layer({ vortexStatus: "skipped", vortexReview: { ...quotaSkipped, skip_reason: "auto_review_off" } })]),
+      vortexReviewOff,
+    });
+    const result = await pollStackWatch(cfg, "stack", h.options);
+    assert.equal(result.status, "attention");
+    assert.equal(result.blocker, "Vortex auto-review is off, so this head was not reviewed");
+    assert.match(result.repair?.steps ?? "", words);
+  });
+}
+
+test("a skip left from before auto-review was turned back on says nothing re-queues it and gives the mention", async () => {
+  const h = harness(stack([layer({ vortexStatus: "skipped", vortexReview: { ...quotaSkipped, skip_reason: "auto_review_off" } })]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.match(
+    result.repair?.steps ?? "",
+    /If auto-review has been turned back on since this head was pushed, the skip is from before that and nothing re-queues it: comment @mergestorm-vortex review on #42\./,
+  );
+});
 
 test("a Vortex review that covered only part of the PR is attention with the mention that continues it", async () => {
   const h = harness(stack([layer({ vortexStatus: "incomplete",

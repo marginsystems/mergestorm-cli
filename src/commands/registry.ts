@@ -229,6 +229,10 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "  [--vortex-skip-check none|neutral] [--vortex-findings failure|neutral|success]",
       "  [--cyclone-fail-check failure|neutral]",
       "  With flags: PATCH those settings and print the stored result",
+      "mergestorm settings --repos [--json]    Repository-level Auto patch, Auto review and Auto land for every connected repository",
+      "mergestorm settings --repo <owner>/<repo> [--auto-patch on|off|inherit] [--auto-review on|off|inherit] [--auto-land on|off|inherit] [--json]",
+      "  A repository value beats the account setting; a stack override (mergestorm stack set) beats the repository.",
+      "  inherit clears the repository value so the account setting applies. --auto-land seeds new stacks only.",
     ],
     async run(args, ctx) {
       await cmdSettings(args, { mode: ctx.mode });

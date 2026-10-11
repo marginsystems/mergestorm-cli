@@ -300,6 +300,8 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   failed: "Cyclone's patch failed, so it pushed nothing",
   auto_patch_off: "auto-patch is off for this stack",
   stack_auto_patch_off: "auto-patch is off for this stack",
+  repo_auto_patch_off: "auto-patch is off for this repository and this stack does not turn it on",
+  repo_setting_unavailable: "the repository's auto-patch setting could not be read, so Cyclone will not patch until it can",
   account_auto_patch_off: "auto-patch is off for the account and this stack does not turn it on",
   cyclone_not_connected: "Cyclone is not connected to this repo",
   infra_failure: "Cyclone could not start the patch: GitHub sign-in, comment load or checkout kept failing",
@@ -457,7 +459,23 @@ function vortexSkippedSteps(stack: StackDto, layer: StackLayerDto, skipReason: s
   const head = layer.headSha ?? "its live head";
   const mention = `comment @mergestorm-vortex review on #${layer.prNumber}`;
   if (skipReason === "auto_review_off") {
-    return `Vortex auto-review is off for ${stack.owner}/${stack.repo} or for this stack, so it skipped #${layer.prNumber} at ${head} and Auto land waits for a review that will not come. Do not patch or push for this. Tell the human: turning auto-review on (mg stack set ${stack.id} --auto-review on, or the account setting in the dashboard) queues a review of this head by itself. To review only this head and leave auto-review off, ${mention}.`;
+    const slug = `${stack.owner}/${stack.repo}`;
+    const where =
+      stack.vortexReviewOff === "stack_auto_review_off"
+        ? "for this stack"
+        : stack.vortexReviewOff === "repo_auto_review_off"
+          ? `for the repository ${slug}`
+          : stack.vortexReviewOff === "account_auto_review_off"
+            ? "for the account"
+            : `for ${slug} or for this stack`;
+    const lead = `Vortex auto-review is off ${where}, so it skipped #${layer.prNumber} at ${head} and Auto land waits for a review that will not come. Do not patch or push for this.`;
+    if (stack.vortexReviewOff === "repo_auto_review_off") {
+      return `${lead} Tell the human: turning auto-review on for this stack only (mg stack set ${stack.id} --auto-review on) queues a review of this head by itself. Turning it on for the repository (mg settings --repo ${slug} --auto-review on) applies from the next push and queues nothing, so this head still needs a mention. To review only this head and leave auto-review off, ${mention}.`;
+    }
+    const sinceTurnedOn = stack.vortexReviewOff
+      ? ""
+      : ` If auto-review has been turned back on since this head was pushed, the skip is from before that and nothing re-queues it: ${mention}.`;
+    return `${lead} Tell the human: turning auto-review on (mg stack set ${stack.id} --auto-review on, or the account setting in the dashboard) queues a review of this head by itself. To review only this head and leave auto-review off, ${mention}.${sinceTurnedOn}`;
   }
   if (skipReason === "ignored_author") {
     return `Vortex skipped #${layer.prNumber} at ${head} because the PR's author is on the account's ignored authors list, so Auto land waits for a review that will not come. Do not patch or push for this. To review this head once, ${mention}. To have this author's PRs reviewed by themselves, tell the human to remove the author from the ignored authors list in the Mergestorm dashboard settings.`;

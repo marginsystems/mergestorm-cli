@@ -446,3 +446,113 @@ test("Config tab excludes enum and login rows", () => {
   }
   assert.ok(rows.some((row) => row.key === "vortex_skip_all_clear_comments"));
 });
+
+const REPO_BODY = {
+  owner: "acme",
+  repo: "app",
+  auto_patch_enabled: false,
+  auto_review_enabled: null,
+  auto_land_default: null,
+};
+
+test("parseSettingsArgs with --repo reads on, off and inherit for the three repository switches", () => {
+  assert.deepEqual(
+    parseSettingsArgs(["--repo", "acme/app", "--auto-patch", "off", "--auto-review=inherit", "--auto-land", "on"]),
+    {
+      json: false,
+      patch: {},
+      repo: {
+        owner: "acme",
+        repo: "app",
+        patch: { auto_patch_enabled: false, auto_review_enabled: null, auto_land_default: true },
+      },
+    },
+  );
+  assert.deepEqual(parseSettingsArgs(["--auto-patch", "off", "--repo=acme/app", "--json"]), {
+    json: true,
+    patch: {},
+    repo: { owner: "acme", repo: "app", patch: { auto_patch_enabled: false } },
+  });
+});
+
+test("parseSettingsArgs with --repo refuses account-only flags, bad values and a bad repository", () => {
+  for (const [args, words] of [
+    [["--repo", "acme/app", "--auto-fix-ci", "off"], /--auto-fix-ci is an account setting/],
+    [["--repo", "acme/app", "--auto-patch", "default"], /--auto-patch takes on, off or inherit with --repo/],
+    [["--repo", "acme"], /--repo takes <owner>\/<repo>/],
+    [["--repo"], /--repo takes <owner>\/<repo>/],
+    [["--repos", "--auto-patch", "off"], /--repos lists repository settings/],
+  ] as const) {
+    assert.throws(() => parseSettingsArgs([...args]), (err: unknown) => err instanceof CommandError && words.test(err.message));
+  }
+});
+
+test("inherit is not a value for an account setting", () => {
+  assert.throws(() => parseSettingsArgs(["--auto-patch", "inherit"]), /--auto-patch takes on or off/);
+});
+
+test("cmdSettings --repo with a flag PATCHes that repository and prints the stored values", async () => {
+  useTestEnv();
+  originalFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    urls.push(`${init?.method ?? "GET"} ${String(input)}`);
+    assert.deepEqual(JSON.parse(String(init?.body)), { auto_patch_enabled: false });
+    return new Response(JSON.stringify(REPO_BODY), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const text = stripAnsi(await captureLog(() => cmdSettings(["--repo", "acme/app", "--auto-patch", "off"])));
+  assert.deepEqual(urls, ["PATCH https://api.example.test/api/v1/settings/repos/acme/app"]);
+  assert.match(text, /acme\/app/);
+  assert.match(text, /Auto patch\s+off/);
+  assert.match(text, /Auto review\s+inherit \(follows the account\)/);
+});
+
+test("cmdSettings --repo without a flag shows only that repository", async () => {
+  useTestEnv();
+  originalFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    urls.push(`${init?.method ?? "GET"} ${String(input)}`);
+    return new Response(
+      JSON.stringify({ repos: [REPO_BODY, { ...REPO_BODY, repo: "other", auto_patch_enabled: null }] }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  const text = await captureLog(() => cmdSettings(["--repo", "Acme/App", "--json"]));
+  assert.deepEqual(urls, ["GET https://api.example.test/api/v1/settings/repos"]);
+  assert.deepEqual(JSON.parse(text), REPO_BODY);
+});
+
+test("cmdSettings --repos lists every connected repository", async () => {
+  useTestEnv();
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ repos: [REPO_BODY] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const text = await captureLog(() => cmdSettings(["--repos", "--json"]));
+  assert.deepEqual(JSON.parse(text), { repos: [REPO_BODY] });
+});
+
+test("cmdSettings --repo surfaces the API message when the account did not connect the repository", async () => {
+  useTestEnv();
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ error: "repo_not_connected", message: "acme/app is not connected to this account." }),
+      { status: 404, headers: { "Content-Type": "application/json" } },
+    );
+  await assert.rejects(
+    cmdSettings(["--repo", "acme/app", "--auto-patch", "off"]),
+    (err: unknown) => err instanceof CommandError && /acme\/app is not connected to this account/.test(err.message),
+  );
+});
+
+test("cmdSettings --repos fails on a reply without a repository list instead of showing none", async () => {
+  useTestEnv();
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+  await assert.rejects(
+    cmdSettings(["--repos", "--json"]),
+    (err: unknown) => err instanceof CommandError && /unexpected shape/.test(err.message),
+  );
+});

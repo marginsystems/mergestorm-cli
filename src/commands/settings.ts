@@ -1,6 +1,12 @@
 import {
   getSettings,
+  listRepoSettings,
+  patchRepoSettings,
   patchSettings,
+  REPO_SETTINGS_KEYS,
+  type RepoSettings,
+  type RepoSettingsKey,
+  type RepoSettingsPatch,
   type SettingsPatch,
   type SettingsResponse,
 } from "../api.js";
@@ -18,7 +24,123 @@ import { buildConfigRows, canBrowse, openTabsBrowser } from "./browse.js";
 export const SETTINGS_FLAGS = BEARER_SETTINGS_FLAGS;
 
 type IgnoreBotOperation = { action: "add" | "remove"; login: string } | { action: "clear" };
-export type SettingsArgs = { json: boolean; patch: SettingsPatch; ignoreBots?: IgnoreBotOperation[] };
+export type RepoSettingsScope = { owner: string; repo: string; patch: RepoSettingsPatch };
+export type SettingsArgs = {
+  json: boolean;
+  patch: SettingsPatch;
+  ignoreBots?: IgnoreBotOperation[];
+  repo?: RepoSettingsScope;
+  listRepos?: boolean;
+};
+
+const REPO_FLAG_LABELS: Readonly<Record<RepoSettingsKey, string>> = {
+  auto_patch_enabled: "Auto patch",
+  auto_review_enabled: "Auto review",
+  auto_land_default: "Auto land (new stacks)",
+};
+
+function parseRepoSlug(raw: string | undefined): { owner: string; repo: string } {
+  const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(raw ?? "");
+  if (!match) throw new CommandError("--repo takes <owner>/<repo>.", 2, "usage");
+  return { owner: match[1]!, repo: match[2]! };
+}
+
+function repoArg(args: string[]): { slug: string | undefined; rest: string[]; listRepos: boolean } {
+  const rest: string[] = [];
+  let slug: string | undefined;
+  let found = false;
+  let listRepos = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--repos") listRepos = true;
+    else if (arg === "--repo") {
+      found = true;
+      slug = args[++i];
+    } else if (arg.startsWith("--repo=")) {
+      found = true;
+      slug = arg.slice("--repo=".length);
+    } else rest.push(arg);
+  }
+  if (found && slug === undefined) slug = "";
+  return { slug, rest, listRepos };
+}
+
+function parseRepoSettingsArgs(slug: string, args: string[]): SettingsArgs {
+  const scope: RepoSettingsScope = { ...parseRepoSlug(slug), patch: {} };
+  let json = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const flag = eq >= 0 ? arg.slice(0, eq) : arg;
+    const key = SETTINGS_FLAGS[flag];
+    if (!key) {
+      throw new CommandError(`Unknown settings flag: ${flag}. See \`mergestorm --help\`.`, 2, "usage");
+    }
+    if (!(REPO_SETTINGS_KEYS as readonly string[]).includes(key)) {
+      throw new CommandError(
+        `${flag} is an account setting. With --repo only --auto-patch, --auto-review and --auto-land can be set.`,
+        2,
+        "usage",
+      );
+    }
+    const value = eq >= 0 ? arg.slice(eq + 1) : args[++i];
+    if (value !== "on" && value !== "off" && value !== "inherit") {
+      throw new CommandError(`${flag} takes on, off or inherit with --repo.`, 2, "usage");
+    }
+    scope.patch[key as RepoSettingsKey] = value === "inherit" ? null : value === "on";
+  }
+  return { json, patch: {}, repo: scope };
+}
+
+function repoSettingWords(value: boolean | null): string {
+  return value === null ? "inherit (follows the account)" : value ? "on" : "off";
+}
+
+export function formatRepoSettingsLines(repos: readonly RepoSettings[]): string[] {
+  if (repos.length === 0) return ["  No repositories are connected to this account."];
+  const width = Math.max(...Object.values(REPO_FLAG_LABELS).map((label) => label.length));
+  return repos.flatMap((entry) => [
+    `  ${entry.owner}/${entry.repo}`,
+    ...REPO_SETTINGS_KEYS.map(
+      (key) => `    ${REPO_FLAG_LABELS[key].padEnd(width + 2)}${repoSettingWords(entry[key])}`,
+    ),
+  ]);
+}
+
+async function cmdRepoSettings(
+  parsed: SettingsArgs,
+  opts: { mode?: "oneshot" | "shell" },
+): Promise<void> {
+  const cfg = await loadConfig();
+  let repos: RepoSettings[];
+  const scope = parsed.repo;
+  if (scope && Object.keys(scope.patch).length > 0) {
+    repos = [await patchRepoSettings(scope.owner, scope.repo, scope.patch, cfg)];
+  } else {
+    repos = await listRepoSettings(cfg);
+    if (scope) {
+      const wanted = `${scope.owner}/${scope.repo}`.toLowerCase();
+      repos = repos.filter((entry) => `${entry.owner}/${entry.repo}`.toLowerCase() === wanted);
+      if (repos.length === 0) {
+        throw new CommandError(`${scope.owner}/${scope.repo} is not connected to this account.`);
+      }
+    }
+  }
+  if (parsed.json) {
+    const text = JSON.stringify(scope ? repos[0] : { repos }, null, 2);
+    if (opts.mode === "shell") {
+      await present("Repository settings", text.split("\n"));
+      return;
+    }
+    console.log(text);
+    return;
+  }
+  await present("Repository settings", formatRepoSettingsLines(repos));
+}
 
 function canonicalLogin(raw: string): string {
   const login = raw.trim().toLowerCase().replace(/\[bot\]$/, "");
@@ -29,7 +151,17 @@ function canonicalLogin(raw: string): string {
 }
 
 /** Parse boolean and enum flags plus ordered ignore-list operations. */
-export function parseSettingsArgs(args: string[]): SettingsArgs {
+export function parseSettingsArgs(rawArgs: string[]): SettingsArgs {
+  const { slug, rest: args, listRepos } = repoArg(rawArgs);
+  if (slug !== undefined) {
+    if (listRepos) throw new CommandError("--repos and --repo cannot be combined.", 2, "usage");
+    return parseRepoSettingsArgs(slug, args);
+  }
+  if (listRepos) {
+    const other = args.find((arg) => arg !== "--json");
+    if (other) throw new CommandError(`--repos lists repository settings and takes only --json, not ${other}.`, 2, "usage");
+    return { json: args.includes("--json"), patch: {}, listRepos: true };
+  }
   let json = false;
   const ignoreBots: IgnoreBotOperation[] = [];
   const patch: SettingsPatch = {};
@@ -119,7 +251,12 @@ export async function cmdSettings(
   args: string[],
   opts: { mode?: "oneshot" | "shell" } = {},
 ): Promise<void> {
-  const { json, patch, ignoreBots } = parseSettingsArgs(args);
+  const parsed = parseSettingsArgs(args);
+  if (parsed.repo || parsed.listRepos) {
+    await cmdRepoSettings(parsed, opts);
+    return;
+  }
+  const { json, patch, ignoreBots } = parsed;
   const hasPatch = Object.keys(patch).length > 0 || Boolean(ignoreBots?.length);
 
   // Bare `settings` on a TTY: the tabbed browser, opened on Config.

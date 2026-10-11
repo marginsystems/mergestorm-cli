@@ -410,7 +410,14 @@ export type StackUnitDto = {
 
 export type CycloneOwnerMatch = "same" | "different" | "none" | "lookup_failed";
 
-export type CyclonePatchOffReason = "stack_auto_patch_off" | "account_auto_patch_off" | "cyclone_not_connected";
+export type CyclonePatchOffReason =
+  | "stack_auto_patch_off"
+  | "repo_auto_patch_off"
+  | "repo_setting_unavailable"
+  | "account_auto_patch_off"
+  | "cyclone_not_connected";
+
+export type VortexReviewOffReason = "stack_auto_review_off" | "repo_auto_review_off" | "account_auto_review_off";
 
 export type CycloneConflictOffReason = "stack_auto_resolve_off" | "account_auto_resolve_off" | "cyclone_not_connected";
 
@@ -460,12 +467,14 @@ export type StackDto = {
   } | null;
   /**
    * Per-stack Vortex auto-review override. `null` (or missing) follows the
-   * account `auto_review_enabled` flag; a boolean wins in both directions.
+   * repository setting and then the account `auto_review_enabled` flag; a
+   * boolean wins in both directions.
    */
   autoReviewOverride?: boolean | null;
   /**
    * Per-stack Cyclone auto-patch override. `null` (or missing) follows the
-   * account `auto_patch_enabled` flag; a boolean wins in both directions.
+   * repository setting and then the account `auto_patch_enabled` flag; a
+   * boolean wins in both directions.
    */
   autoPatchOverride?: boolean | null;
   autoResolveConflictsOverride?: boolean | null;
@@ -491,6 +500,11 @@ export type StackDto = {
    */
   cycloneOwnerMatch?: CycloneOwnerMatch;
   cyclonePatchOff?: CyclonePatchOffReason;
+  /**
+   * Which level turned Auto review off for this stack: its own override, the
+   * repository setting, or the account. Absent while Auto review is on.
+   */
+  vortexReviewOff?: VortexReviewOffReason;
   cycloneConflictOff?: CycloneConflictOffReason;
   cycloneCiOff?: CycloneCiOffReason;
   infrastructureInstallUserId?: string | null;

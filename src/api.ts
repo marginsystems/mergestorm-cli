@@ -376,6 +376,63 @@ export type SettingsResponse = import("./automation-catalog.js").BearerSettingsV
   stacks_ready?: boolean;
 };
 
+export const REPO_SETTINGS_KEYS = ["auto_patch_enabled", "auto_review_enabled", "auto_land_default"] as const;
+
+export type RepoSettingsKey = (typeof REPO_SETTINGS_KEYS)[number];
+
+export type RepoSettings = { owner: string; repo: string } & Record<RepoSettingsKey, boolean | null>;
+
+export type RepoSettingsPatch = Partial<Record<RepoSettingsKey, boolean | null>>;
+
+function repoSettingsFailure(status: number, body: unknown, retryAfterSeconds: number | undefined, action: string): CommandError {
+  if (status === 429) {
+    return new CommandError(rateLimitedMessage(retryAfterSeconds), REVIEW_EXIT.rate_limited, "rate_limited", {
+      retryAfterSeconds,
+    });
+  }
+  const message = (body as { message?: unknown } | null)?.message;
+  if (typeof message === "string" && message.trim()) return new CommandError(message);
+  if (status === 404) {
+    return new CommandError(
+      "Repository settings are not available on this server yet. Deploy the API update or use the dashboard.",
+    );
+  }
+  return new CommandError(`Failed to ${action} repository settings (HTTP ${status}): ${JSON.stringify(body)}`);
+}
+
+export async function listRepoSettings(cfg?: Config, opts?: { timeoutMs?: number }): Promise<RepoSettings[]> {
+  const resolved = cfg ?? (await loadConfig());
+  const { status, body, retryAfterSeconds } = await apiFetch(resolved, "/api/v1/settings/repos", {
+    timeoutMs: opts?.timeoutMs,
+  });
+  if (status !== 200) throw repoSettingsFailure(status, body, retryAfterSeconds, "load");
+  const repos = (body as { repos?: unknown } | null)?.repos;
+  if (!Array.isArray(repos)) {
+    throw new CommandError(`Repository settings came back in an unexpected shape: ${JSON.stringify(body)}`);
+  }
+  return repos as RepoSettings[];
+}
+
+export async function patchRepoSettings(
+  owner: string,
+  repo: string,
+  patch: RepoSettingsPatch,
+  cfg?: Config,
+  opts?: { timeoutMs?: number },
+): Promise<RepoSettings> {
+  const resolved = cfg ?? (await loadConfig());
+  if (Object.keys(patch).length === 0) {
+    throw new CommandError("No repository settings to update.", 2, "usage");
+  }
+  const { status, body, retryAfterSeconds } = await apiFetch(
+    resolved,
+    `/api/v1/settings/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+    { method: "PATCH", json: patch, timeoutMs: opts?.timeoutMs },
+  );
+  if (status !== 200) throw repoSettingsFailure(status, body, retryAfterSeconds, "update");
+  return body as RepoSettings;
+}
+
 /**
  * Fetch Bearer /api/v1/settings; null on 404/network/timeouts so panels can
  * degrade (same contract as {@link getMe}), while 401 still surfaces.
