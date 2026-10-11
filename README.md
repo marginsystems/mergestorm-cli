@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.54`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.55`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.54                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.55                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
 │     ▝▀▀▘      review a diff · usage for tabs · /help for all commands        │
-│       ▀       New in v0.3.54: Publish without gh: stack submit --server-side │
+│       ▀       New in v0.3.55: MERGESTORM_HOME moves login and stack state    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -167,13 +167,14 @@ mg stack publish --status               # absent | pushed | opened | registered
 - **Exact contents.** Every commit travels with its Git tree SHA and the whole content of each changed file, so binaries, deletions, renames, executable bits and symlinks arrive unchanged. Mergestorm moves the branch only when GitHub builds the same tree, and `mg` checks the returned tree against your local branch.
 - **Never overwrites surprises.** `mg` looks at the branch on GitHub first. If its files match one of your local commits, only the commits after that one are appended. If they match none (someone else pushed, or you rebased), `mg` stops with `head_changed`; `--replace-head <sha>` replaces exactly that head and nothing else. Mergestorm refuses `main`, `master`, the default branch, protected branches and its own `mg-stack-*`, `mg-park-*` and `mq-batch-*` branches.
 - **Safe to run again.** After a timeout or an error, run the same command again. It finds the branch, pull request and stack it already made and finishes the missing step; it does not create duplicates.
+- **Read-only home directory.** `mg` keeps the saved login and the local stack state of `stack create` / `stack submit` under `~/.mergestorm`. Where the home directory cannot be written, set `MERGESTORM_HOME` to a writable directory (outside the repository) and every command uses that instead. `MERGESTORM_API_KEY` supplies the key without `mg login`.
 - **Limits.** 20 commits, 500 changed paths, 2 MiB a file and 8 MiB in total per publication. Submodules and merge commits are refused with the path or the reason. `stack submit --server-side` publishes the first two layers of a stack; a third layer needs a park freeze, which this mode does not create, so add it once the first two are registered.
 
 Legacy repo-local `.mergestorm/stack.json` state migrates automatically on the next stack command. If local authoring state is stale or malformed, use `mg stack reset --force`; this clears only pre-submit CLI state and never deletes branches, PRs, or registered stacks.
 
 ### `login`
 
-Runs a browser device-authorization flow: prints a short code, opens `https://mergestorm.ai/cli/auth`, and — once you approve — mints and stores an API key in `~/.mergestorm/config.json` (mode `600`). No key copy/paste needed.
+Runs a browser device-authorization flow: prints a short code, opens `https://mergestorm.ai/cli/auth`, and — once you approve — mints and stores an API key in `~/.mergestorm/config.json` (mode `600`), or in `$MERGESTORM_HOME/config.json` when `MERGESTORM_HOME` is set. No key copy/paste needed.
 
 For headless or CI environments, use `mergestorm login --key` to paste an existing `msk_live_…` key (create one on the dashboard [Settings → API](https://mergestorm.ai/settings#api)). On a TTY the paste is hidden (not echoed); the CLI verifies the key with the API before saving.
 
@@ -181,7 +182,7 @@ For an agent, which cannot sit in a prompt while a person signs in, use two step
 
 ### `logout`
 
-Removes `~/.mergestorm/config.json` so the stored key is no longer used.
+Removes `~/.mergestorm/config.json` (or `$MERGESTORM_HOME/config.json` when `MERGESTORM_HOME` is set) so the stored key is no longer used.
 
 ### `review [base] [head]`
 
@@ -232,6 +233,7 @@ Require a logged-in key and API support for `GET /api/v1/me` and `GET /api/v1/re
 |----------|---------|---------|
 | `MERGESTORM_API_KEY` | API key (overrides the stored config) | — |
 | `MERGESTORM_API_URL` | API base URL | `https://api.mergestorm.ai` |
+| `MERGESTORM_HOME` | Directory for the saved login and local stack state, for machines whose home directory is read-only | `~/.mergestorm` |
 | `NO_COLOR` | Disable ANSI colors | — |
 
 ## Verify (public source vs npm)

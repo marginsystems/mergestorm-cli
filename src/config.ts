@@ -9,8 +9,9 @@ export type Config = {
   apiBase?: string;
 };
 
-export function mergestormHome(): string {
-  return path.join(homedir(), ".mergestorm");
+export function mergestormHome(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.MERGESTORM_HOME?.trim();
+  return override ? path.resolve(override) : path.join(homedir(), ".mergestorm");
 }
 
 export function configPath(): string {

@@ -178,10 +178,10 @@ test("what's new covers the shipped package version (no empty pane)", () => {
   const rows = buildBannerRows(loggedIn(cliVersion()), 120);
   const text = stripAnsi(rows.join("\n"));
   assert.match(text, new RegExp(`New in v${cliVersion().replace(/\./g, "\\.")}`));
-  assert.match(text, /Publish without gh: stack submit --server-side/);
+  assert.match(text, /MERGESTORM_HOME moves login and stack state/);
 
   const narrowText = stripAnsi(buildBannerRows(loggedIn(cliVersion()), 80).join("\n"));
-  assert.match(narrowText, /Publish without gh: stack submit --server-side/);
+  assert.match(narrowText, /MERGESTORM_HOME moves login and stack state/);
 });
 
 test("idle banner paints every tornado row verbatim", () => {

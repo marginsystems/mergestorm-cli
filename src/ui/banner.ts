@@ -213,6 +213,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.54": [
     "Publish without gh: stack submit --server-side",
   ],
+  "0.3.55": [
+    "MERGESTORM_HOME moves login and stack state",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

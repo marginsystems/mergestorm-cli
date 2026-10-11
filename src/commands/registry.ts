@@ -360,6 +360,7 @@ export function formatUsageBody(): string {
 Env:
   MERGESTORM_API_KEY   API key (overrides config)
   MERGESTORM_API_URL   API base (default ${DEFAULT_API})
+  MERGESTORM_HOME      State directory for login and stack state (default ~/.mergestorm)
 `;
 }
 
