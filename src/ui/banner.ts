@@ -219,6 +219,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.56": [
     "Set automation per repository",
   ],
+  "0.3.57": [
+    "issue create --help shows the usage",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

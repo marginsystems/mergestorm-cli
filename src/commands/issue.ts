@@ -11,6 +11,8 @@ export const ISSUE_USAGE = [
   "  Uses existing labels only. Running it again with the same title returns the open issue it already made when that issue is among the newest 100 open issues; an older one, or two calls at once, can still create a duplicate.",
 ].join("\n");
 
+const VALUE_FLAGS = new Set(["--title", "--body", "--body-file", "--label", "--repo"]);
+
 export type ParsedIssueArgs = { title: string; body: string; labels: string[]; repo?: { owner: string; repo: string }; json: boolean };
 
 function usage(message?: string): CommandError {
@@ -67,7 +69,16 @@ export type IssueDeps = {
 
 export async function cmdIssue(args: string[], deps: IssueDeps = {}): Promise<void> {
   const sub = args[0]?.toLowerCase();
-  if (!sub || sub === "-h" || sub === "--help" || sub === "help") {
+  const asksForHelp = (arg: string | undefined) => arg === "-h" || arg === "--help" || arg === "help";
+  const createAsksForHelp = (rest: string[]) => {
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (asksForHelp(arg)) return true;
+      if (VALUE_FLAGS.has(arg!)) i++;
+    }
+    return false;
+  };
+  if (!sub || asksForHelp(sub) || (sub === "create" && createAsksForHelp(args.slice(1)))) {
     console.log(ISSUE_USAGE);
     return;
   }

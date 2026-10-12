@@ -85,3 +85,18 @@ test("issue without a repository or with an unknown subcommand fails with a reas
   );
   await assert.rejects(() => cmdIssue(["close", "12"]), /unknown issue subcommand: close/);
 });
+
+test("issue create --help prints the usage and opens nothing", async () => {
+  for (const args of [["create", "--help"], ["create", "-h"], ["create", "--title", "T", "--help"], ["--help"], []]) {
+    const lines = await capture(() =>
+      cmdIssue(args, {
+        loadConfig: async () => CFG,
+        parseGithubOriginRepo: () => ({ owner: "acme", repo: "widgets" }),
+        openStackIssue: async () => {
+          throw new Error("no issue may be opened when help is asked for");
+        },
+      }),
+    );
+    assert.match(lines.join("\n"), /^usage: mergestorm issue create/, args.join(" "));
+  }
+});
