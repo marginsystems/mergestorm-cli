@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { paintSpriteRow, STORM_MARK, STORM_MARK_WIDTH } from "./logo.js";
+import { paintSpriteRow, TORNADO_LOGO, TORNADO_LOGO_WIDTH } from "./logo.js";
 import { padVisible, sliceVisible, visibleWidth } from "./width.js";
 
 const ESC = "\u001b";
@@ -42,12 +42,12 @@ test("visibleWidth ignores SGR colour codes", () => {
   assert.equal(visibleWidth(""), 0);
 });
 
-test("visibleWidth keeps STORM_MARK block glyphs at one cell each", () => {
-  for (const line of STORM_MARK) {
+test("visibleWidth keeps TORNADO_LOGO block glyphs at one cell each", () => {
+  for (const line of TORNADO_LOGO) {
     assert.equal(visibleWidth(line), Array.from(line).length, line);
-    assert.equal(visibleWidth(paintSpriteRow(line)), STORM_MARK_WIDTH, "painted ▀▄ are one cell");
+    assert.equal(visibleWidth(paintSpriteRow(line)), TORNADO_LOGO_WIDTH, "painted ▀▄ are one cell");
   }
-  assert.equal(visibleWidth(STORM_MARK[0]!), STORM_MARK_WIDTH);
+  assert.equal(visibleWidth(TORNADO_LOGO[0]!), TORNADO_LOGO_WIDTH);
 });
 
 test("visibleWidth keeps box drawing at one cell", () => {

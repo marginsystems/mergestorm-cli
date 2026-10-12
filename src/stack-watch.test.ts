@@ -1644,7 +1644,7 @@ test("a recorded off reason other than bounced keeps a newest disarming bounce o
   for (const autoLandOff of [
     { reason: "user" as const, entryId: null, at: "2026-01-01T00:10:00Z" },
     { reason: "archive" as const, entryId: null, at: "2026-01-01T00:10:00Z" },
-    { reason: "cancelled" as const, entryId: "other", at: "2026-01-01T00:10:00Z" },
+    { reason: "landed" as const, entryId: "other", at: "2026-01-01T00:10:00Z" },
     null,
   ]) {
     const result = stackBlockers({ ...disarmedStack(false), autoLandOff }, [disarmingBounce()]);
@@ -1972,7 +1972,7 @@ const importantFindings = (extra: Partial<StackLayerDto> = {}) => layer({
   vortexStatus: "findings", reviewStatus: "reviewed", vortexReview: done(HEAD), ...extra,
 });
 
-for (const reason of ["failed", "left_for_human", "infra_failure", "pr_state_unavailable", "vortex_patch_cap", "patch_job_lost"]) {
+for (const reason of ["failed", "fix_held", "left_for_human", "infra_failure", "pr_state_unavailable", "vortex_patch_cap", "patch_job_lost"]) {
   test(`Important findings Cyclone held at the head (${reason}) are attention with a repair hint`, async () => {
     const h = harness(stack([importantFindings({ cycloneHandoff: { headSha: HEAD, reason, at: null } })]));
     const result = await pollStackWatch(cfg, "stack", h.options);
@@ -1987,9 +1987,11 @@ for (const reason of ["failed", "left_for_human", "infra_failure", "pr_state_una
 
 test("the repair for a fix Cyclone held names the hold, and a plain failure says nothing was pushed", async () => {
   const held = "rewrites existing test assertions (src/a.test.ts: changes a test's inputs, not its assertions)";
-  const named = await pollStackWatch(cfg, "stack", harness(stack([importantFindings({ cycloneHandoff: { headSha: HEAD, reason: "failed", at: null, detail: held } })])).options);
-  assert.ok((named.repair?.steps ?? "").includes(`Cyclone left them for a person (Cyclone wrote a fix and held it, so it pushed nothing: ${held})`));
-  assert.equal(named.repair?.kind === "vortex_findings" ? named.repair.handoff : null, "failed");
+  const named = await pollStackWatch(cfg, "stack", harness(stack([importantFindings({ cycloneHandoff: { headSha: HEAD, reason: "fix_held", at: null, detail: held } })])).options);
+  assert.equal(named.status, "attention");
+  assert.ok((named.repair?.steps ?? "").includes(`Cyclone left them for a person (Cyclone wrote a fix and held it on purpose, so it pushed nothing: ${held})`));
+  assert.doesNotMatch(named.repair?.steps ?? "", /patch failed/);
+  assert.equal(named.repair?.kind === "vortex_findings" ? named.repair.handoff : null, "fix_held");
   const plain = await pollStackWatch(cfg, "stack", harness(stack([importantFindings({ cycloneHandoff: { headSha: HEAD, reason: "failed", at: null } })])).options);
   assert.ok((plain.repair?.steps ?? "").includes("(Cyclone's patch failed, so it pushed nothing)"));
 });
@@ -2416,6 +2418,7 @@ test("the agents-busy hold names exactly the blockers no agent run clears", () =
     land_gate: false,
     bounce: false,
     auto_land_off: false,
+    auto_land_switched_off: false,
     auto_land_ci_pending: false,
     auto_land_members_remaining: false,
     auto_land_vortex_wait: false,

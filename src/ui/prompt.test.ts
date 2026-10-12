@@ -6,12 +6,8 @@ import { visibleWidth } from "./width.js";
 import { CTRL_C_EXIT_HINT } from "./ctrl-c-exit.js";
 import {
   HEADER_REDRAW_PREFIX,
-  MOUSE_ENABLE,
-  MOUSE_DISABLE,
-  hitTestSprite,
   askLine,
   buildPromptFrame,
-  dropdownMaxRows,
   dropdownOverlayRows,
   dropdownViewport,
   formatSlashLabel,
@@ -22,7 +18,6 @@ import {
   overlayReserve,
   fitHomeFrame,
   promptChromeRows,
-  promptClearOverlay,
   promptRedrawPrefix,
   type CommandSpec,
 } from "./prompt.js";
@@ -140,14 +135,6 @@ test("promptRedrawPrefix scales the CUU count to the content row", () => {
   assert.equal(promptRedrawPrefix(0), "\x1b[0A\r\x1b[0J");
 });
 
-test("promptClearOverlay drops to the first row after boxed chrome", () => {
-  assert.equal(promptClearOverlay(true), "\x1b[2B\r\x1b[0J");
-});
-
-test("promptClearOverlay drops one row after a plain content line", () => {
-  assert.equal(promptClearOverlay(false), "\x1b[1B\r\x1b[0J");
-});
-
 test("formatSlashLabel folds aliases onto the primary name", () => {
   assert.equal(formatSlashLabel({ name: "review", summary: "x" }), "/review");
   assert.equal(
@@ -171,12 +158,6 @@ test("isExactSlashCommand keeps typed args on a complete name or alias", () => {
   assert.equal(isExactSlashCommand("/usage", SPECS), true);
   assert.equal(isExactSlashCommand("/re", SPECS), false);
   assert.equal(isExactSlashCommand("/", SPECS), false);
-});
-
-test("dropdownMaxRows caps at 8 and shrinks on a short pane", () => {
-  assert.equal(dropdownMaxRows(24, 2), 8);
-  assert.equal(dropdownMaxRows(12, 2), 7);
-  assert.equal(dropdownMaxRows(undefined, 2), 8);
 });
 
 test("dropdownViewport keeps the highlight visible without wrapping", () => {
@@ -720,15 +701,6 @@ test("askLine first Ctrl+C writes the hint on the footer without a second prompt
   await done;
 });
 
-test("sprite hit test excludes borders and padding", () => {
-  const rect = { col: 3, row: 2, width: 6, height: 3 };
-  assert.ok(hitTestSprite(3, 2, rect));
-  assert.ok(hitTestSprite(8, 4, rect));
-  for (const [col, row] of [[2, 2], [9, 2], [3, 1], [3, 5]]) {
-    assert.equal(hitTestSprite(col!, row!, rect), false);
-  }
-});
-
 test("askLine ignores stdin's own keypress decoder left behind by a TUI", async () => {
   const tty = fakeTty(80);
   // line-tabs / tabs / select call this on process.stdin and it sticks.
@@ -753,7 +725,7 @@ test("home clicks do not spin and leftover mouse reports do not type", async () 
         { density: variant === "mini" || variant === "nano" ? variant : "full", frame });
     },
   });
-  assert.ok(!tty.chunks.includes(MOUSE_ENABLE));
+  assert.ok(!tty.chunks.includes("\u001b[?1000h\u001b[?1006h"));
   const data = (text: string) => tty.input.emit("data", Buffer.from(text));
   data("a\x1b[M");
   data(' !"');
@@ -763,7 +735,7 @@ test("home clicks do not spin and leftover mouse reports do not type", async () 
   data("bc\r");
   assert.equal(await done, "axbc");
   assert.ok(frames.every((frame) => frame === 0));
-  assert.ok(!tty.chunks.includes(MOUSE_DISABLE));
+  assert.ok(!tty.chunks.includes("\u001b[?1000l\u001b[?1006l"));
   assert.equal(tty.input.listenerCount("data"), 0);
 });
 

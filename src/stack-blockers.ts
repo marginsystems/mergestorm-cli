@@ -1,7 +1,9 @@
 import {
+  CYCLONE_FIX_HELD_REASON,
   deriveStackAgentsBusy,
   mergeQueueBounceLabel,
   restackRetryPending,
+  type AutoLandOffReason,
   type MergeQueueEntryDto,
   type StackAgentsBusy,
   type StackDto,
@@ -36,6 +38,7 @@ export type StackBlockerReason =
   | "land_gate"
   | "bounce"
   | "auto_land_off"
+  | "auto_land_switched_off"
   | "auto_land_ci_pending"
   | "auto_land_members_remaining"
   | "auto_land_vortex_wait"
@@ -131,6 +134,14 @@ export type StackRepairHint =
     headSha: string | null;
     branch: string;
     bounceKind: string;
+    steps: string;
+  }
+  | {
+    kind: "auto_land_switched_off";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    offReason: AutoLandOffReason;
     steps: string;
   }
   | {
@@ -298,6 +309,7 @@ function cycloneHandoffAtHead(stack: StackDto, layer: StackLayerDto): string | n
 
 const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   failed: "Cyclone's patch failed, so it pushed nothing",
+  fix_held: "Cyclone wrote a fix and held it on purpose, so it pushed nothing",
   auto_patch_off: "auto-patch is off for this stack",
   stack_auto_patch_off: "auto-patch is off for this stack",
   repo_auto_patch_off: "auto-patch is off for this repository and this stack does not turn it on",
@@ -332,11 +344,18 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
 };
 
 function cycloneHandoffWords(reason: string, detail?: string | null): string {
-  if (reason === "failed" && detail?.trim()) return `Cyclone wrote a fix and held it, so it pushed nothing: ${detail.trim()}`;
-  return CYCLONE_HANDOFF_WORDS[reason] ?? reason.replaceAll("_", " ");
+  const words = CYCLONE_HANDOFF_WORDS[reason] ?? reason.replaceAll("_", " ");
+  return reason === CYCLONE_FIX_HELD_REASON && detail?.trim() ? `${words}: ${detail.trim()}` : words;
 }
 
-function cycloneHandoffDetailAtHead(layer: StackLayerDto): string | null {
+export function cycloneStatusWords(layer: Pick<StackLayerDto, "cycloneStatus" | "cycloneHandoff" | "headSha">): string | null {
+  if (!layer.cycloneStatus) return null;
+  if (layer.cycloneStatus !== "held") return layer.cycloneStatus;
+  const detail = cycloneHandoffDetailAtHead(layer)?.trim();
+  return detail ? `held its fix, not pushed (${detail})` : "held its fix, not pushed";
+}
+
+function cycloneHandoffDetailAtHead(layer: Pick<StackLayerDto, "cycloneHandoff" | "headSha">): string | null {
   return sameHead(layer.cycloneHandoff?.headSha, layer.headSha) ? layer.cycloneHandoff!.detail ?? null : null;
 }
 
@@ -388,6 +407,7 @@ function ciHandoffNote(stack: StackDto, layer: StackLayerDto): string | null {
 
 const CYCLONE_HELD_FINDINGS_REASONS: readonly string[] = [
   "failed",
+  CYCLONE_FIX_HELD_REASON,
   "left_for_human",
   "infra_failure",
   "pr_state_unavailable",
@@ -584,6 +604,7 @@ function layerAttention(
   if (!sameHead(bounce.bounceDetail?.headSha ?? bounce.verifyHeadSha, layer.headSha) ||
     (bounce.bounceDetail?.prNumber != null && bounce.bounceDetail.prNumber !== layer.prNumber)) return none;
   if (kind === "ci_failure" && !bounce.bounceDetail?.batch && (headChecksAllGreen(layer) || headChecksRerunning(layer))) return none;
+  if (kind === "ci_timeout" && headChecksAllGreen(layer)) return none;
   const label = mergeQueueBounceLabel(bounce);
   return { blocker: label, reason: "bounce", bounceKind: kind, bounce };
 }
@@ -617,6 +638,18 @@ function disarmingBounce(stack: StackDto, queue: MergeQueueEntryDto[]): MergeQue
   const recorded = queue.find((entry) => entry.id === stack.autoLandOff?.entryId);
   if (isDisarmingBounce(recorded)) return recorded;
   return undefined;
+}
+
+const AUTO_LAND_SWITCHED_OFF_PREFIX = "Auto land switched off: ";
+const AUTO_LAND_SWITCHED_OFF_BY: Partial<Record<AutoLandOffReason, string>> = {
+  cancelled: "its merge queue entry was cancelled",
+  watcher: "Mergestorm found nothing it could land",
+};
+
+function switchedOffByAnotherActor(stack: StackDto): AutoLandOffReason | undefined {
+  if (stack.archivedAt || stack.autoEnqueueWhenReady !== false) return undefined;
+  const reason = stack.autoLandOff?.reason;
+  return reason && AUTO_LAND_SWITCHED_OFF_BY[reason] ? reason : undefined;
 }
 
 export const AUTO_LAND_CI_PENDING_ATTENTION_MS = 45 * 60_000;
@@ -1003,13 +1036,27 @@ export function stackRepair(
     };
   }
   if (reason === "auto_land_off" && attention.bounceKind) {
+    const nothingToFix = attention.bounceKind === "ci_timeout" && headChecksAllGreen(layer);
     return {
       kind: "auto_land_off",
       prNumber: layer.prNumber,
       headSha: layer.headSha ?? null,
       branch: layer.branch,
       bounceKind: attention.bounceKind,
-      steps: `The ${attention.bounceKind} bounce turned Auto land off, so nothing will enqueue this stack. Fix the cause of the bounce on ${layer.branch}, then turn Auto land back on (mg stack set ${stack.id} --auto-land on) or enqueue the stack.`,
+      steps: nothingToFix
+        ? `The ci_timeout bounce turned Auto land off, so nothing will enqueue this stack. Every check on ${layer.branch} is green at this head now, so nothing needs a change: do not patch or push for it. Turn Auto land back on (mg stack set ${stack.id} --auto-land on) or enqueue the stack.`
+        : `The ${attention.bounceKind} bounce turned Auto land off, so nothing will enqueue this stack. Fix the cause of the bounce on ${layer.branch}, then turn Auto land back on (mg stack set ${stack.id} --auto-land on) or enqueue the stack.`,
+    };
+  }
+  const offReason = stack.autoLandOff?.reason;
+  if (reason === "auto_land_switched_off" && offReason) {
+    return {
+      kind: "auto_land_switched_off",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      offReason,
+      steps: `Auto land is off for this stack (autoLandOff reason ${offReason}: ${AUTO_LAND_SWITCHED_OFF_BY[offReason] ?? offReason}), so nothing will enqueue it and it will not land by itself. No bounce did this and nothing in the layers needs a change: do not patch or push for it. A person or another agent session may have switched it off on purpose, so do not turn Auto land back on yourself. Tell the human that Auto land is off and why, and turn it back on (mg stack set ${stack.id} --auto-land on) only when they say so.`,
     };
   }
   if (reason === "vortex_failed") {
@@ -1200,6 +1247,13 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       if (disarmed) {
         const kind = disarmed.bounceDetail!.kind;
         result = { blocker: `${AUTO_LAND_OFF_BLOCKER_PREFIX}${kind} bounce`, reason: "auto_land_off", bounceKind: kind, bounce: disarmed };
+      }
+    }
+    if (!result.blocker && selected) {
+      const offReason = switchedOffByAnotherActor(stack);
+      if (offReason) {
+        result = { blocker: `${AUTO_LAND_SWITCHED_OFF_PREFIX}${AUTO_LAND_SWITCHED_OFF_BY[offReason]}`,
+          reason: "auto_land_switched_off", bounceKind: null };
       }
     }
     let waitNamed = false;

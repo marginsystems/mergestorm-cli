@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { STORM_MARK, TORNADO_FRAMES, TORNADO_LOGO, TORNADO_LOGO_WIDTH, paintSpriteRow } from "./logo.js";
+import { TORNADO_LOGO, TORNADO_LOGO_WIDTH, paintSpriteRow } from "./logo.js";
 
 test("mark is five bars and a square tail, twelve columns wide", () => {
   assert.deepEqual(TORNADO_LOGO, [
@@ -13,8 +13,6 @@ test("mark is five bars and a square tail, twelve columns wide", () => {
   ]);
   assert.equal(TORNADO_LOGO_WIDTH, 12);
   for (const row of TORNADO_LOGO) assert.equal([...row].length, TORNADO_LOGO_WIDTH);
-  assert.deepEqual(TORNADO_FRAMES, [TORNADO_LOGO]);
-  assert.equal(STORM_MARK, TORNADO_LOGO);
 });
 
 test("paintSpriteRow inks glyphs in xterm-256 77, never 92 or 24-bit", () => {

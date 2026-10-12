@@ -66,31 +66,11 @@ export function promptRedrawPrefix(inputRow: number): string {
 }
 
 /**
- * From the content row, move to the first row after the input chrome
- * and erase the slash overlay. Boxed chrome is top + content + bottom
- * (`down(2)`). Plain chrome is the content line (`down(1)`).
- */
-export function promptClearOverlay(boxed: boolean): string {
-  return `${down(boxed ? 2 : 1)}\r${clearDown}`;
-}
-
-/**
  * Cursor home + ED 0: clears the whole screen from row 1 and leaves the
  * cursor there. Used to redraw the welcome panel on resize, where the old
  * frame's row count is unknowable after the terminal rewraps.
  */
 export const HEADER_REDRAW_PREFIX = `\u001b[H${clearDown}`;
-
-export const MOUSE_ENABLE = "\u001b[?1000h\u001b[?1006h";
-export const MOUSE_DISABLE = "\u001b[?1000l\u001b[?1006l";
-
-export type SpriteRect = { col: number; row: number; width: number; height: number };
-
-/** SGR coordinates and the rectangle are both 1-based. */
-export function hitTestSprite(col: number, row: number, rect: SpriteRect): boolean {
-  return col >= rect.col && col < rect.col + rect.width &&
-    row >= rect.row && row < rect.row + rect.height;
-}
 
 export const DROPDOWN_MAX_COMMAND_ROWS = 8;
 
@@ -128,13 +108,6 @@ export function isExactSlashCommand(buffer: string, specs: CommandSpec[]): boole
   return specs.some(
     (spec) => spec.name === token || (spec.aliases ?? []).includes(token),
   );
-}
-
-export function dropdownMaxRows(terminalRows: number | undefined, inputRow: number): number {
-  const rows = typeof terminalRows === "number" && Number.isFinite(terminalRows) && terminalRows >= 1
-    ? terminalRows
-    : 24;
-  return Math.max(1, Math.min(DROPDOWN_MAX_COMMAND_ROWS, rows - inputRow - 3));
 }
 
 export function dropdownViewport(

@@ -114,7 +114,9 @@ export type StackVortexReviewView = {
   source: "pr_reviews" | "github_webhook_jobs" | "lease" | "none";
 };
 
-export type StackCycloneStatus = "patching" | "awaiting_fix" | "failed";
+export type StackCycloneStatus = "patching" | "awaiting_fix" | "held" | "failed";
+
+export const CYCLONE_FIX_HELD_REASON = "fix_held";
 
 export type StackCycloneHandoff = {
   headSha: string;

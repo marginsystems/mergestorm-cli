@@ -15,17 +15,8 @@ export const TORNADO_LOGO = [
   "      ▀     ",
 ];
 
-/** Single idle frame. Kept for callers that index frames. */
-export const TORNADO_FRAMES: string[][] = [TORNADO_LOGO];
-
 /** Every sprite glyph is one column. */
 export const TORNADO_LOGO_WIDTH = Math.max(...TORNADO_LOGO.map((line) => [...line].length));
-export const TORNADO_LOGO_COMPACT = TORNADO_LOGO;
-
-/** @deprecated Use {@link TORNADO_LOGO}. */
-export const STORM_MARK = TORNADO_LOGO;
-/** @deprecated Use {@link TORNADO_LOGO_WIDTH}. */
-export const STORM_MARK_WIDTH = TORNADO_LOGO_WIDTH;
 
 /** Paint one sprite row: each run of glyphs in brand green 77, spaces left bare. */
 export function paintSpriteRow(row: string): string {

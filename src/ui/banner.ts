@@ -222,6 +222,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.57": [
     "issue create --help shows the usage",
   ],
+  "0.3.58": [
+    "Watch reports Auto land switched off",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

@@ -1,4 +1,4 @@
-import { stackBlockers, stackBlockersSummary, type StackHeldBlocker, type StackRepairHint } from "../stack-blockers.js";
+import { cycloneStatusWords, stackBlockers, stackBlockersSummary, type StackHeldBlocker, type StackRepairHint } from "../stack-blockers.js";
 import {
   STACK_WATCH_NOT_DONE_SENTENCE,
   STACK_WATCH_NOTIFY_PATTERN,
@@ -1683,7 +1683,7 @@ export async function cmdStackStatus(
       `    ${String(layer.position).padStart(2)}  ${pr}${head}  ${layer.state.padEnd(14)}  ${layer.branch}` +
         `  CI: ${layer.ciStatus ?? "unknown"}  review: ${layer.reviewStatus ?? "unknown"}` +
         (layer.vortexStatus ? `  Vortex: ${layer.vortexStatus}` : "") +
-        (layer.cycloneStatus ? `  Cyclone: ${layer.cycloneStatus}` : ""),
+        (layer.cycloneStatus ? `  Cyclone: ${cycloneStatusWords(layer)}` : ""),
     );
   }
   if (queueWait && !attention) lines.push(`  Queue: #${queueWait.prNumber} ${queueWait.text}`);
