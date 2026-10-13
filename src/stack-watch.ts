@@ -34,6 +34,7 @@ export const STACK_WATCH_DEFAULT_TIMEOUT_MS = 45_000;
 export const STACK_WATCH_BUSY_RECHECK_S = 15;
 export const STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS = DEFAULT_API_TIMEOUT_MS;
 export const STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS = 5_000;
+export const STACK_WATCH_CLOSING_READ_RESERVE_MS = 10_000;
 
 /** Resume selectors are fixed for the entire wait, including transient retries. */
 export type StackWatchCursor = {
@@ -156,7 +157,8 @@ export async function pollStackWatch(
           signal: opts.signal, timeoutMs: route.includes("&wait=")
             ? Number(new URL(route, "https://local").searchParams.get("wait")) * 1000 + 5_000
             : finalSnapshot
-              ? timeoutMs === 0 ? STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS : STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS
+              ? timeoutMs === 0 ? STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS
+                : Math.max(STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS, Math.min(DEFAULT_API_TIMEOUT_MS, deadline - now()))
               : Math.max(1, Math.min(30_000, deadline - now())),
         });
       } catch (err) {
@@ -248,10 +250,11 @@ export async function pollStackWatch(
   let queue = await readQueue(queueRoute, timeoutMs === 0);
   evaluate(stack, queue.entries);
   if (lastEnvelope.status === "attention" || timeoutMs === 0 || terminal) return seal(lastEnvelope);
-  while (now() < deadline) {
+  const closingReadReserveMs = Math.min(STACK_WATCH_CLOSING_READ_RESERVE_MS, timeoutMs / 4);
+  while (deadline - now() > closingReadReserveMs) {
     const heldAt = now();
     const seconds = Math.min(lastEnvelope.busy.length ? STACK_WATCH_BUSY_RECHECK_S : 45,
-      Math.max(1, Math.ceil((deadline - heldAt) / 1000)));
+      Math.max(1, Math.ceil((deadline - heldAt - closingReadReserveMs) / 1000)));
     const seen = queue.fingerprint ? `&seen=${encodeURIComponent(queue.fingerprint)}` : "";
     const held = await readQueue(`${queueRoute}&wait=${seconds}${seen}`);
     if (JSON.stringify(held.entries) === JSON.stringify(queue.entries)) {

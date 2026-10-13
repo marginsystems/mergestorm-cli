@@ -228,6 +228,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.59": [
     "One-shot stack wait rides out a slow read",
   ],
+  "0.3.60": [
+    "Timed stack wait rides out a slow last read",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

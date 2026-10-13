@@ -4,7 +4,7 @@ import type { ApiFetchInit, ApiFetchResult } from "./api.js";
 import type { MergeQueueBounceKind, StackAgentRun, StackDto, StackLayerDto, MergeQueueEntryDto } from "./stack-dto.js";
 import {
   pollStackWatch, StackWatchError, StackWatchTimeoutError,
-  STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS, STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS,
+  STACK_WATCH_CLOSING_READ_RESERVE_MS, STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS, STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS,
   type PollStackWatchOptions, type StackWatchEnvelope,
 } from "./stack-watch.js";
 import {
@@ -220,13 +220,13 @@ for (const endpoint of ["snapshot", "queue"]) {
         h.state.entries = [bounce()];
       }
     };
-    const result = await pollStackWatch(cfg, "stack", h.options);
+    const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 8_000 });
     assert.equal(result.status, "attention");
     assert.deepEqual(h.sleeps, endpoint === "queue" ? [1250] : [1250, 2000]);
     assert.equal(h.ticks[0].status, "rate_limited");
     assert.equal(
       h.calls.find((call) => call.route.includes("&wait="))?.timeoutMs,
-      endpoint === "queue" ? 9000 : 8000,
+      endpoint === "queue" ? 11_000 : 10_000,
     );
   });
 }
@@ -411,7 +411,7 @@ for (const attempts of [1, 2]) {
   });
 }
 
-test("held requests include response headroom and refresh the deadline snapshot", async () => {
+test("held requests include response headroom, leave the closing-read reserve, and the closing snapshot gets the time left", async () => {
   const h = harness();
   let enriches = 0;
   h.state.respond = (route) => {
@@ -430,7 +430,7 @@ test("held requests include response headroom and refresh the deadline snapshot"
   };
   const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 45_000 });
   assert.equal(result.status, "attention");
-  assert.deepEqual(h.calls.map((call) => call.timeoutMs), [30_000, 20_000, 25_000, 5_000]);
+  assert.deepEqual(h.calls.map((call) => call.timeoutMs), [30_000, 20_000, 15_000, 19_000]);
   assert.equal(result.headSha, NEXT);
 });
 
@@ -491,15 +491,15 @@ test("apiFetch preserves HTTP Retry-After from the queue", async (t) => {
   assert.deepEqual(h.sleeps, [1000]);
 });
 
-test("one held queue GET per 45-second slice, with no polling sleep", async () => {
+test("one held queue GET per 45-second wait, ending the closing-read reserve early, with no polling sleep", async () => {
   const h = harness();
   h.options.timeoutMs = 45_000;
   h.state.respond = (route) => {
     if (!route.includes("/queue")) return undefined;
     const wait = new URL(route, "https://local").searchParams.get("wait");
     if (wait !== null) {
-      assert.equal(wait, "45");
-      h.state.advance(45_000);
+      assert.equal(wait, String((45_000 - STACK_WATCH_CLOSING_READ_RESERVE_MS) / 1000));
+      h.state.advance(45_000 - STACK_WATCH_CLOSING_READ_RESERVE_MS);
     }
     return { status: 200, body: { entries: [] } };
   };
@@ -534,8 +534,8 @@ for (const honorsSeen of [false, true]) {
       assert.deepEqual(h.sleeps, []);
     } else {
       assert.equal(result.blocker, null);
-      assert.equal(enriches, 1 + Math.ceil(45_000 / 2_000));
-      assert.equal(held, Math.ceil(45_000 / 2_000));
+      assert.equal(enriches, 1 + Math.ceil((45_000 - STACK_WATCH_CLOSING_READ_RESERVE_MS) / 2_000));
+      assert.equal(held, Math.ceil((45_000 - STACK_WATCH_CLOSING_READ_RESERVE_MS) / 2_000));
       assert.ok(h.sleeps.every((ms) => ms > 0 && ms <= 2_000));
     }
   });
@@ -668,6 +668,64 @@ test("zero timeout that outlasts the full API deadline stays failed, unavailable
     assert.equal(err.lastEnvelope.watch.done, false);
     return true;
   });
+});
+
+test("a timed wait assesses a stack whose closing read takes longer than the post-deadline snapshot allows", async () => {
+  const h = harness();
+  const slowReadMs = STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS + 3_000;
+  let enriches = 0;
+  h.options.fetch = async (_cfg, route, init = {}) => {
+    h.calls.push({ route, timeoutMs: init.timeoutMs });
+    const held = new URL(route, "https://local").searchParams.get("wait");
+    if (held !== null) h.state.advance(Number(held) * 1000);
+    if (route.includes("/enrich") && ++enriches > 1) {
+      h.state.advance(slowReadMs);
+      if ((init.timeoutMs ?? Infinity) < slowReadMs) {
+        throw new Error(`Request timed out after ${Math.round((init.timeoutMs ?? 0) / 1000)}s. Check network connectivity and API status.`);
+      }
+    }
+    return { status: 200, body: route.includes("/queue") ? { entries: [] } : { stacks: [stack()] } };
+  };
+  const envelope = await timedOut({ ...h.options, timeoutMs: 45_000 });
+  assert.equal(envelope.assessment, "available");
+  assert.equal(envelope.watch.done, false);
+  assert.equal(enriches, 2);
+  assert.equal(h.calls.at(-1)?.timeoutMs, STACK_WATCH_CLOSING_READ_RESERVE_MS);
+});
+
+test("a timed wait never holds past its timeout less the closing-read reserve", async () => {
+  for (const timeoutMs of [45_000, 300_000]) {
+    const h = harness();
+    let clock = 0;
+    h.options.now = () => clock;
+    h.options.fetch = async (_cfg, route, init = {}) => {
+      h.calls.push({ route, timeoutMs: init.timeoutMs });
+      const held = new URL(route, "https://local").searchParams.get("wait");
+      if (held !== null) clock += Number(held) * 1000;
+      return { status: 200, body: route.includes("/queue") ? { entries: [] } : { stacks: [stack()] } };
+    };
+    await timedOut({ ...h.options, timeoutMs });
+    assert.equal(clock, timeoutMs - STACK_WATCH_CLOSING_READ_RESERVE_MS);
+    assert.ok(h.calls.filter((call) => call.route.includes("/enrich")).slice(1)
+      .every((call) => (call.timeoutMs ?? 0) >= STACK_WATCH_CLOSING_READ_RESERVE_MS));
+  }
+});
+
+test("a closing read that outlasts its deadline in a timed wait times out as unavailable and not done", async () => {
+  const h = harness();
+  let enriches = 0;
+  h.options.fetch = async (_cfg, route) => {
+    const held = new URL(route, "https://local").searchParams.get("wait");
+    if (held !== null) h.state.advance(Number(held) * 1000);
+    if (route.includes("/enrich") && ++enriches > 1) {
+      h.state.advance(STACK_WATCH_CLOSING_READ_RESERVE_MS);
+      throw new Error("Request timed out after 10s. Check network connectivity and API status.");
+    }
+    return { status: 200, body: route.includes("/queue") ? { entries: [] } : { stacks: [stack()] } };
+  };
+  const envelope = await timedOut({ ...h.options, timeoutMs: 45_000 });
+  assert.equal(envelope.assessment, "unavailable");
+  assert.equal(envelope.watch.done, false);
 });
 
 test("zero timeout with an unread snapshot stays unavailable and never waiting", async () => {
