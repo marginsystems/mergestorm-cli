@@ -225,6 +225,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.58": [
     "Watch reports Auto land switched off",
   ],
+  "0.3.59": [
+    "One-shot stack wait rides out a slow read",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

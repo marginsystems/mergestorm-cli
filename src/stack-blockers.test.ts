@@ -124,3 +124,24 @@ test("the status line says a held fix was held and why, and repeats any other Cy
   assert.equal(cycloneStatusWords(layer({ cycloneStatus: "patching" })), "patching");
   assert.equal(cycloneStatusWords(layer()), null);
 });
+
+test("a CI fix Cyclone held on purpose is named as held, with the reason, and not as a failed CI fix", () => {
+  const redCi = { ciStatus: "failure" as const, checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: "lint" } };
+  const held = "rewrites existing test assertions (src/a.test.ts: removes or renames a test)";
+  const note = (handoff: StackLayerDto["cycloneCiHandoff"]) => {
+    const repair = stackBlockers(stack([layer({ ...redCi, cycloneCiHandoff: handoff })])).repair;
+    return repair?.kind === "ci_failure" ? repair.note : null;
+  };
+  assert.equal(
+    note({ headSha: HEAD, reason: "ci_fix_held", at: null, detail: held }),
+    `Cyclone tried to fix this failing CI at ${HEAD} and left it for a person (Cyclone wrote a CI fix and held it on purpose, so it pushed nothing: ${held}), so it will not try this head again.`,
+  );
+  assert.equal(
+    note({ headSha: HEAD, reason: "ci_fix_held", at: null }),
+    `Cyclone tried to fix this failing CI at ${HEAD} and left it for a person (Cyclone wrote a CI fix and held it on purpose, so it pushed nothing), so it will not try this head again.`,
+  );
+  assert.equal(
+    note({ headSha: HEAD, reason: "ci_unresolved", at: null, detail: "boom" }),
+    `Cyclone tried to fix this failing CI at ${HEAD} and left it for a person (Cyclone's CI fix failed), so it will not try this head again.`,
+  );
+});

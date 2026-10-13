@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -29,7 +30,7 @@ test("repo identity resolves from nested directories", async () => {
   try {
     const nested = path.join(f.repo, "a", "b");
     await mkdir(nested, { recursive: true });
-    assert.equal(gitTopLevel(nested), f.repo);
+    assert.equal(gitTopLevel(nested), realpathSync(f.repo));
     assert.equal(stableRepoId(nested), stableRepoId(f.repo));
   } finally {
     await rm(f.root, { recursive: true, force: true });

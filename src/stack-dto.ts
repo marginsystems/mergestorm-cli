@@ -118,6 +118,8 @@ export type StackCycloneStatus = "patching" | "awaiting_fix" | "held" | "failed"
 
 export const CYCLONE_FIX_HELD_REASON = "fix_held";
 
+export const CYCLONE_CI_FIX_HELD_REASON = "ci_fix_held";
+
 export type StackCycloneHandoff = {
   headSha: string;
   reason: string;
@@ -264,7 +266,7 @@ export type StackLayerConflictResolution = {
   dispatchId: string | null;
 };
 
-export type StackLayerCiFixStatus = "verified" | "unverified" | "no_changes" | "failed";
+export type StackLayerCiFixStatus = "verified" | "unverified" | "no_changes" | "held" | "failed";
 
 export type StackLayerCiFix = {
   status: StackLayerCiFixStatus;
@@ -612,7 +614,7 @@ export type MergeQueueBatchState =
   | "bounced"
   | "abandoned";
 
-export type MergeQueueBatchCiCheckState = "passed" | "skipped" | "failed" | "running" | "queued";
+export type MergeQueueBatchCiCheckState = "passed" | "skipped" | "cancelled" | "failed" | "running" | "queued";
 
 export type MergeQueueBatchCiCheckDto = {
   name: string;

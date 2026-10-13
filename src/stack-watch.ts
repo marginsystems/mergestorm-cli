@@ -18,7 +18,7 @@ import {
   type StackWatchObligation,
 } from "./stack-watch-obligation.js";
 import { setTimeout as sleep } from "node:timers/promises";
-import { apiFetch, type ApiFetchResult } from "./api.js";
+import { apiFetch, DEFAULT_API_TIMEOUT_MS, type ApiFetchResult } from "./api.js";
 import type { Config } from "./config.js";
 import {
   REVIEW_POLL_INTERVAL_MS,
@@ -32,6 +32,8 @@ import { type MergeQueueEntryDto, type StackDto } from "./stack-dto.js";
 export const STACK_WATCH_SCHEMA = "mergestorm.stack_watch/v1" as const;
 export const STACK_WATCH_DEFAULT_TIMEOUT_MS = 45_000;
 export const STACK_WATCH_BUSY_RECHECK_S = 15;
+export const STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS = DEFAULT_API_TIMEOUT_MS;
+export const STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS = 5_000;
 
 /** Resume selectors are fixed for the entire wait, including transient retries. */
 export type StackWatchCursor = {
@@ -153,7 +155,9 @@ export async function pollStackWatch(
         response = await fetch(cfg, route, {
           signal: opts.signal, timeoutMs: route.includes("&wait=")
             ? Number(new URL(route, "https://local").searchParams.get("wait")) * 1000 + 5_000
-            : finalSnapshot ? 5_000 : Math.max(1, Math.min(30_000, deadline - now())),
+            : finalSnapshot
+              ? timeoutMs === 0 ? STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS : STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS
+              : Math.max(1, Math.min(30_000, deadline - now())),
         });
       } catch (err) {
         if (opts.signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;

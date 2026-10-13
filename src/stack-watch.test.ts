@@ -4,6 +4,7 @@ import type { ApiFetchInit, ApiFetchResult } from "./api.js";
 import type { MergeQueueBounceKind, StackAgentRun, StackDto, StackLayerDto, MergeQueueEntryDto } from "./stack-dto.js";
 import {
   pollStackWatch, StackWatchError, StackWatchTimeoutError,
+  STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS, STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS,
   type PollStackWatchOptions, type StackWatchEnvelope,
 } from "./stack-watch.js";
 import {
@@ -616,6 +617,58 @@ for (const live of [false, true]) {
     assert.deepEqual(result.issues.map(issue => issue.prNumber), [45]);
   });
 }
+
+test("zero timeout gives each one-shot read the full API deadline, not the post-deadline snapshot's", async () => {
+  const h = harness();
+  const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 });
+  assert.equal(result.assessment, "available");
+  assert.equal(STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS, 30_000);
+  assert.ok(STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS < STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS);
+  assert.deepEqual(h.calls.map((call) => [call.route.includes("/enrich") ? "enrich" : "queue", call.timeoutMs]),
+    [["enrich", STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS], ["queue", STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS]]);
+});
+
+test("zero timeout assesses a stack whose read takes longer than the post-deadline snapshot allows", async () => {
+  const h = harness();
+  const slowReadMs = STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS + 3_000;
+  h.options.fetch = async (_cfg, route, init = {}) => {
+    h.state.advance(slowReadMs);
+    if ((init.timeoutMs ?? Infinity) < slowReadMs) {
+      throw new Error(`Request timed out after ${Math.round((init.timeoutMs ?? 0) / 1000)}s. Check network connectivity and API status.`);
+    }
+    return { status: 200, body: route.includes("/queue") ? { entries: [] } : { stacks: [stack()] } };
+  };
+  const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 });
+  assert.equal(result.status, "waiting");
+  assert.equal(result.assessment, "available");
+  assert.equal(result.watch.done, false);
+});
+
+test("zero timeout reports a deleted stack as not_found and done after a slow read", async () => {
+  const h = harness();
+  h.options.fetch = async (_cfg, _route, init = {}) => {
+    assert.equal(init.timeoutMs, STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS);
+    return { status: 200, body: { stacks: [] } };
+  };
+  await assert.rejects(pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 }), (err: unknown) => {
+    assert.ok(err instanceof StackWatchError);
+    assert.equal(err.lastEnvelope.watch.done, true);
+    assert.equal(err.lastEnvelope.watch.reason, "not_found");
+    return true;
+  });
+});
+
+test("zero timeout that outlasts the full API deadline stays failed, unavailable and not done", async () => {
+  const h = harness();
+  h.options.fetch = async () => { throw new Error("Request timed out after 30s. Check network connectivity and API status."); };
+  await assert.rejects(pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 }), (err: unknown) => {
+    assert.ok(err instanceof StackWatchError);
+    assert.equal(err.lastEnvelope.status, "failed");
+    assert.equal(err.lastEnvelope.assessment, "unavailable");
+    assert.equal(err.lastEnvelope.watch.done, false);
+    return true;
+  });
+});
 
 test("zero timeout with an unread snapshot stays unavailable and never waiting", async () => {
   const h = harness();

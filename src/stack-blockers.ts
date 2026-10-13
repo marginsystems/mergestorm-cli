@@ -1,4 +1,5 @@
 import {
+  CYCLONE_CI_FIX_HELD_REASON,
   CYCLONE_FIX_HELD_REASON,
   deriveStackAgentsBusy,
   mergeQueueBounceLabel,
@@ -338,6 +339,7 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   ci_unverified: "Cyclone's static checks did not cover its fix, so it pushed nothing",
   ci_unreadable: "Cyclone could not read the failing checks",
   ci_needs_actions_read: "Cyclone's GitHub App cannot read the Actions logs on this repo",
+  ci_fix_held: "Cyclone wrote a CI fix and held it on purpose, so it pushed nothing",
   ci_unresolved: "Cyclone's CI fix failed",
   stack_auto_fix_ci_off: "auto-fix CI is off for this stack",
   account_auto_fix_ci_off: "auto-fix CI is off for the account and this stack does not turn it on",
@@ -345,7 +347,8 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
 
 function cycloneHandoffWords(reason: string, detail?: string | null): string {
   const words = CYCLONE_HANDOFF_WORDS[reason] ?? reason.replaceAll("_", " ");
-  return reason === CYCLONE_FIX_HELD_REASON && detail?.trim() ? `${words}: ${detail.trim()}` : words;
+  const held = reason === CYCLONE_FIX_HELD_REASON || reason === CYCLONE_CI_FIX_HELD_REASON;
+  return held && detail?.trim() ? `${words}: ${detail.trim()}` : words;
 }
 
 export function cycloneStatusWords(layer: Pick<StackLayerDto, "cycloneStatus" | "cycloneHandoff" | "headSha">): string | null {
@@ -397,7 +400,7 @@ function ciHandoffNote(stack: StackDto, layer: StackLayerDto): string | null {
   if (isLandPrLayer(stack, layer)) return null;
   const handoff = layer.cycloneCiHandoff;
   if (handoff && sameHead(handoff.headSha, layer.headSha)) {
-    return `Cyclone tried to fix this failing CI at ${layer.headSha ?? handoff.headSha} and left it for a person (${cycloneHandoffWords(handoff.reason)}), so it will not try this head again.`;
+    return `Cyclone tried to fix this failing CI at ${layer.headSha ?? handoff.headSha} and left it for a person (${cycloneHandoffWords(handoff.reason, handoff.detail)}), so it will not try this head again.`;
   }
   if (stack.cycloneCiOff) {
     return `Cyclone will not fix this failing CI by itself: ${cycloneHandoffWords(stack.cycloneCiOff)}.`;
