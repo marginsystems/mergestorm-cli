@@ -268,12 +268,15 @@ export type StackLayerConflictResolution = {
 
 export type StackLayerCiFixStatus = "verified" | "unverified" | "no_changes" | "held" | "failed";
 
+export type StackLayerCiFixCheck = "passed" | "failed" | "did_not_run" | "pending";
+
 export type StackLayerCiFix = {
   status: StackLayerCiFixStatus;
   failingCheck: string | null;
   resultSha: string | null;
   reason: string | null;
   at: string;
+  checkOnResult?: StackLayerCiFixCheck;
 };
 
 export type StackLayerDto = {

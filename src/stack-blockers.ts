@@ -334,6 +334,7 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   ci_billing_block: "GitHub Actions is blocked by billing, so no code change turns CI green",
   ci_missing_secrets: "the failing job needs secrets its run does not have",
   ci_red_on_base: "the same check also fails on the base branch",
+  ci_actor_gated: "the failing job is skipped on a commit pushed by Cyclone, so a fix from Cyclone would not turn it green",
   ci_rerun_exhausted: "Cyclone already had Surge re-run this check once at this head",
   ci_rerun_unavailable: "the failure looked flaky and Surge could not re-run it",
   ci_unverified: "Cyclone's static checks did not cover its fix, so it pushed nothing",
