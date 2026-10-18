@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.61`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.62`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.61                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.62                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
 │     ▝▀▀▘      review a diff · usage for tabs · /help for all commands        │
-│       ▀       New in v0.3.61: Watch names a job Cyclone's push skips         │
+│       ▀       New in v0.3.62: Watch wakes for a blocker on any layer         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -114,7 +114,7 @@ mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --finding <id> --
 
 - It calls `stack wait` in slices of at most 300s and carries the cursor (`enrolled_head_sha`, `after_finished_at`, `bounce_id`) from one slice to the next.
 - It prints nothing while the stack is `waiting` or `in_progress`, including while Cyclone or Vortex holds the blocked PR (`busy[]`, `actAfter: "agents_idle"`).
-- On attention it prints `MS-WATCH ATTENTION pr=<n> head=<sha> blocker="<blocker>" repair=<kind>` and exits 3.
+- On attention it prints `MS-WATCH ATTENTION pr=<n> head=<sha> blocker="<blocker>" repair=<kind>` and exits 3. Attention names the lowest layer with a blocker an agent must fix, on any layer of the stack, not only the current candidate.
 - A confirmed landing prints `MS-WATCH LANDED stack=<id> reason=landed` and exits 0. `closed`, `archived` and `not_found` end the watch with `MS-WATCH ATTENTION stack=<id> reason=<reason>` and exit 3. A missing stack does not prove a landing; verify each PR before reporting it merged.
 - A failed read is retried once. If the retry fails too, it prints `MS-WATCH ATTENTION failed stack=<id> error="<message>"` and exits 3. A rate limit is waited out.
 - `--head <sha>` enrolls the SHA you just pushed. After fixing a blocker, restart the watcher with it.
@@ -151,7 +151,7 @@ If the parent branch is already a layer of a **registered** (submitted) stack, `
 
 `mg stack submit --server-side` and `mg stack publish` are for a machine that can reach Mergestorm but cannot authenticate to GitHub, such as a cloud coding sandbox. They never run `gh`, `git push` or `git fetch`. `mg` reads your commits from the local repository and sends them to Mergestorm with your API key; Mergestorm writes those exact commits and the branch on GitHub as the Surge App, opens a ready pull request, and registers the stack. Surge must be installed on the repository and your linked GitHub account needs write access to it.
 
-These are your own changes, not Cyclone's: the stack is registered with **Auto patch pinned off**, Auto land on for a new stack (`--auto-land off` to keep it off), and Auto review left to your account setting. `--auto-patch on` is refused in this mode. Fix review findings yourself and send the new commits with `mg stack publish`.
+The stack is registered with Auto land on for a new stack (`--auto-land off` to keep it off). Auto patch and Auto review follow the stack, repository and account settings like any other stack; `--auto-patch` and `--auto-review` pin them on the stack after it is registered. Send later commits with `mg stack publish`.
 
 ```bash
 mg issue create --title "The thing is broken" --body-file issue.md --label bug --json   # no gh
@@ -170,7 +170,7 @@ mg stack publish --status               # absent | pushed | opened | registered
 - **Read-only home directory.** `mg` keeps the saved login and the local stack state of `stack create` / `stack submit` under `~/.mergestorm`. Where the home directory cannot be written, set `MERGESTORM_HOME` to a writable directory (outside the repository) and every command uses that instead. `MERGESTORM_API_KEY` supplies the key without `mg login`.
 - **Limits.** 20 commits, 500 changed paths, 2 MiB a file and 8 MiB in total per publication. Submodules and merge commits are refused with the path or the reason. `stack submit --server-side` publishes the first two layers of a stack; a third layer needs a park freeze, which this mode does not create, so add it once the first two are registered.
 
-Legacy repo-local `.mergestorm/stack.json` state migrates automatically on the next stack command. If local authoring state is stale or malformed, use `mg stack reset --force`; this clears only pre-submit CLI state and never deletes branches, PRs, or registered stacks.
+If local authoring state is stale or malformed, use `mg stack reset --force`; this clears only pre-submit CLI state and never deletes branches, PRs, or registered stacks.
 
 ### `login`
 

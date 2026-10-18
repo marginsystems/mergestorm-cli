@@ -5,8 +5,16 @@ export const STACK_WATCH_NOT_DONE_SENTENCE =
 
 export const STACK_WATCH_NOTIFY_PATTERN = "MS-WATCH (ATTENTION|LANDED)";
 
-export function stackWatchBackgroundCommand(stackId: string): string {
-  return `mg stack watch ${stackId}`;
+function shellArg(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function stackWatchBackgroundCommand(
+  stackId: string,
+  cursor?: { afterFinishedAt?: string | null; bounceId?: string | null } | null,
+): string {
+  return `mg stack watch ${shellArg(stackId)}${cursor?.bounceId ? ` --bounce-id ${shellArg(cursor.bounceId)}` : ""}${
+    cursor?.afterFinishedAt ? ` --after-finished-at ${shellArg(cursor.afterFinishedAt)}` : ""}`;
 }
 
 export type StackWatchDoneReason = "landed" | "closed" | "archived" | "not_found";
@@ -113,7 +121,7 @@ export function stackWatchObligation(input: StackWatchObligationInput): StackWat
     : input.status === "failed"
       ? "failed"
       : input.attention ? "attention" : input.unread ? "unread" : "open";
-  const background = stackWatchBackgroundCommand(input.stackId);
+  const background = stackWatchBackgroundCommand(input.stackId, input.cursor);
   const parts = [
     STACK_WATCH_NOT_DONE_SENTENCE,
     `If your host has a confirmed notification that resumes this task, run \`${background}\` as a background command, notify on output matching ${STACK_WATCH_NOTIFY_PATTERN}, and end your turn. The command monitors the stack; it cannot wake an agent by itself, and a process left running is not a notification. Without a confirmed notification, keep using stack_wait with the returned cursor, or report that automatic follow-up is unavailable before ending the turn.`,
@@ -124,7 +132,7 @@ export function stackWatchObligation(input: StackWatchObligationInput): StackWat
   } else if (reason === "failed") {
     parts.push(`This read failed, which does not end the task. Call stack_wait once more with the same cursor; if that fails too, tell the human that stack ${input.stackId} is not landed and is no longer being watched.`);
   } else if (reason === "attention" && input.attention) {
-    parts.push(`First fix #${input.attention.prNumber} (${input.attention.blocker}); repair, when present, names the fix. Calling stack_wait again before fixing it returns the same attention. After your push, call stack_wait with this cursor and enrolled_head_sha set to the SHA you pushed, or start \`${background} --head <pushed-sha>\` in the background.`);
+    parts.push(`First fix #${input.attention.prNumber} (${input.attention.blocker}); repair, when present, names the fix. Calling stack_wait again before fixing it returns the same attention. After your push, call stack_wait with this cursor and enrolled_head_sha set to the SHA you pushed, or start \`${background} --head <pushed-sha>\` in the background.${input.cursor?.bounceId ? ` If you handle it without a push (for example by turning Auto land back on), start \`${background}\` so this bounce is not reported again.` : ""}`);
   } else if (reason === "unread") {
     parts.push("This tool did not read the stack's state; stack_wait will.");
   }

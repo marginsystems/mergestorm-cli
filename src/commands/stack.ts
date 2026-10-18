@@ -122,11 +122,13 @@ const STACK_USAGE = `usage:
   mergestorm stack wait <stack-id> [--json] [--timeout <s>]
     --json writes exactly one JSON document to stdout. The timeout or error notice goes to stderr
     (exit 5 on timeout), so do not merge the streams (2>&1) before parsing stdout.
-  mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--json]
+  mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--bounce-id <id>] [--after-finished-at <iso>] [--json]
     Loops stack wait with the cursor and stays silent while the stack is waiting or in progress.
     Prints one MS-WATCH ATTENTION line and exits 3 on attention or on reads that keep failing (a permanent
     error twice, or 15 minutes of timeouts and 5xx, which it retries with backoff); prints MS-WATCH LANDED
     and exits 0 only for a confirmed landing, including a stack Mergestorm deleted after its queue entry landed. Other terminal reasons exit 3 with ATTENTION. Run it as a background command.
+    An ATTENTION line for a merge queue bounce ends with restart="mg stack watch <id> --bounce-id <id> --after-finished-at <iso>":
+    restart with that command (plus --head <sha> after a push) so a bounce you already handled is not reported again.
     --json writes exactly one JSON document to stdout and sends the MS-WATCH lines to stderr.
   mergestorm stack set <stack-id> [--auto-land on|off] [--auto-review on|off|default] [--auto-patch on|off|default] [--auto-resolve-conflicts on|off|default] [--auto-fix-ci on|off|default] [--json]
   mergestorm stack adopt <owner/repo>#<pr> [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--json]
@@ -148,7 +150,8 @@ const STACK_USAGE = `usage:
   stack submit --server-side and stack publish need no GitHub credentials: mg
   reads your commits from the local repository and sends them to Mergestorm,
   which writes the commits and the branch on GitHub as the Surge App, opens the
-  pull request, and registers the stack with Auto patch pinned off. They never
+  pull request, and registers the stack. Auto patch follows the stack, the
+  repository and your account, like any other stack. They never
   run gh, git push or git fetch. stack publish does this for one branch and is
   how you send later commits to a branch that is already published. Mergestorm
   refuses to move a branch whose head on GitHub matches no local commit unless
@@ -1092,13 +1095,6 @@ export async function cmdStackSubmit(
   }
 
   if (serverSide) {
-    if (autoPatch === true) {
-      throw new CommandError(
-        "--server-side publishes your own commits and keeps Auto patch off for the stack. Drop --auto-patch on, or submit without --server-side.",
-        REVIEW_EXIT.usage,
-        "usage",
-      );
-    }
     const parked = plans.find((plan) => plan.githubBase == null);
     if (parked) {
       throw new CommandError(
@@ -1114,6 +1110,7 @@ export async function cmdStackSubmit(
     const remoteHeads = new Map<string, string>();
     const published: Array<{ branch: string; base: string; prNumber: number; created: boolean; head: string; tree: string }> = [];
     let publishedStackId: string | null = null;
+    let publishedAutoPatch: boolean | null = null;
     for (const plan of plans) {
       if (!branchExistsFn(plan.branch, cwd)) {
         throw new CommandError(`Stack layer branch missing locally: ${plan.branch}`);
@@ -1144,6 +1141,7 @@ export async function cmdStackSubmit(
       });
       remoteHeads.set(plan.branch, result.head.sha);
       publishedStackId = result.stack.id;
+      publishedAutoPatch = result.stack.autoPatchOverride;
       published.push({
         branch: plan.branch,
         base: result.baseBranch,
@@ -1153,7 +1151,7 @@ export async function cmdStackSubmit(
         tree: result.head.tree,
       });
     }
-    const { autoEnqueueWhenReady: _autoLand, autoPatchOverride: _autoPatch, ...otherOverrides } = policy ?? {};
+    const { autoEnqueueWhenReady: _autoLand, ...otherOverrides } = policy ?? {};
     if (publishedStackId && Object.keys(otherOverrides).length > 0) {
       await (deps.setStackPolicy ?? setStackPolicy)(publishedStackId, otherOverrides, config);
     }
@@ -1162,7 +1160,7 @@ export async function cmdStackSubmit(
     if (asJson) {
       console.log(
         JSON.stringify(
-          { owner, repo, layers: published, stackId: publishedStackId, trunk: meta.trunk, chain: null, serverSide: true, autoPatchOverride: false, watch },
+          { owner, repo, layers: published, stackId: publishedStackId, trunk: meta.trunk, chain: null, serverSide: true, autoPatchOverride: otherOverrides.autoPatchOverride ?? publishedAutoPatch, watch },
           null,
           2,
         ),
@@ -1172,7 +1170,7 @@ export async function cmdStackSubmit(
     const lines = published.map((row) =>
       ansi.brightGreen(`  #${row.prNumber}  ${row.branch} → ${row.base}  (${row.created ? "opened" : "exists"}, head ${row.head.slice(0, 12)})`),
     );
-    if (publishedStackId) lines.push(ansi.brightGreen(`  Registered stack ${publishedStackId} with Auto patch off`));
+    if (publishedStackId) lines.push(ansi.brightGreen(`  Registered stack ${publishedStackId}`));
     lines.push(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
     if (watch) lines.push(...stackWatchTextLines(watch).map((line) => `  ${line}`));
     await present("Stack", lines);
@@ -1316,9 +1314,6 @@ export async function cmdStackSubmit(
     );
     await registerPr(opened[opened.length - 1]!.prNumber);
   } else {
-    if (opened.length === 0) {
-      throw new CommandError("No pull requests to register after submit.");
-    }
     await registerPr(opened[0]!.prNumber);
   }
 
@@ -1436,7 +1431,7 @@ export async function cmdStackPublish(args: string[], deps: StackPublishDeps = {
       ...(status.head ? [ansi.dim(`  head ${status.head.sha} (tree ${status.head.tree ?? "unknown"})`)] : []),
       ...(status.pr ? [ansi.dim(`  #${status.pr.number} → ${status.pr.base}  ${status.pr.url}`)] : []),
       ...(status.stack
-        ? [ansi.dim(`  stack ${status.stack.id}  auto-patch ${status.stack.autoPatchOverride === false ? "off" : "not pinned off"}  auto-land ${status.stack.autoLand ? "on" : "off"}`)]
+        ? [ansi.dim(`  stack ${status.stack.id}  auto-patch ${status.stack.autoPatchOverride === null ? "default" : status.stack.autoPatchOverride ? "on" : "off"}  auto-land ${status.stack.autoLand ? "on" : "off"}`)]
         : []),
     ]);
     return;
@@ -1459,7 +1454,7 @@ export async function cmdStackPublish(args: string[], deps: StackPublishDeps = {
   await present("Stack", [
     ansi.brightGreen(`  ${result.branch} ${moved} at ${result.head.sha.slice(0, 12)} (tree ${result.head.tree.slice(0, 12)})`),
     ansi.brightGreen(`  #${result.pr.number}  ${result.branch} → ${result.baseBranch}  (${result.pr.created ? "opened" : "exists"})  ${result.pr.url}`),
-    ansi.brightGreen(`  Registered stack ${result.stack.id} with Auto patch off`),
+    ansi.brightGreen(`  Registered stack ${result.stack.id}`),
     ...stackWatchTextLines(watch).map((line) => `  ${line}`),
   ]);
 }
@@ -1576,13 +1571,15 @@ export async function cmdStackWatch(
     signal?: AbortSignal;
   } = {},
 ): Promise<void> {
-  const usage = "usage: mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--json]";
+  const usage = "usage: mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--bounce-id <id>] [--after-finished-at <iso>] [--json]";
   const fail = (detail?: string) => new CommandError(detail ? `${usage}\n${detail}` : usage, REVIEW_EXIT.usage, "usage");
   const positional: string[] = [];
   const ignore: string[] = [];
   let until: StackWatchUntil = "attention";
   let maxMinutes: number | undefined;
   let head: string | undefined;
+  let bounceId: string | undefined;
+  let afterFinishedAt: string | undefined;
   let json = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -1604,6 +1601,13 @@ export async function cmdStackWatch(
     } else if (flag === "--head") {
       head = value();
       if (!/^[0-9a-f]{7,40}$/i.test(head)) throw fail("--head must be a commit SHA");
+    } else if (flag === "--bounce-id") {
+      bounceId = value();
+      if (!/^[0-9a-z-]{1,64}$/i.test(bounceId)) throw fail("--bounce-id must be a merge queue entry id");
+    } else if (flag === "--after-finished-at") {
+      const raw = value();
+      if (Number.isNaN(Date.parse(raw))) throw fail("--after-finished-at must be an ISO timestamp");
+      afterFinishedAt = new Date(raw).toISOString();
     } else if (arg.startsWith("-")) throw fail();
     else positional.push(arg);
   }
@@ -1616,7 +1620,12 @@ export async function cmdStackWatch(
     json,
     signal: deps.signal,
     ...(maxMinutes !== undefined ? { maxMs: maxMinutes * 60_000 } : {}),
-    ...(head ? { cursor: { stackId: stackId.trim().toLowerCase(), enrolledHeadSha: head.toLowerCase() } } : {}),
+    ...(head || bounceId || afterFinishedAt ? { cursor: {
+      stackId: stackId.trim().toLowerCase(),
+      enrolledHeadSha: head ? head.toLowerCase() : null,
+      ...(bounceId ? { bounceId } : {}),
+      ...(afterFinishedAt ? { afterFinishedAt } : {}),
+    } } : {}),
   });
   if (result.exitCode === STACK_WATCH_EXIT.landed) return;
   const reason = result.outcome === "timeout"
@@ -1672,7 +1681,7 @@ export async function cmdStackStatus(
     freshCursor: true,
   });
   if (asJson) {
-    console.log(JSON.stringify({ ...stack, held, repair, queueWait, watch }, null, 2));
+    console.log(JSON.stringify({ ...stack, attention, held, repair, queueWait, watch }, null, 2));
     return;
   }
   const lines = formatStackHuman(stack, false);
@@ -1687,7 +1696,7 @@ export async function cmdStackStatus(
     );
   }
   if (queueWait && !attention) lines.push(`  Queue: #${queueWait.prNumber} ${queueWait.text}`);
-  lines.push(...[...stackHeldLine(held), ...stackRepairLine(repair), ...stackWatchTextLines(watch)].map((line) => `  ${line}`));
+  lines.push(...[...stackHeldLine(attention ? null : held), ...stackRepairLine(repair), ...stackWatchTextLines(watch)].map((line) => `  ${line}`));
   await present("Stack status", lines);
 }
 
@@ -1887,6 +1896,6 @@ export async function cmdStack(args: string[], options: { signal?: AbortSignal }
   if (sub === "set") return cmdStackSet(rest);
   if (sub === "adopt") return cmdStackAdopt(rest);
   if (sub === "restack") return cmdStackRestack(rest);
-  if (sub === "land" || sub === "land-next") return cmdStackLand(rest);
+  if (sub === "land") return cmdStackLand(rest);
   throw new CommandError(`${STACK_USAGE}\nunknown stack subcommand: ${sub}`);
 }

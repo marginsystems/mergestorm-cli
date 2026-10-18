@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import {
@@ -28,8 +29,6 @@ export const REVIEW_POLL_STRETCH_SPAN_MS = 60_000;
 
 /** Same thread slug contract as POST /api/v1/reviews. */
 export const REVIEW_THREAD_SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,119}$/;
-/** Same product limit as `api/src/v1/reviews.ts` `MAX_DIFF_BYTES`. */
-export const MAX_REVIEW_DIFF_BYTES = 1_000_000;
 export const MAX_CONTEXT_TEXT_CHARS = 60_000;
 export const MAX_CONTEXT_FILES = 10;
 export const MAX_CONTEXT_FILE_CHARS = 16_000;
@@ -205,10 +204,43 @@ export async function loadReviewContext(
   };
 }
 
+const REPLAYED_JOB_RESUBMIT_STATUSES: readonly string[] = ["failed", "quota_exceeded"];
+const MAX_REPLAYED_JOB_RESUBMITS = 5;
+
+export function reviewIdempotencyKey(
+  input: ReviewInput,
+  opts: SubmitReviewOptions = {},
+  afterJobId: string | null = null,
+): string {
+  const request = [
+    input.thread, input.branch, input.repo ?? null, input.baseLabel, input.headLabel, input.diff, input.files,
+    opts.routerMode ?? null, [...new Set(opts.specialists ?? [])].sort(), opts.context ?? null, opts.contextFiles ?? [], opts.webhookUrl ?? null,
+    afterJobId,
+  ];
+  return `mg-auto-${createHash("sha256").update(JSON.stringify(request)).digest("hex")}`;
+}
+
 export async function submitReview(
   cfg: Config,
   input: ReviewInput,
   opts: SubmitReviewOptions = {},
+): Promise<{ status: number; row: ReviewJobRow; retryAfterSeconds?: number }> {
+  const explicitKey = opts.idempotencyKey?.trim() || undefined;
+  let idempotencyKey = explicitKey ?? reviewIdempotencyKey(input, opts);
+  for (let resubmits = 0; ; resubmits++) {
+    const submitted = await postReview(cfg, input, opts, idempotencyKey);
+    const replayedJobId = submitted.row.job_id ?? submitted.row.id ?? null;
+    if (explicitKey || submitted.status !== 200 || !replayedJobId || resubmits >= MAX_REPLAYED_JOB_RESUBMITS ||
+      !REPLAYED_JOB_RESUBMIT_STATUSES.includes(submitted.row.status ?? "")) return submitted;
+    idempotencyKey = reviewIdempotencyKey(input, opts, replayedJobId);
+  }
+}
+
+async function postReview(
+  cfg: Config,
+  input: ReviewInput,
+  opts: SubmitReviewOptions,
+  idempotencyKey: string,
 ): Promise<{ status: number; row: ReviewJobRow; retryAfterSeconds?: number }> {
   const { status, body, retryAfterSeconds } = await apiFetch(cfg, "/api/v1/reviews", {
     method: "POST",
@@ -224,7 +256,7 @@ export async function submitReview(
       ...(opts.specialists?.length ? { specialists: opts.specialists } : {}),
       ...(opts.context ? { context: opts.context } : {}),
       ...(opts.contextFiles?.length ? { context_files: opts.contextFiles } : {}),
-      ...(opts.idempotencyKey ? { idempotency_key: opts.idempotencyKey } : {}),
+      idempotency_key: idempotencyKey,
       ...(opts.webhookUrl ? { webhook_url: opts.webhookUrl } : {}),
     },
     signal: opts.signal,

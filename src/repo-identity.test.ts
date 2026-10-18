@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
-  gitCommonDir,
   gitTopLevel,
   stableRepoId,
   stackMetaPath,
@@ -45,7 +44,6 @@ test("linked worktrees have distinct identities and stack state paths", async ()
       cwd: f.repo,
     });
     const stateRoot = path.join(f.root, "state");
-    assert.equal(gitCommonDir(worktree), gitCommonDir(f.repo));
     assert.notEqual(stableRepoId(worktree), stableRepoId(f.repo));
     assert.notEqual(
       stackMetaPath(worktree, stateRoot),

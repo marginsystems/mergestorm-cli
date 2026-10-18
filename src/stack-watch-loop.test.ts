@@ -7,6 +7,7 @@ import {
   type RunStackWatchOptions,
 } from "./stack-watch-loop.js";
 import {
+  pollStackWatch,
   StackWatchError,
   StackWatchTimeoutError,
   type PollStackWatchOptions,
@@ -15,6 +16,7 @@ import {
 } from "./stack-watch.js";
 import { LandedQueueReadError } from "./api.js";
 import { stackWatchObligation } from "./stack-watch-obligation.js";
+import type { StackDto, StackLayerDto } from "./stack-dto.js";
 
 const stackId = "11111111-1111-4111-8111-111111111111";
 const headA = "a".repeat(40);
@@ -625,4 +627,101 @@ test("known stack disappearance at the deadline performs no reads and reports un
   assert.ok(result.envelope?.watch.message.includes("do not report it landed"));
   assert.equal(reads, 0);
   assert.ok(lines.includes(`MS-WATCH ATTENTION stack=${stackId} reason=landing_unconfirmed`));
+});
+
+test("stack watch attention for a bounce prints the restart command that carries the bounce cursor", async () => {
+  const cursor: StackWatchCursor = { stackId, enrolledHeadSha: headA, bounceId: "bounce-1", afterFinishedAt: "2026-10-18T10:00:00.000Z" };
+  const { run, lines } = harness([attention("Auto land off after merge_failed bounce", { cursor })]);
+  const result = await run;
+  assert.equal(result.exitCode, STACK_WATCH_EXIT.attention);
+  assert.deepEqual(lines, [`MS-WATCH ATTENTION pr=12 head=${headA} blocker="Auto land off after merge_failed bounce" repair=none ` +
+    `restart="mg stack watch ${stackId} --bounce-id bounce-1 --after-finished-at 2026-10-18T10:00:00.000Z"`]);
+});
+
+function stack8Snapshot(): StackDto {
+  const H1 = "332a61e".padEnd(40, "1");
+  const H2 = "827099e".padEnd(40, "2");
+  const H3 = "9c3b8f0".padEnd(40, "3");
+  const review = (head: string) => ({ status: "done" as const, skip_reason: null, pass: 1, head_sha: head, phase: null,
+    started_at: null, stoppable: false, source: "pr_reviews" as const });
+  const layer = (prNumber: number, position: number, branch: string, parentBranch: string, headSha: string,
+    extra: Partial<StackLayerDto> = {}): StackLayerDto => ({
+    branch, parentBranch, prNumber, position, state: "clean",
+    openedAt: null, mergedAt: null, closedAt: null, additions: null, deletions: null,
+    openAdditions: null, openDeletions: null, title: null, htmlUrl: null,
+    ciStatus: "success", reviewStatus: "approved", checks: null, vortexStatus: "all_clear",
+    cycloneStatus: null, conflictDetail: null, lastRestackedSha: null,
+    mergeable: true, mergeableState: "clean", headSha, mergeableHeadSha: headSha, vortexReview: review(headSha),
+    ...extra,
+  });
+  const findings = (headSha: string, reviewStatus: StackLayerDto["reviewStatus"]): Partial<StackLayerDto> => ({
+    vortexStatus: "findings", reviewStatus, agentRuns: [{ agent: "vortex", status: "findings", sha: headSha, findingCount: 2 }],
+  });
+  return {
+    id: stackId, owner: "marginsystems", repo: "mergestorm-agent-mac", trunkBranch: "mg-stack-8", landTarget: "main",
+    archivedAt: null, autoEnqueueWhenReady: true, autoPatchOverride: false, cyclonePatchOff: "stack_auto_patch_off",
+    autoLandWait: { reason: "vortex_not_green", prNumber: 1088, headSha: H2, since: "2026-10-18T09:15:38Z", attempts: null, detail: null },
+    layers: [
+      layer(1087, 0, "mac/one", "mg-stack-8", H1),
+      layer(1088, 1, "mac/two", "mac/one", H2, findings(H2, "changes_requested")),
+      layer(1089, 2, "mac/three", "mg-park-8-g1", H3, findings(H3, "reviewed")),
+    ],
+  } as StackDto;
+}
+
+function stack8Poll(snapshots: StackDto[]): typeof pollStackWatch {
+  return (cfg, id, pollOpts = {}) => {
+    const snapshot = snapshots.length > 1 ? snapshots.shift()! : snapshots[0]!;
+    return pollStackWatch(cfg, id, {
+      ...pollOpts, timeoutMs: 0, now: () => Date.parse("2026-10-18T10:44:00Z"),
+      fetch: async (_cfg, route) => ({
+        status: 200,
+        body: route.includes("/stacks/queue") ? { entries: [] } : { stacks: [snapshot] },
+      }),
+    });
+  };
+}
+
+test("stack 8: the watcher exits with one ATTENTION line for layer 2's findings behind a clean candidate", async () => {
+  const lines: string[] = [];
+  const result = await runStackWatch({}, stackId, {
+    write: (line) => lines.push(line), now: () => 0, sleep: async () => {}, poll: stack8Poll([stack8Snapshot()]),
+  });
+  assert.equal(result.outcome, "attention");
+  assert.equal(result.exitCode, STACK_WATCH_EXIT.attention);
+  assert.deepEqual(lines, [
+    `MS-WATCH ATTENTION pr=1088 head=${"827099e".padEnd(40, "2")} blocker="Vortex findings need a person" repair=vortex_findings`,
+  ]);
+  assert.match(result.envelope?.watch.message ?? "", /First fix #1088 \(Vortex findings need a person\)/);
+});
+
+test("stack watch prints one ATTENTION line, the lowest blocked layer, when several layers are blocked", async () => {
+  const snapshot = stack8Snapshot();
+  snapshot.layers[2] = { ...snapshot.layers[2]!, vortexStatus: "all_clear", reviewStatus: "approved", agentRuns: [],
+    ciStatus: "failure", checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: "swift test" } };
+  const lines: string[] = [];
+  const result = await runStackWatch({}, stackId, {
+    write: (line) => lines.push(line), now: () => 0, sleep: async () => {}, poll: stack8Poll([snapshot]),
+  });
+  assert.equal(result.exitCode, STACK_WATCH_EXIT.attention);
+  assert.deepEqual(lines, [
+    `MS-WATCH ATTENTION pr=1088 head=${"827099e".padEnd(40, "2")} blocker="Vortex findings need a person" repair=vortex_findings`,
+  ]);
+});
+
+test("stack watch exits at once on the next layer after the first blocker clears", async () => {
+  const first = stack8Snapshot();
+  first.layers[2] = { ...first.layers[2]!, vortexStatus: "all_clear", reviewStatus: "approved", agentRuns: [],
+    ciStatus: "failure", checks: { total: 1, success: 0, pending: 0, failure: 1, failingName: "swift test" } };
+  const fixed = structuredClone(first);
+  fixed.layers[1] = { ...fixed.layers[1]!, vortexStatus: "all_clear", reviewStatus: "approved", agentRuns: [] };
+  fixed.autoLandWait = null;
+  const lines: string[] = [];
+  const result = await runStackWatch({}, stackId, {
+    write: (line) => lines.push(line), now: () => 0, sleep: async () => {}, poll: stack8Poll([fixed]),
+  });
+  assert.equal(result.exitCode, STACK_WATCH_EXIT.attention);
+  assert.deepEqual(lines, [
+    `MS-WATCH ATTENTION pr=1089 head=${"9c3b8f0".padEnd(40, "3")} blocker="CI failed — swift test" repair=ci_failure`,
+  ]);
 });

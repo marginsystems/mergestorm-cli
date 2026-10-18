@@ -59,7 +59,7 @@ test("validateApiKey rejects unreachable / non-200 without saving", async () => 
   );
 });
 
-test("cmdLogin backs off and retries when device start is rate limited", async () => {
+test("cmdLogin backs off and retries when device start is rate limited", async (t) => {
   const startPaths: string[] = [];
   originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
@@ -89,17 +89,24 @@ test("cmdLogin backs off and retries when device start is rate limited", async (
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   };
+  const opened: string[] = [];
+  const wasTTY = process.stdout.isTTY;
+  process.stdout.isTTY = true;
+  t.after(() => {
+    process.stdout.isTTY = wasTTY;
+  });
   await assert.rejects(
-    () => cmdLogin([]),
+    () => cmdLogin([], { openBrowser: (url) => void opened.push(url) }),
     (err: unknown) =>
       err instanceof CommandError &&
       /timed out/i.test(err.message) &&
       !/unreachable or misconfigured/i.test(err.message),
   );
   assert.equal(startPaths.length, 2);
+  assert.deepEqual(opened, ["https://mergestorm.ai/cli/auth?code=ABCD-EFGH"]);
 });
 
-test("cmdLogin backs off and retries when device start returns slow_down (HTTP 400)", async () => {
+test("cmdLogin backs off and retries when device start returns slow_down (HTTP 400)", async (t) => {
   const startPaths: string[] = [];
   originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
@@ -129,14 +136,21 @@ test("cmdLogin backs off and retries when device start returns slow_down (HTTP 4
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   };
+  const opened: string[] = [];
+  const wasTTY = process.stdout.isTTY;
+  process.stdout.isTTY = true;
+  t.after(() => {
+    process.stdout.isTTY = wasTTY;
+  });
   await assert.rejects(
-    () => cmdLogin([]),
+    () => cmdLogin([], { openBrowser: (url) => void opened.push(url) }),
     (err: unknown) =>
       err instanceof CommandError &&
       /timed out/i.test(err.message) &&
       !/unreachable or misconfigured/i.test(err.message),
   );
   assert.equal(startPaths.length, 2);
+  assert.deepEqual(opened, ["https://mergestorm.ai/cli/auth?code=ABCD-EFGH"]);
 });
 
 async function withTempHome(t: { after: (fn: () => Promise<void>) => void }): Promise<string> {
@@ -177,6 +191,29 @@ async function readJson(file: string): Promise<Record<string, unknown> | null> {
     () => null,
   );
 }
+
+test("cmdLogin opens the approval URL in a terminal and never without one", async (t) => {
+  await withTempHome(t);
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) =>
+    String(input).endsWith("/api/v1/cli/device")
+      ? json(200, { ...deviceStart, expires_in: 1 })
+      : json(400, { error: "authorization_pending" });
+  const log = console.log;
+  console.log = () => {};
+  const wasTTY = process.stdout.isTTY;
+  t.after(async () => {
+    console.log = log;
+    process.stdout.isTTY = wasTTY;
+  });
+
+  for (const isTTY of [true, false]) {
+    process.stdout.isTTY = isTTY;
+    const opened: string[] = [];
+    await assert.rejects(() => cmdLogin([], { openBrowser: (url) => void opened.push(url) }));
+    assert.deepEqual(opened, isTTY ? [deviceStart.verification_uri_complete] : []);
+  }
+});
 
 test("login --start prints the URL and code, keeps the device code on disk, and exits without polling", async (t) => {
   const home = await withTempHome(t);

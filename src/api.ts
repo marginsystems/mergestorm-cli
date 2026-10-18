@@ -1,7 +1,6 @@
 import { apiBase, loadConfig, resolveApiKey, type Config } from "./config.js";
 import {
   BEARER_SETTINGS_KEYS as SETTINGS_WRITABLE_KEYS,
-  type BearerSettingsKey as SettingsWritableKey,
 } from "./automation-catalog.js";
 import {
   CommandError,
@@ -19,14 +18,8 @@ export type {
   MergeQueueEnqueuedVia,
   MergeQueueEntryDto,
   MergeQueueEntryState,
-  StackBranchState,
-  StackCiStatus,
   StackDto,
-  StackLayerChecks,
   StackLayerDto,
-  StackReviewStatus,
-  StackUnitDto,
-  StackUnitMemberDto,
 } from "./stack-dto.js";
 
 /** Default per-request timeout so a hung API cannot stall the shell/CI forever. */
@@ -365,7 +358,6 @@ export function applyPrReviewQuery(
  * The connected flags are read-only there and deliberately absent here.
  */
 export { SETTINGS_WRITABLE_KEYS };
-export type { SettingsWritableKey };
 
 export type SettingsPatch = Partial<import("./automation-catalog.js").BearerSettingsValues>;
 
@@ -510,7 +502,6 @@ export async function getMe(
     const { status, body } = await apiFetch(resolved, "/api/v1/me", {
       timeoutMs: opts?.timeoutMs,
     });
-    if (status === 404) return null;
     if (status !== 200) return null;
     return body as MeResponse;
   } catch (err) {
@@ -770,17 +761,6 @@ export async function adoptStack(
         ? body.message
         : undefined;
     const code: CommandErrorCode | undefined =
-      error === "auth_invalid" ||
-      error === "api_timeout" ||
-      error === "not_a_repo" ||
-      error === "not_found" ||
-      error === "missing_api_key" ||
-      error === "registered_parent" ||
-      error === "usage" ||
-      error === "review_quota" ||
-      error === "review_failed" ||
-      error === "review_timeout" ||
-      error === "rate_limited" ||
       error === "cyclone_not_installed" ||
       error === "pr_merged" ||
       error === "pr_closed" ||
@@ -1180,15 +1160,6 @@ async function stackMutation(
   return body;
 }
 
-/** Arm or disarm Auto land on one owned stack. */
-export async function setStackAutoLand(
-  stackId: string,
-  enabled: boolean,
-  cfg?: Config,
-): Promise<unknown> {
-  return setStackPolicy(stackId, { autoEnqueueWhenReady: enabled }, cfg);
-}
-
 /**
  * Patch any subset of one owned stack's automation policy
  * (Bearer PATCH /api/v1/stacks/:id). `null` clears an override.
@@ -1214,13 +1185,8 @@ export async function restackStack(stackId: string, cfg?: Config): Promise<unkno
 export async function landNextStack(
   stackId: string,
   cfg?: Config,
-  opts?: { prNumber?: number },
 ): Promise<unknown> {
-  const json =
-    opts?.prNumber != null && Number.isInteger(opts.prNumber) && opts.prNumber > 0
-      ? { prNumber: opts.prNumber }
-      : {};
-  return stackMutation(stackId, "/land-next", "POST", json, "Failed to land next", cfg);
+  return stackMutation(stackId, "/land-next", "POST", {}, "Failed to land next", cfg);
 }
 
 /** List the authenticated user's live merge-queue entries. */

@@ -16,6 +16,7 @@ import {
   buildStackListLines,
   cmdStack,
   cmdStackStatus,
+  cmdStackWatch,
   cmdStackCreate,
   cmdStackSet,
   cmdStackPublish,
@@ -38,6 +39,7 @@ import {
   type StackCreateDeps,
 } from "./stack.js";
 import type { StackDto, StackPublication, StackPublicationRequest } from "../api.js";
+import type { RunStackWatchOptions, StackWatchLoopResult } from "../stack-watch-loop.js";
 import { publishBranchServerSide, type ServerPublishInput, type ServerPublishResult } from "../server-publish.js";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -1539,8 +1541,9 @@ test("stack status prints the enriched stack as one JSON value", async () => {
   }));
   assert.equal(captured.error, null);
   assert.equal(captured.stdout.length, 1);
-  const { held, repair, queueWait, watch, ...printed } = JSON.parse(captured.stdout[0]!);
+  const { attention, held, repair, queueWait, watch, ...printed } = JSON.parse(captured.stdout[0]!);
   assert.deepEqual(printed, stack);
+  assert.equal(attention.prNumber, stack.layers[0]!.prNumber);
   assert.equal(held, null);
   assert.equal(queueWait, null);
   assert.equal(repair.kind, "ci_failure");
@@ -1728,7 +1731,7 @@ function serverSideHarness(meta: StackMeta = SAMPLE_META) {
         branchCreated: true,
         branchUpdated: false,
         pr: { number: 50 + n, url: `https://github.com/acme/widgets/pull/${50 + n}`, created: true },
-        stack: { id: "22222222-2222-4222-8222-222222222222", autoPatchOverride: false, autoLand: true },
+        stack: { id: "22222222-2222-4222-8222-222222222222", autoPatchOverride: null, autoLand: true },
       };
     },
   });
@@ -1774,24 +1777,20 @@ test("cmdStackSubmit --server-side publishes each layer through Mergestorm and n
   assert.deepEqual(policies, []);
   const output = JSON.parse(captured.stdout.join("\n")) as {
     serverSide: boolean;
-    autoPatchOverride: boolean;
+    autoPatchOverride: boolean | null;
     stackId: string;
     layers: Array<{ prNumber: number; head: string }>;
     watch: { done: boolean };
   };
   assert.equal(output.serverSide, true);
-  assert.equal(output.autoPatchOverride, false);
+  assert.equal(output.autoPatchOverride, null);
   assert.equal(output.stackId, "22222222-2222-4222-8222-222222222222");
   assert.deepEqual(output.layers.map((layer) => layer.prNumber), [51, 52]);
   assert.equal(output.watch.done, false);
   assert.equal(h.saved.length, 1);
 });
 
-test("cmdStackSubmit --server-side refuses --auto-patch on and a layer that needs a park freeze before publishing anything", async () => {
-  const patched = serverSideHarness();
-  await assert.rejects(() => cmdStackSubmit(["--server-side", "--auto-patch", "on"], patched.h.deps), /keeps Auto patch off/);
-  assert.deepEqual(patched.published, []);
-
+test("cmdStackSubmit --server-side refuses a layer that needs a park freeze before publishing anything", async () => {
   const deep = serverSideHarness({
     ...TWO_LAYER_META,
     stacks: [{ layers: [...TWO_LAYER_META.stacks[0]!.layers, { branch: "feat/layer-3", parentBranch: "feat/layer-2" }] }],
@@ -1808,7 +1807,7 @@ test("cmdStackSubmit --server-side passes Auto land through and applies the othe
   const { h, published, policies } = serverSideHarness();
   await captureStackOutput(() => cmdStackSubmit(["--server-side", "--auto-land", "off", "--auto-review", "off", "--auto-patch", "off"], h.deps));
   assert.equal(published[0]!.autoLand, false);
-  assert.deepEqual(policies, [{ stackId: "22222222-2222-4222-8222-222222222222", policy: { autoReviewOverride: false } }]);
+  assert.deepEqual(policies, [{ stackId: "22222222-2222-4222-8222-222222222222", policy: { autoReviewOverride: false, autoPatchOverride: false } }]);
 });
 
 test("parseStackPublishArgs reads its flags and rejects a short head SHA", () => {
@@ -1889,7 +1888,7 @@ test("stack submit --server-side and stack publish reach GitHub only through Mer
             branchCreated: request.expectedHead === null,
             branchUpdated: request.expectedHead !== null,
             pr: { number: 77, url: "https://github.com/acme/widgets/pull/77", created: request.expectedHead === null },
-            stack: { id: "33333333-3333-4333-8333-333333333333", autoPatchOverride: false, autoLand: true },
+            stack: { id: "33333333-3333-4333-8333-333333333333", autoPatchOverride: null, autoLand: true },
           };
         },
       });
@@ -1929,5 +1928,25 @@ test("stack submit --server-side and stack publish reach GitHub only through Mer
   } finally {
     process.env.PATH = previousPath;
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stack watch restarts with the bounce cursor from --bounce-id and --after-finished-at", async () => {
+  const stackId = "11111111-1111-4111-8111-111111111111";
+  const seen: RunStackWatchOptions[] = [];
+  const runStackWatch = async (_cfg: unknown, _id: string, opts: RunStackWatchOptions = {}) => {
+    seen.push(opts);
+    return { outcome: "landed", exitCode: 0, envelope: null } as StackWatchLoopResult;
+  };
+  await cmdStackWatch([stackId, "--bounce-id", "22222222-2222-4222-8222-222222222222",
+    "--after-finished-at=2026-10-18T10:00:00.000Z"], { loadConfig: async () => ({}), runStackWatch });
+  await cmdStackWatch([stackId, "--head", "ABCDEF1", "--bounce-id", "22222222-2222-4222-8222-222222222222"],
+    { loadConfig: async () => ({}), runStackWatch });
+  assert.deepEqual(seen.map((opts) => opts.cursor), [
+    { stackId, enrolledHeadSha: null, bounceId: "22222222-2222-4222-8222-222222222222", afterFinishedAt: "2026-10-18T10:00:00.000Z" },
+    { stackId, enrolledHeadSha: "abcdef1", bounceId: "22222222-2222-4222-8222-222222222222" },
+  ]);
+  for (const args of [["--bounce-id", "has space"], ["--after-finished-at", "yesterday"]]) {
+    await assert.rejects(() => cmdStack(["watch", stackId, ...args]), /usage: mergestorm stack watch/);
   }
 });

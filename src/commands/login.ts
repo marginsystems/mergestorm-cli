@@ -264,7 +264,14 @@ async function loginFinish(): Promise<void> {
   );
 }
 
-export async function cmdLogin(args: string[]): Promise<void> {
+export interface LoginDeps {
+  openBrowser: (url: string) => void;
+}
+
+export async function cmdLogin(
+  args: string[],
+  deps: LoginDeps = { openBrowser },
+): Promise<void> {
   if (args.includes("--key")) {
     await loginWithKey();
     return;
@@ -285,8 +292,9 @@ export async function cmdLogin(args: string[]): Promise<void> {
   console.log("To sign in, open this URL and confirm the code:\n");
   console.log(`  ${ansi.brightGreen(pending.openUrl)}`);
   console.log(`\n  Code: ${ansi.bold(pending.userCode)}\n`);
-  openBrowser(pending.openUrl);
-  if (!process.stdout.isTTY) {
+  if (process.stdout.isTTY) {
+    deps.openBrowser(pending.openUrl);
+  } else {
     console.log(
       "No terminal here. If this command may be cut off before the approval, use `mergestorm login --start`, then `mergestorm login --finish`.",
     );

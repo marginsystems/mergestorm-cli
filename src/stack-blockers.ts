@@ -425,8 +425,14 @@ function vortexImportantFindingsHeldAtHead(layer: StackLayerDto): boolean {
     CYCLONE_HELD_FINDINGS_REASONS.includes(layer.cycloneHandoff!.reason);
 }
 
+function seamApprovedAtHead(stack: StackDto, layer: StackLayerDto): boolean {
+  const member = (stack.unit?.members ?? []).find((entry) => entry.prNumber === layer.prNumber);
+  return member?.seamState?.trim().toLowerCase() === "approved" && sameHead(member.seamReviewedSha, layer.headSha);
+}
+
 function vortexFindingsLeftForPerson(stack: StackDto, layer: StackLayerDto): boolean {
   if (layerAgentsBusy(layer).cyclone) return false;
+  if (seamApprovedAtHead(stack, layer)) return false;
   return vortexImportantFindingsHeldAtHead(layer) ||
     (vortexChangesRequestedAtHead(layer) && cycloneHandoffAtHead(stack, layer) !== null);
 }
@@ -742,10 +748,6 @@ export function autoLandWaitLayer(stack: StackDto): StackLayerDto | undefined {
 
 function autoLandWaitOn(stack: StackDto, layer: StackLayerDto): AutoLandWaitDto | null {
   return autoLandWaitLayer(stack)?.prNumber === layer.prNumber ? armedAutoLandWait(stack) : null;
-}
-
-export function autoLandWaitBlocker(stack: StackDto, layer: StackLayerDto, nowMs: number): string | null {
-  return autoLandWaitNamed(stack, layer, nowMs)?.blocker ?? null;
 }
 
 function autoLandWaitNamed(stack: StackDto, layer: StackLayerDto, nowMs: number): NamedBlocker | null {
@@ -1221,6 +1223,24 @@ function landPrMissing(
   };
 }
 
+type FoundBlocker = {
+  issue: StackBlocker;
+  reason: StackBlockerReason;
+  layer: StackLayerDto | undefined;
+  bounce: MergeQueueEntryDto | undefined;
+  repair?: StackRepairHint | null;
+};
+
+function layerBusy(layer: StackLayerDto | undefined): boolean {
+  if (!layer) return false;
+  const busy = layerAgentsBusy(layer);
+  return busy.cyclone || busy.vortex;
+}
+
+function sameBlocker(a: Pick<StackBlocker, "prNumber" | "blocker">, b: Pick<StackBlocker, "prNumber" | "blocker">): boolean {
+  return a.prNumber === b.prNumber && a.blocker === b.blocker;
+}
+
 /** Pair-gate attention plus live hard blocks on every other open layer. */
 export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [],
   cursor: Pick<StackWatchCursor, "bounceId" | "afterFinishedAt"> = {}, nowMs: number = Date.now()) {
@@ -1240,10 +1260,12 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   let attentionLayer: StackLayerDto | undefined;
   let bounce: MergeQueueEntryDto | undefined;
   const issues: StackBlocker[] = [];
+  const found: FoundBlocker[] = [];
   const mergeStateUnknownPrs = new Set<number>();
   const queueWait = stack.archivedAt ? null : mergeQueueWait(queue, nowMs);
   for (const layer of open) {
     const selected = layer.prNumber === candidate?.prNumber;
+    const inScope = selected || !candidate || layer.position > candidate.position;
     let result = layerAttention(stack, layer, selected ? queue : [], cursor);
     let disarmed: MergeQueueEntryDto | undefined;
     if (!result.blocker && selected) {
@@ -1272,10 +1294,10 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       result = { blocker: `${MERGE_QUEUE_STALLED_PREFIX}${queueWait.text}`, reason: "queue_stalled", bounceKind: null };
     }
     if (!result.blocker) {
-      if (vortexRetryScheduled(layer) && (selected || !candidate || layer.position > candidate.position)) {
+      if (vortexRetryScheduled(layer) && inScope) {
         issues.push({ prNumber: layer.prNumber, headSha: layer.headSha ?? null, blocker: VORTEX_RETRY_SCHEDULED, bounceKind: null });
       }
-      if (mergeabilityPending(layer) && (selected || !candidate || layer.position > candidate.position)) {
+      if (mergeabilityPending(layer) && inScope) {
         mergeStateUnknownPrs.add(layer.prNumber);
         issues.push({ prNumber: layer.prNumber, headSha: layer.headSha ?? null,
           blocker: `Merge state unknown${layer.parentBranch ? ` vs ${layer.parentBranch}` : ""}`, bounceKind: null });
@@ -1284,6 +1306,9 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
     }
     const issue = { prNumber: layer.prNumber, headSha: layer.headSha ?? null,
       blocker: result.blocker, bounceKind: result.bounceKind };
+    if (inScope || result.reason === "unit_abandoned" || layer === child || waitNamed) {
+      found.push({ issue, reason: result.reason, layer, bounce: result.bounce });
+    }
     if (
       selected ||
       result.reason === "unit_abandoned" ||
@@ -1295,7 +1320,7 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       bounce = result.bounce;
       if (disarmed) issues.push({ prNumber: disarmed.bounceDetail?.prNumber ?? layer.prNumber,
         headSha: disarmed.bounceDetail?.headSha ?? null, blocker: mergeQueueBounceLabel(disarmed), bounceKind: result.bounceKind });
-    } else if (!candidate || layer.position > candidate.position) issues.push(issue);
+    } else if (inScope) issues.push(issue);
   }
   if (!attention) {
     const unlisted = autoLandWaitLayer(stack);
@@ -1304,6 +1329,7 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       attention = { prNumber: unlisted.prNumber, headSha: unlisted.headSha ?? null, blocker: waiting.blocker, bounceKind: null };
       attentionReason = waiting.reason;
       attentionLayer = unlisted;
+      found.push({ issue: attention, reason: waiting.reason, layer: unlisted, bounce: undefined });
     }
   }
   const queued: StackQueueWait | null = queueWait && candidate && !queueWait.stalled
@@ -1317,13 +1343,15 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
     attention = landMissing.attention;
     attentionReason = landMissing.reason;
     attentionLayer = undefined;
+    found.unshift({ issue: landMissing.attention, reason: landMissing.reason, layer: undefined, bounce: undefined,
+      repair: landMissing.repair });
   }
   const classified: ClassifiedStackBlocker | null = attention && attentionReason
     ? { ...attention, reason: attentionReason }
     : null;
   const focus = attentionLayer ?? candidate;
-  const agents = focus ? layerAgents(focus) : null;
-  const busy: StackAgentBusy[] = [];
+  let agents = focus ? layerAgents(focus) : null;
+  let busy: StackAgentBusy[] = [];
   if (attention && agents) {
     for (const agent of ["cyclone", "vortex"] as const) {
       if (agents.busy[agent]) busy.push({ prNumber: attention.prNumber, headSha: attention.headSha, agent, blocker: attention.blocker });
@@ -1336,17 +1364,36 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   const landGatePending: StackLandGatePending | null = landLayer && landing && landGateIsPending(landing)
     ? { prNumber: landLayer.prNumber, headSha: landLayer.headSha ?? null, reason: landing }
     : null;
+  let held: StackHeldBlocker | null = null;
+  let shownIssues = issues;
+  let repair: StackRepairHint | null;
   if (busy.length && attention && classified && agentsCannotClear(classified.reason, stack, attentionLayer)) {
-    const held: StackHeldBlocker = { ...attention, actAfter: "agents_idle", waitingOn: busy.map((entry) => entry.agent) };
-    return { attention: null, held, issues: [attention, ...issues], currentCandidate, bounce: undefined, busy, agents,
-      repair: stackRepair(stack, classified, attentionLayer, undefined, queueWait), landGatePending, queueWait: queued };
+    held = { ...attention, actAfter: "agents_idle", waitingOn: busy.map((entry) => entry.agent) };
+    shownIssues = [attention, ...issues];
+    repair = stackRepair(stack, classified, attentionLayer, undefined, queueWait);
+    attention = null;
+    bounce = undefined;
+  } else if (busy.length) {
+    repair = null;
+    attention = null;
+    bounce = undefined;
+  } else {
+    repair = landMissing?.repair ?? stackRepair(stack, classified, attentionLayer, bounce, queueWait);
   }
-  if (busy.length) {
-    return { attention: null, held: null, issues, currentCandidate, bounce: undefined, busy, agents, repair: null, landGatePending,
-      queueWait: queued };
+  if (!attention) {
+    const next = found.find((item) => !layerBusy(item.layer));
+    if (next) {
+      attention = next.issue;
+      repair = next.repair !== undefined
+        ? next.repair
+        : stackRepair(stack, { ...next.issue, reason: next.reason }, next.layer, next.bounce, queueWait);
+      bounce = next.bounce;
+      if (next.layer) agents = layerAgents(next.layer);
+      busy = [];
+      shownIssues = shownIssues.filter((issue) => !sameBlocker(issue, next.issue));
+    }
   }
-  return { attention, held: null, issues, currentCandidate, bounce, busy, agents,
-    repair: landMissing?.repair ?? stackRepair(stack, classified, attentionLayer, bounce, queueWait), landGatePending,
+  return { attention, held, issues: shownIssues, currentCandidate, bounce, busy, agents, repair, landGatePending,
     queueWait: queued };
 }
 

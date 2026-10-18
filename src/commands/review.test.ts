@@ -21,7 +21,6 @@ import {
   loadReviewContext,
   MAX_CONTEXT_FILE_CHARS,
   MAX_CONTEXT_FILES,
-  MAX_REVIEW_DIFF_BYTES,
   REVIEW_POLL_INTERVAL_MS,
   pollReview,
   stretchedPollIntervalMs,
@@ -1176,7 +1175,6 @@ test("formatReviewSubmitError explains nginx 413 instead of Failed: {}", () => {
   const nginx = formatReviewSubmitError(413, {});
   assert.match(nginx, /HTTP 413/);
   assert.match(nginx, /no credits were charged/i);
-  assert.equal(MAX_REVIEW_DIFF_BYTES, 1_000_000);
   assert.match(nginx, /1 MB \/ 1_000_000 bytes/);
   assert.doesNotMatch(nginx, /Failed: \{\}/);
   assert.doesNotMatch(nginx, /2 MB once that location is deployed/);

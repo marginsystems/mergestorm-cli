@@ -5,25 +5,17 @@
 import { randomUUID } from "node:crypto";
 import {
   chmod,
-  copyFile,
   mkdir,
   readFile,
   readdir,
   rename,
   rm,
-  rmdir,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
 import { CommandError, isCommandErrorCode } from "./errors.js";
-import { git } from "./git.js";
 import {
   cliStacksRoot,
-  gitTopLevel,
-  LEGACY_STACK_META_REL,
-  legacyStackMetaPath,
-  repoStateDir,
   stackMetaPath as resolveStackMetaPath,
 } from "./repo-identity.js";
 
@@ -61,9 +53,6 @@ export type StackMeta = {
   active: number;
 };
 
-/** Exported only for legacy migration/tests. New state never uses this path. */
-export const STACK_META_REL = LEGACY_STACK_META_REL;
-
 export function stackMetaPath(
   cwd = process.cwd(),
   stacksRoot = cliStacksRoot(),
@@ -84,7 +73,6 @@ function normalizeMeta(raw: unknown): StackMeta | null {
     trunk?: unknown;
     stacks?: unknown;
     active?: unknown;
-    layers?: unknown;
   };
   if (typeof obj.trunk !== "string" || !obj.trunk.trim()) {
     throw new Error(
@@ -136,20 +124,6 @@ function normalizeMeta(raw: unknown): StackMeta | null {
     return { version: 2, trunk: obj.trunk, stacks, active };
   }
 
-  if (obj.version === 1) {
-    if (!Array.isArray(obj.layers) || !obj.layers.every(isLayer)) {
-      throw new Error(
-        "Stack authoring state has malformed legacy layers; run `mg stack reset --force` to clear it.",
-      );
-    }
-    return {
-      version: 2,
-      trunk: obj.trunk,
-      stacks: [{ layers: obj.layers }],
-      active: 0,
-    };
-  }
-
   throw new Error(
     "Stack authoring state has an unknown version; run `mg stack reset --force` to clear it.",
   );
@@ -175,43 +149,12 @@ async function readIfExists(file: string): Promise<string | null> {
   }
 }
 
-async function removeLegacyFile(
-  file: string,
-  cwd = process.cwd(),
-  force = false,
-): Promise<void> {
-  const top = gitTopLevel(cwd);
-  const rel = path.relative(top, file);
-  try {
-    git(["rm", "-f", "--", rel], top);
-  } catch (err) {
-    // Fall back to a plain unlink only for untracked files; otherwise the
-    // index entry would remain after the worktree copy is gone.
-    if (git(["ls-files", "--", rel], top).trim() !== "") {
-      if (!force) {
-        throw new Error(
-          `git rm failed for tracked ${rel}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      git(["update-index", "--force-remove", "--", rel], top);
-    }
-    await unlink(file);
-  }
-  try {
-    await rmdir(path.dirname(file));
-  } catch {
-    // Leave a non-empty .mergestorm directory untouched.
-  }
-}
-
 export async function loadStackMeta(
   cwd = process.cwd(),
   stacksRoot = cliStacksRoot(),
 ): Promise<StackMeta | null> {
   const file = stackMetaPath(cwd, stacksRoot);
-  const legacyFile = legacyStackMetaPath(cwd);
   const raw = await readIfExists(file);
-  const legacyRaw = await readIfExists(legacyFile);
 
   if (raw !== null) {
     const meta = normalizeMeta(parseStateJson(raw));
@@ -220,40 +163,10 @@ export async function loadStackMeta(
         "Stack authoring state is not an object; run `mg stack reset --force` to clear it.",
       );
     }
-    if (legacyRaw !== null) {
-      const stateDir = repoStateDir(cwd, stacksRoot);
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const backup = path.join(stateDir, `legacy-conflict-${stamp}.json`);
-      try {
-        await mkdir(stateDir, { recursive: true, mode: 0o700 });
-        await chmod(stateDir, 0o700);
-        await copyFile(legacyFile, backup);
-        await chmod(backup, 0o600);
-        await removeLegacyFile(legacyFile, cwd);
-      } catch (err) {
-        throw new CommandError(
-          `Failed to preserve legacy stack state${err instanceof Error ? `: ${err.message}` : ""}; run \`mg stack reset --force\` to clear it.`,
-        );
-      }
-      console.warn(
-        `Warning: global stack state already existed; preserved legacy state at ${backup}.`,
-      );
-    }
     return meta;
   }
 
-  if (legacyRaw === null) return null;
-  const migrated = normalizeMeta(parseStateJson(legacyRaw));
-  if (!migrated) return null;
-  try {
-    await saveStackMeta(migrated, cwd, stacksRoot);
-    await removeLegacyFile(legacyFile, cwd);
-  } catch (err) {
-    throw new CommandError(
-      `Failed to migrate legacy stack state${err instanceof Error ? `: ${err.message}` : ""}; run \`mg stack reset --force\` to clear it.`,
-    );
-  }
-  return migrated;
+  return null;
 }
 
 export function emptyStackMeta(trunk: string): StackMeta {
@@ -351,10 +264,8 @@ export async function resetStackMeta(
   stacksRoot = cliStacksRoot(),
 ): Promise<void> {
   let stateFile: string;
-  let legacyFile: string;
   try {
     stateFile = stackMetaPath(cwd, stacksRoot);
-    legacyFile = legacyStackMetaPath(cwd);
   } catch (err) {
     // Outside a worktree / deleted main repo: reset is a no-op (nothing to clear).
     // Match on CommandError.code — do not treat it as a Node errno.
@@ -362,12 +273,6 @@ export async function resetStackMeta(
     throw err;
   }
   await rm(stateFile, { force: true });
-  try {
-    await removeLegacyFile(legacyFile, cwd, true);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    if (code !== "ENOENT") throw err;
-  }
 }
 
 export function appendLayer(meta: StackMeta, layer: StackLayerMeta): StackMeta {

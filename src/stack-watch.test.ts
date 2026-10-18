@@ -554,6 +554,11 @@ test("a changed held queue snapshot is evaluated without a polling pause", async
   assert.ok(h.calls.filter((call) => call.route.includes("&wait=")).every((call) => !call.route.includes("&seen=")));
 });
 
+const cyclonePatching = {
+  cycloneStatus: "patching" as const,
+  agentRuns: [{ agent: "cyclone" as const, status: "patching", sha: NEXT }],
+};
+
 function organism() {
   return stack([
     layer({ prNumber: 41, branch: "feat/cowork-authors" }),
@@ -590,7 +595,7 @@ test("Organism pair gate preserves a headless child head", async () => {
 });
 
 for (const scenario of ["stale", "pending", "different-parent", "parked-bottom"] as const) {
-  test(`${scenario} does not produce pair-gate attention`, async () => {
+  test(`${scenario} does not produce pair-gate attention${scenario === "different-parent" ? ", but its live conflict is attention" : ""}`, async () => {
     const fixture = organism();
     fixture.layers = fixture.layers.slice(0, 2);
     if (scenario === "stale") fixture.layers[1].mergeableHeadSha = HEAD;
@@ -599,22 +604,44 @@ for (const scenario of ["stale", "pending", "different-parent", "parked-bottom"]
     if (scenario === "parked-bottom") fixture.layers = [layer({ parentBranch: "mg-park-freeze", lastRestackedSha: "old", mergeable: false, mergeableState: "dirty" })];
     const h = harness(fixture);
     const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 });
+    assert.equal(result.assessment, "available");
+    assert.equal(h.calls.length, 2);
+    if (scenario === "different-parent") {
+      assert.equal(result.status, "attention");
+      assert.equal(result.prNumber, 42);
+      assert.equal(result.blocker, "Merge conflicts vs other");
+      assert.equal(result.repair?.kind, "merge_conflict");
+      assert.deepEqual(result.issues, []);
+      return;
+    }
     assert.equal(result.status, "waiting");
     assert.equal(result.blocker, null);
-    assert.equal(result.assessment, "available");
-    assert.equal(result.issues.length, scenario === "different-parent" ? 1 : 0);
-    assert.equal(h.calls.length, 2);
+    assert.equal(result.issues.length, 0);
   });
 }
 
 for (const live of [false, true]) {
-  test(`issues survive ${live ? "live queue" : "waiting"}`, async () => {
+  test(`a parked layer's red CI is attention once the pair gate is clear${live ? ", with the queue live" : ""}`, async () => {
     const fixture = organism();
     Object.assign(fixture.layers[1], { mergeable: true, mergeableState: "clean" });
     const h = harness(fixture, live ? [bounce({ state: "running" })] : []);
     const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 });
+    assert.equal(result.status, "attention");
+    assert.equal(result.prNumber, 45);
+    assert.equal(result.blocker, "CI failed");
+    assert.equal(result.repair?.kind, "ci_failure");
+    assert.deepEqual(result.issues, []);
+  });
+
+  test(`issues on a layer an agent is working survive ${live ? "live queue" : "waiting"}`, async () => {
+    const fixture = organism();
+    Object.assign(fixture.layers[1], { mergeable: true, mergeableState: "clean" });
+    Object.assign(fixture.layers[4], cyclonePatching);
+    const h = harness(fixture, live ? [bounce({ state: "running" })] : []);
+    const result = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 0 });
     assert.equal(result.status, live ? "in_progress" : "waiting");
     assert.deepEqual(result.issues.map(issue => issue.prNumber), [45]);
+    assert.equal(result.blocker, null);
   });
 }
 
@@ -778,7 +805,7 @@ test("deadline before the first snapshot stays unavailable and never waiting", a
 test("degraded mid-wait snapshot invalidates the previous assessment", async () => {
   const h = harness(stack([
     layer(),
-    layer({ prNumber: 43, position: 1, ciStatus: "failure" }),
+    layer({ prNumber: 43, position: 1, ciStatus: "failure", ...cyclonePatching }),
   ]));
   h.state.respond = (route) => route.includes("&wait=")
     ? { status: 200, body: {} }
@@ -795,7 +822,7 @@ test("degraded mid-wait snapshot invalidates the previous assessment", async () 
 test("a missing stack clears live work from the last poll", async () => {
   const h = harness(unitStack([
     layer(),
-    layer({ prNumber: 43, position: 1, ciStatus: "failure" }),
+    layer({ prNumber: 43, position: 1, ciStatus: "failure", ...cyclonePatching }),
   ], { state: "landing", landPrNumber: 43, landingBlockReason: "ci_pending: settling idle project checks on abc1234" }),
     [bounce({ state: "running", bounceDetail: null, finishedAt: null, claimedAt: null })]);
   const live = stackBlockers(h.state.stack, h.state.entries);
@@ -829,7 +856,7 @@ test("a missing stack clears live work from the last poll", async () => {
 });
 
 test("live queue timeout retains in_progress and upstack issues", async () => {
-  const h = harness(stack([layer(), layer({ prNumber: 43, position: 1, ciStatus: "failure" })]), [bounce({ state: "running" })]);
+  const h = harness(stack([layer(), layer({ prNumber: 43, position: 1, ciStatus: "failure", ...cyclonePatching })]), [bounce({ state: "running" })]);
   await assert.rejects(pollStackWatch(cfg, "stack", h.options), (err: unknown) => {
     assert.ok(err instanceof StackWatchTimeoutError);
     assert.equal(err.lastEnvelope.status, "in_progress");
@@ -1209,13 +1236,17 @@ test("seam findings on an already promoted member are not a blocker", async () =
   assert.equal((await timedOut(h.options)).blocker, null);
 });
 
-test("seam findings on an upstack member are an issue behind the candidate", async () => {
+test("seam findings on an upstack member are attention behind a clean candidate", async () => {
   const target = seamUnit(stack([layer(), layer({ prNumber: 43, position: 1, branch: "upper", parentBranch: "feature", headSha: NEXT })]), "none", null);
   target.unit!.members.push({ prNumber: 43, promotedHeadSha: null, promotedAt: "2026-09-27T00:28:21Z", seamState: "findings", seamReviewedSha: NEXT } as UnitMember);
   const h = harness(target);
-  const result = await timedOut(h.options);
-  assert.equal(result.blocker, null);
-  assert.deepEqual(result.issues, [{ prNumber: 43, headSha: NEXT, blocker: "Seam findings", bounceKind: null }]);
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.prNumber, 43);
+  assert.equal(result.headSha, NEXT);
+  assert.equal(result.blocker, "Seam findings");
+  assert.deepEqual(result.currentCandidate, { prNumber: 42, headSha: HEAD });
+  assert.deepEqual(result.issues, []);
 });
 
 test("seam findings while Vortex re-reviews the seam hold as in_progress", async () => {
@@ -1272,7 +1303,7 @@ test("the obligation: not-done sentence first, exact next call, done only for te
   assert.equal(open.reason, "open");
   assert.ok(open.message.startsWith(STACK_WATCH_NOT_DONE_SENTENCE));
   assert.match(open.message, /A clean push, a submit, or one merged layer does not finish it/);
-  assert.deepEqual(open.next, { tool: "stack_wait", command: "mg stack wait stack --json", background: "mg stack watch stack",
+  assert.deepEqual(open.next, { tool: "stack_wait", command: "mg stack wait stack --json", background: "mg stack watch stack --bounce-id b1",
     args: { stack_id: "stack", enrolled_head_sha: HEAD, after_finished_at: null, bounce_id: "b1", timeout_s: 45 } });
   assert.match(open.message, /If your host has a confirmed notification that resumes this task/);
   assert.match(open.message, /a process left running is not a notification/);

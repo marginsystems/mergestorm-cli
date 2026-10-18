@@ -234,6 +234,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.61": [
     "Watch names a job Cyclone's push skips",
   ],
+  "0.3.62": [
+    "Watch wakes for a blocker on any layer",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

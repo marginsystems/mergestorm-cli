@@ -5,7 +5,6 @@ import {
   chmod,
   mkdir,
   mkdtemp,
-  readFile,
   readdir,
   rm,
   stat,
@@ -14,7 +13,6 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { legacyStackMetaPath } from "./repo-identity.js";
 import {
   activeLayers,
   appendLayer,
@@ -105,189 +103,12 @@ test("save cleans up orphaned temp files left by an interrupted write", async ()
   }
 });
 
-test("load migrates legacy v1 to global v2 and removes empty repo directory", async () => {
-  const f = await fixture("mg-stack-migrate-");
-  try {
-    const legacy = legacyStackMetaPath(f.repo);
-    await mkdir(path.dirname(legacy), { recursive: true });
-    await writeFile(
-      legacy,
-      JSON.stringify({
-        version: 1,
-        trunk: "main",
-        layers: [{ branch: "ms/old", parentBranch: "main" }],
-      }),
-    );
-
-    const loaded = await loadStackMeta(f.repo, f.stateRoot);
-    assert.deepEqual(loaded, {
-      version: 2,
-      trunk: "main",
-      stacks: [{ layers: [{ branch: "ms/old", parentBranch: "main" }] }],
-      active: 0,
-    });
-    assert.equal(await exists(legacy), false);
-    assert.equal(await exists(path.dirname(legacy)), false);
-    assert.ok(await exists(stackMetaPath(f.repo, f.stateRoot)));
-  } finally {
-    await rm(f.root, { recursive: true, force: true });
-  }
-});
-
-test("load migrating a tracked legacy file stages its deletion so the index stays consistent", async () => {
-  const f = await fixture("mg-stack-tracked-");
-  try {
-    const legacy = legacyStackMetaPath(f.repo);
-    await mkdir(path.dirname(legacy), { recursive: true });
-    await writeFile(
-      legacy,
-      JSON.stringify({
-        version: 1,
-        trunk: "main",
-        layers: [{ branch: "ms/tracked", parentBranch: "main" }],
-      }),
-    );
-    execFileSync("git", ["add", "-f", ".mergestorm/stack.json"], { cwd: f.repo });
-    execFileSync("git", ["commit", "-qm", "track legacy"], {
-      cwd: f.repo,
-      env: {
-        ...process.env,
-        GIT_AUTHOR_NAME: "t",
-        GIT_AUTHOR_EMAIL: "t@example.com",
-        GIT_COMMITTER_NAME: "t",
-        GIT_COMMITTER_EMAIL: "t@example.com",
-      },
-    });
-
-    await loadStackMeta(f.repo, f.stateRoot);
-
-    assert.equal(await exists(legacy), false);
-    assert.equal(
-      execFileSync("git", ["ls-files", "--", ".mergestorm/stack.json"], {
-        cwd: f.repo,
-        encoding: "utf8",
-      }).trim(),
-      "",
-    );
-  } finally {
-    await rm(f.root, { recursive: true, force: true });
-  }
-});
-
-test("load migrating a tracked legacy file leaves it in place when git rm fails", async () => {
-  const f = await fixture("mg-stack-tracked-rm-");
-  try {
-    const legacy = legacyStackMetaPath(f.repo);
-    await mkdir(path.dirname(legacy), { recursive: true });
-    await writeFile(
-      legacy,
-      JSON.stringify({
-        version: 1,
-        trunk: "main",
-        layers: [{ branch: "ms/skip", parentBranch: "main" }],
-      }),
-    );
-    execFileSync("git", ["add", "-f", ".mergestorm/stack.json"], { cwd: f.repo });
-    execFileSync(
-      "git",
-      ["update-index", "--skip-worktree", ".mergestorm/stack.json"],
-      { cwd: f.repo },
-    );
-
-    await assert.rejects(loadStackMeta(f.repo, f.stateRoot), /git rm failed/);
-    assert.equal(await exists(legacy), true);
-    assert.equal(
-      execFileSync("git", ["ls-files", "--", ".mergestorm/stack.json"], {
-        cwd: f.repo,
-        encoding: "utf8",
-      }).trim(),
-      ".mergestorm/stack.json",
-    );
-  } finally {
-    await rm(f.root, { recursive: true, force: true });
-  }
-});
-
-test("global state wins while conflicting legacy state is backed up outside repo", async () => {
-  const f = await fixture("mg-stack-conflict-");
-  try {
-    const global: StackMeta = {
-      version: 2,
-      trunk: "main",
-      stacks: [{ layers: [{ branch: "ms/global", parentBranch: "main" }] }],
-      active: 0,
-    };
-    await saveStackMeta(global, f.repo, f.stateRoot);
-    const legacy = legacyStackMetaPath(f.repo);
-    await mkdir(path.dirname(legacy), { recursive: true });
-    await writeFile(
-      legacy,
-      JSON.stringify({
-        version: 1,
-        trunk: "main",
-        layers: [{ branch: "ms/legacy", parentBranch: "main" }],
-      }),
-    );
-
-    assert.deepEqual(await loadStackMeta(f.repo, f.stateRoot), global);
-    assert.equal(await exists(legacy), false);
-    const names = await readdir(path.dirname(stackMetaPath(f.repo, f.stateRoot)));
-    const backup = names.find((name) => name.startsWith("legacy-conflict-"));
-    assert.ok(backup);
-    assert.match(
-      await readFile(path.join(path.dirname(stackMetaPath(f.repo, f.stateRoot)), backup), "utf8"),
-      /ms\/legacy/,
-    );
-  } finally {
-    await rm(f.root, { recursive: true, force: true });
-  }
-});
-
 test("reset removes global and legacy state but no branches or server state", async () => {
   const f = await fixture("mg-stack-reset-");
   try {
     await saveStackMeta(emptyStackMeta("main"), f.repo, f.stateRoot);
-    const legacy = legacyStackMetaPath(f.repo);
-    await mkdir(path.dirname(legacy), { recursive: true });
-    await writeFile(legacy, "{}");
     await resetStackMeta(f.repo, f.stateRoot);
     assert.equal(await exists(stackMetaPath(f.repo, f.stateRoot)), false);
-    assert.equal(await exists(legacy), false);
-  } finally {
-    await rm(f.root, { recursive: true, force: true });
-  }
-});
-
-test("reset --force clears tracked skip-worktree legacy state", async () => {
-  const f = await fixture("mg-stack-reset-skip-");
-  try {
-    const legacy = legacyStackMetaPath(f.repo);
-    await mkdir(path.dirname(legacy), { recursive: true });
-    await writeFile(
-      legacy,
-      JSON.stringify({
-        version: 1,
-        trunk: "main",
-        layers: [{ branch: "ms/skip", parentBranch: "main" }],
-      }),
-    );
-    execFileSync("git", ["add", "-f", ".mergestorm/stack.json"], { cwd: f.repo });
-    execFileSync(
-      "git",
-      ["update-index", "--skip-worktree", ".mergestorm/stack.json"],
-      { cwd: f.repo },
-    );
-
-    await resetStackMeta(f.repo, f.stateRoot);
-
-    assert.equal(await exists(legacy), false);
-    assert.equal(
-      execFileSync("git", ["ls-files", "--", ".mergestorm/stack.json"], {
-        cwd: f.repo,
-        encoding: "utf8",
-      }).trim(),
-      "",
-    );
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
@@ -360,18 +181,6 @@ test("non-object JSON in global state points to CLI reset recovery", async () =>
     const file = stackMetaPath(f.repo, f.stateRoot);
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, JSON.stringify("x"));
-    await assert.rejects(loadStackMeta(f.repo, f.stateRoot), /mg stack reset --force/);
-  } finally {
-    await rm(f.root, { recursive: true, force: true });
-  }
-});
-
-test("invalid JSON in legacy state points to CLI reset recovery", async () => {
-  const f = await fixture("mg-stack-badjson-");
-  try {
-    const legacy = legacyStackMetaPath(f.repo);
-    await mkdir(path.dirname(legacy), { recursive: true });
-    await writeFile(legacy, "{not json");
     await assert.rejects(loadStackMeta(f.repo, f.stateRoot), /mg stack reset --force/);
   } finally {
     await rm(f.root, { recursive: true, force: true });

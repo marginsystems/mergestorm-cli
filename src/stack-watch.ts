@@ -230,8 +230,9 @@ export async function pollStackWatch(
       ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}) });
     const held = busy[0];
     const shown = attention ?? named;
+    const waitingNamed = attention ? null : named;
     lastEnvelope = { ...lastEnvelope, cursor, issues, currentCandidate, assessment: "available", busy, agents, repair, landGatePending, queueWait,
-      actAfter: named?.actAfter ?? null, waitingOn: named?.waitingOn ?? [],
+      actAfter: waitingNamed?.actAfter ?? null, waitingOn: waitingNamed?.waitingOn ?? [],
       blocker: shown?.blocker ?? null, bounceKind: shown?.bounceKind ?? null,
       prNumber: shown?.prNumber ?? held?.prNumber ?? currentCandidate?.prNumber ?? null,
       headSha: shown ? shown.headSha : held ? held.headSha : currentCandidate?.headSha ?? null,

@@ -3,6 +3,7 @@ import type { Config } from "./config.js";
 import { API_TIMEOUT_PREFIX, DEFAULT_API_TIMEOUT_MS, LandedQueueReadError, readLandedQueueEntry } from "./api.js";
 import { isTransientReviewPollError } from "./commands/review-client.js";
 import type { MergeQueueEntryDto } from "./stack-dto.js";
+import { stackWatchBackgroundCommand } from "./stack-watch-obligation.js";
 import {
   pollStackWatch,
   StackWatchError,
@@ -66,7 +67,9 @@ export function stackWatchAttentionKey(envelope: Pick<StackWatchEnvelope, "prNum
 }
 
 export function stackWatchAttentionLine(envelope: StackWatchEnvelope): string {
-  return `${STACK_WATCH_MARKER} ATTENTION pr=${envelope.prNumber ?? "none"} head=${envelope.headSha ?? "none"} blocker=${JSON.stringify(envelope.blocker ?? "")} repair=${envelope.repair?.kind ?? "none"}`;
+  const restart = envelope.cursor.bounceId
+    ? ` restart=${JSON.stringify(stackWatchBackgroundCommand(envelope.stackId, envelope.cursor))}` : "";
+  return `${STACK_WATCH_MARKER} ATTENTION pr=${envelope.prNumber ?? "none"} head=${envelope.headSha ?? "none"} blocker=${JSON.stringify(envelope.blocker ?? "")} repair=${envelope.repair?.kind ?? "none"}${restart}`;
 }
 
 export function stackWatchLandedLine(envelope: StackWatchEnvelope): string {
