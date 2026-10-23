@@ -237,6 +237,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.62": [
     "Watch wakes for a blocker on any layer",
   ],
+  "0.3.63": [
+    "Stack create starts a new stack unless --extend",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

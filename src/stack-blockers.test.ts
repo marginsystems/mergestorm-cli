@@ -222,8 +222,8 @@ test("a comment verdict whose Important findings Cyclone handed to a person is a
   assert.deepEqual(result.attention, { prNumber: 1089, headSha: H3, blocker: VORTEX_FINDINGS_NEED_PERSON, bounceKind: null });
 });
 
-for (const reason of ["auto_patch_off", "no_changes", "hold", "unsupported_language", "credits_exhausted"]) {
-  test(`Important findings Cyclone never took (${reason}) do not stop landing and are not attention`, () => {
+for (const reason of ["auto_patch_off", "no_changes", "hold"]) {
+  test(`Important findings Cyclone declined on purpose (${reason}) do not stop landing and are not attention`, () => {
     const base = stack8({ autoLandWait: null, cyclonePatchOff: undefined, autoPatchOverride: null });
     base.layers[1] = stack8Layer({ prNumber: 1088, position: 1, branch: "mac/two", headSha: H2, parentBranch: "mac/one" });
     base.layers[2] = findings(1089, 2, "mac/three", H3, "mg-park-8-g1", "reviewed", {
@@ -327,4 +327,97 @@ test("invariant: attention is the lowest blocked layer no agent works, and never
     }
   }
   assert.ok(waitedOnActionable > 100, `only ${waitedOnActionable} cases waited on an actionable layer`);
+});
+
+const SETTLED = "2026-10-20T10:00:00Z";
+const settledPlus = (minutes: number) => Date.parse(SETTLED) + minutes * 60_000;
+
+function reviewedAt(reviewStatus: StackLayerDto["reviewStatus"], overrides: Partial<StackLayerDto> = {}): StackLayerDto {
+  return layer({
+    vortexStatus: "findings", reviewStatus,
+    vortexReview: { status: "done", skip_reason: null, pass: 1, head_sha: HEAD, phase: null, started_at: null,
+      stoppable: false, source: "pr_reviews", settled_at: SETTLED },
+    agentRuns: [],
+    ...overrides,
+  });
+}
+
+test("a failed Cyclone check with no handoff row leaves request_changes findings as agent attention", () => {
+  const result = stackBlockers(stack([reviewedAt("changes_requested", { cycloneStatus: "failed" })]), [], {}, settledPlus(1));
+  assert.equal(result.attention?.blocker, VORTEX_FINDINGS_NEED_PERSON);
+  assert.equal(result.repair?.kind, "vortex_findings");
+  assert.equal(result.repair?.kind === "vortex_findings" ? result.repair.handoff : null, "failed");
+  assert.match(result.repair?.steps ?? "", /You fix them/);
+});
+
+test("Cyclone never running at a head with request_changes findings is attention after 30 minutes", () => {
+  const never = stack([reviewedAt("changes_requested", { cycloneFindingsTakenAtHead: false })]);
+  assert.equal(stackBlockers(never, [], {}, settledPlus(29)).attention, null);
+  const late = stackBlockers(never, [], {}, settledPlus(30));
+  assert.equal(late.attention?.blocker, VORTEX_FINDINGS_NEED_PERSON);
+  assert.equal(late.repair?.kind === "vortex_findings" ? late.repair.handoff : null, "not_run");
+  assert.match(late.repair?.steps ?? "", /Cyclone has not run on this head in the 30 minutes since Vortex posted these findings/);
+});
+
+test("request_changes findings Cyclone settled at the head, or a producer that does not say, are not named as not run", () => {
+  for (const settled of [true, undefined]) {
+    const result = stackBlockers(stack([reviewedAt("changes_requested", { cycloneFindingsTakenAtHead: settled })]), [], {}, settledPlus(120));
+    assert.equal(result.attention, null, String(settled));
+  }
+});
+
+test("Important findings with no handoff row stay advisory: a failed Cyclone check or no Cyclone run is not attention", () => {
+  for (const extra of [{ cycloneStatus: "failed" as const }, { cycloneFindingsTakenAtHead: false }]) {
+    assert.equal(stackBlockers(stack([reviewedAt("reviewed", extra)]), [], {}, settledPlus(120)).attention, null, JSON.stringify(extra));
+  }
+});
+
+test("Cyclone not running is not named while it is patching, on a throttled head, or before the review settles", () => {
+  const busy = reviewedAt("changes_requested", { cycloneFindingsTakenAtHead: false, cycloneStatus: "patching" });
+  assert.equal(stackBlockers(stack([busy]), [], {}, settledPlus(120)).attention, null);
+  const throttled = reviewedAt("changes_requested", { cycloneFindingsTakenAtHead: false, vortexStatus: "throttled" });
+  assert.equal(stackBlockers(stack([throttled]), [], {}, settledPlus(120)).attention, null);
+  const unsettled = reviewedAt("changes_requested", { cycloneFindingsTakenAtHead: false });
+  unsettled.vortexReview = { ...unsettled.vortexReview!, settled_at: null };
+  assert.equal(stackBlockers(stack([unsettled]), [], {}, settledPlus(120)).attention, null);
+});
+
+for (const reason of ["fix_held", "left_for_human", "failed", "infra_failure", "patch_job_lost", "pr_state_unavailable", "vortex_patch_cap",
+  "unsupported_language", "credits_exhausted", "no_billing", "policy_owner_changed"]) {
+  test(`a Cyclone ${reason} handoff names agent work, not a person`, () => {
+    const result = stackBlockers(stack([reviewedAt("reviewed", { cycloneHandoff: { headSha: HEAD, reason, at: null } })]), [], {}, settledPlus(1));
+    assert.equal(result.attention?.blocker, VORTEX_FINDINGS_NEED_PERSON);
+    assert.match(result.repair?.steps ?? "", /You fix them/);
+    assert.match(result.repair?.steps ?? "", /Dismiss a finding you verified is wrong yourself: mg dismiss owner\/repo#42/);
+    assert.doesNotMatch(result.repair?.steps ?? "", /tell the human/);
+  });
+}
+
+test("a failed Vortex review with no retry is the hard block, ahead of Cyclone's handoff on the same head", () => {
+  const failed = layer({
+    vortexStatus: "failed", reviewStatus: "changes_requested",
+    vortexReview: { status: "failed", skip_reason: null, pass: 1, head_sha: HEAD, phase: null, started_at: null, stoppable: false, source: "pr_reviews" },
+    cycloneHandoff: { headSha: HEAD, reason: "left_for_human", at: null },
+  });
+  const result = stackBlockers(stack([failed]), [], {}, settledPlus(1));
+  assert.equal(result.attention?.blocker, "Review failed");
+  assert.equal(result.repair?.kind, "vortex_failed");
+  const retrying = { ...failed, vortexReview: { ...failed.vortexReview!, skip_reason: "retry_scheduled" } };
+  assert.notEqual(stackBlockers(stack([retrying]), [], {}, settledPlus(1)).attention?.blocker, "Review failed");
+});
+
+test("the 2026-10-19 cases are attention: #45 fix_held, #1970 left_for_human, #1964 conflict with auto-resolve off", () => {
+  const held = stackBlockers(stack([reviewedAt("reviewed", { prNumber: 45, cycloneStatus: "held",
+    cycloneHandoff: { headSha: HEAD, reason: "fix_held", at: null, detail: "accounting parse failed" } })]), [], {}, settledPlus(1));
+  assert.equal(held.attention?.prNumber, 45);
+  assert.equal(held.repair?.kind, "vortex_findings");
+  const left = stackBlockers(stack([reviewedAt("reviewed", { prNumber: 1970,
+    cycloneHandoff: { headSha: HEAD, reason: "left_for_human", at: null } })]), [], {}, settledPlus(1));
+  assert.equal(left.attention?.prNumber, 1970);
+  assert.equal(left.repair?.kind, "vortex_findings");
+  const conflict = stackBlockers(stack([layer({ prNumber: 1964, mergeable: false, mergeableState: "dirty" })],
+    { cycloneConflictOff: "account_auto_resolve_off" }), [], {}, settledPlus(1));
+  assert.equal(conflict.attention?.prNumber, 1964);
+  assert.equal(conflict.repair?.kind, "merge_conflict");
+  assert.match(conflict.repair && "note" in conflict.repair ? conflict.repair.note ?? "" : "", /auto-resolve conflicts is off for the account/);
 });

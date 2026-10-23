@@ -2114,7 +2114,8 @@ const importantFindings = (extra: Partial<StackLayerDto> = {}) => layer({
   vortexStatus: "findings", reviewStatus: "reviewed", vortexReview: done(HEAD), ...extra,
 });
 
-for (const reason of ["failed", "fix_held", "left_for_human", "infra_failure", "pr_state_unavailable", "vortex_patch_cap", "patch_job_lost"]) {
+for (const reason of ["failed", "fix_held", "left_for_human", "infra_failure", "pr_state_unavailable", "vortex_patch_cap", "patch_job_lost",
+  "unsupported_language", "credits_exhausted", "no_billing", "policy_owner_changed"]) {
   test(`Important findings Cyclone held at the head (${reason}) are attention with a repair hint`, async () => {
     const h = harness(stack([importantFindings({ cycloneHandoff: { headSha: HEAD, reason, at: null } })]));
     const result = await pollStackWatch(cfg, "stack", h.options);
@@ -2131,7 +2132,7 @@ test("the repair for a fix Cyclone held names the hold, and a plain failure says
   const held = "rewrites existing test assertions (src/a.test.ts: changes a test's inputs, not its assertions)";
   const named = await pollStackWatch(cfg, "stack", harness(stack([importantFindings({ cycloneHandoff: { headSha: HEAD, reason: "fix_held", at: null, detail: held } })])).options);
   assert.equal(named.status, "attention");
-  assert.ok((named.repair?.steps ?? "").includes(`Cyclone left them for a person (Cyclone wrote a fix and held it on purpose, so it pushed nothing: ${held})`));
+  assert.ok((named.repair?.steps ?? "").includes(`Cyclone left them undone (Cyclone wrote a fix and held it on purpose, so it pushed nothing: ${held})`));
   assert.doesNotMatch(named.repair?.steps ?? "", /patch failed/);
   assert.equal(named.repair?.kind === "vortex_findings" ? named.repair.handoff : null, "fix_held");
   const plain = await pollStackWatch(cfg, "stack", harness(stack([importantFindings({ cycloneHandoff: { headSha: HEAD, reason: "failed", at: null } })])).options);
@@ -2143,7 +2144,7 @@ test("Important findings Cyclone did not hold at the head are not attention", ()
   assert.equal(stackBlockers(stack([importantFindings()])).attention, null);
   assert.equal(stackBlockers({ ...stack([importantFindings()]), autoPatchOverride: false }).attention, null);
   assert.equal(stackBlockers({ ...stack([importantFindings()]), cyclonePatchOff: "account_auto_patch_off" }).attention, null);
-  for (const reason of ["no_changes", "auto_patch_off", "hold", "unsupported_language", "credits_exhausted"]) {
+  for (const reason of ["no_changes", "auto_patch_off", "hold"]) {
     assert.equal(stackBlockers(stack([importantFindings({ cycloneHandoff: { ...held, reason } })])).attention, null, reason);
   }
   assert.equal(stackBlockers(stack([importantFindings({ cycloneHandoff: { ...held, headSha: "0".repeat(40) } })])).attention, null);

@@ -37,7 +37,9 @@ import { parseGithubOriginRepo } from "../git.js";
 import {
   branchExists,
   commitsAheadOf,
+  createBranchFrom,
   createBranchFromHead,
+  trunkStartRef,
   currentBranch,
   defaultLayerBranchName,
   deleteBranch,
@@ -51,6 +53,7 @@ import {
 import { buildPrBodyFromCommit } from "../pr-body.js";
 import {
   publishBranchServerSide,
+  assertExplicitStacking,
   publishWorkingBranch,
   workingBranchPublication,
   type WorkingBranchDeps,
@@ -115,7 +118,7 @@ export function openStackWatch(stackId: string, opts: { unread?: boolean } = {})
 const STACK_USAGE = `usage:
   mergestorm stack create [name] [--onto <branch>] [--trunk <branch>] [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--json]
   mergestorm stack submit [--extend] [--auto-land on|off] [--auto-review on|off] [--auto-patch on|off] [--auto-resolve-conflicts on|off] [--auto-fix-ci on|off] [--rest] [--server-side] [--json]
-  mergestorm stack publish [--branch <branch>] [--base <branch>] [--title <title>] [--replace-head <sha>] [--auto-land on|off] [--status] [--json]
+  mergestorm stack publish [--branch <branch>] [--base <branch>] [--extend] [--title <title>] [--replace-head <sha>] [--auto-land on|off] [--status] [--json]
   mergestorm stack reset --force
   mergestorm stack list [--json]
   mergestorm stack status <stack-id> [--json]
@@ -158,10 +161,13 @@ const STACK_USAGE = `usage:
   you name that head with --replace-head. stack publish --status reads how far
   a branch got (absent, pushed, opened, registered) without changing anything;
   after a lost response or a failure, run the same command again to resume.
-  Parenting onto a branch that already belongs to a registered (submitted)
-  stack requires --extend on create and submit — otherwise mg starts a new
-  stack from trunk. stack land promotes into the review unit when one exists;
-  otherwise lands the bottom open PR (unit-less stacks).`;
+  stack create starts a new single PR from trunk, even on another PR's
+  branch. --extend stacks it on the checked-out branch (or --onto <branch>)
+  instead; --onto or publish --base a branch other than trunk without
+  --extend is refused. A layer on a registered stack also needs --extend on
+  submit. create, submit and publish say which one they made. stack land
+  promotes into the review unit when one exists; otherwise lands the bottom
+  open PR (unit-less stacks).`;
 
 /** Cap the registered-stack guard's API probe so it cannot stall local authoring. */
 const STACK_GUARD_TIMEOUT_MS = 8_000;
@@ -241,6 +247,12 @@ export function assertMayParentOntoRegistered(
     1,
     "registered_parent",
   );
+}
+
+export function stackShapeLine(input: { layers: number; base: string; extendedStack: boolean }): string {
+  if (input.extendedStack) return `  Added ${input.layers === 1 ? "1 layer" : `${input.layers} layers`} to an existing stack (--extend).`;
+  if (input.layers === 1) return `  A new single PR onto ${input.base}.`;
+  return `  A new stack of ${input.layers} layers onto ${input.base}.`;
 }
 
 const UUID_RE =
@@ -702,6 +714,8 @@ export type StackCreateDeps = {
   currentBranch?: typeof currentBranch;
   branchExists?: typeof branchExists;
   createBranchFromHead?: typeof createBranchFromHead;
+  createBranchFrom?: typeof createBranchFrom;
+  trunkStartRef?: typeof trunkStartRef;
   deleteBranch?: typeof deleteBranch;
   discoverTrunk?: typeof discoverTrunk;
   defaultLayerBranchName?: typeof defaultLayerBranchName;
@@ -734,6 +748,8 @@ export async function cmdStackCreate(
   const currentBranchFn = deps.currentBranch ?? currentBranch;
   const branchExistsFn = deps.branchExists ?? branchExists;
   const createBranchFromHeadFn = deps.createBranchFromHead ?? createBranchFromHead;
+  const createBranchFromFn = deps.createBranchFrom ?? createBranchFrom;
+  const trunkStartRefFn = deps.trunkStartRef ?? trunkStartRef;
   const deleteBranchFn = deps.deleteBranch ?? deleteBranch;
   const discoverTrunkFn = deps.discoverTrunk ?? discoverTrunk;
   const defaultLayerBranchNameFn = deps.defaultLayerBranchName ?? defaultLayerBranchName;
@@ -756,21 +772,6 @@ export async function cmdStackCreate(
     );
   }
 
-  const parentBranch = onto?.trim() || currentBranchFn(cwd);
-  if (!parentBranch) {
-    throw new CommandError(
-      "Detached HEAD. Check out a branch (or pass --onto <branch>) before `stack create`.",
-    );
-  }
-  if (!branchExistsFn(parentBranch, cwd)) {
-    throw new CommandError(`Parent branch not found: ${parentBranch}`);
-  }
-
-  const branch = defaultLayerBranchNameFn(name);
-  if (branchExistsFn(branch, cwd)) {
-    throw new CommandError(`Branch already exists: ${branch}`);
-  }
-
   let meta = await loadStackMetaFn(cwd);
   const trunk = trunkFlag?.trim() || meta?.trunk || discoverTrunkFn(cwd);
   if (!meta) {
@@ -781,8 +782,33 @@ export async function cmdStackCreate(
     );
   }
 
-  // --trunk only sets metadata; parent defaults to current branch. Call that out
-  // when someone passes --trunk while sitting on a different branch without --onto.
+  const checkedOut = currentBranchFn(cwd);
+  if (extend && !onto?.trim() && !checkedOut) {
+    throw new CommandError("Detached HEAD. Check out a branch (or pass --onto <branch>) to stack with --extend.");
+  }
+  const parentBranch = onto?.trim() || (extend && checkedOut ? checkedOut : trunk);
+  assertExplicitStacking({
+    parent: parentBranch,
+    trunk,
+    extend,
+    stackCommand: `\`mg stack create ${name ?? "<name>"} --onto ${parentBranch} --extend\``,
+    trunkCommand: `\`mg stack create ${name ?? "<name>"}\``,
+  });
+  let startRef: string | null = null;
+  if (parentBranch === trunk && checkedOut !== trunk) {
+    startRef = trunkStartRefFn(trunk, cwd);
+    if (!startRef) throw new CommandError(`Trunk branch not found: ${trunk}`);
+  } else if (!branchExistsFn(parentBranch, cwd)) {
+    throw new CommandError(`Parent branch not found: ${parentBranch}`);
+  } else if (parentBranch !== checkedOut) {
+    startRef = parentBranch;
+  }
+
+  const branch = defaultLayerBranchNameFn(name);
+  if (branchExistsFn(branch, cwd)) {
+    throw new CommandError(`Branch already exists: ${branch}`);
+  }
+
   if (trunkFlag?.trim() && !onto?.trim() && parentBranch !== trunk) {
     console.error(
       ansi.dim(
@@ -846,7 +872,8 @@ export async function cmdStackCreate(
   }
 
   try {
-    createBranchFromHeadFn(branch, cwd);
+    if (startRef) createBranchFromFn(branch, startRef, cwd);
+    else createBranchFromHeadFn(branch, cwd);
   } catch (err) {
     throw new CommandError(err instanceof Error ? err.message : String(err));
   }
@@ -880,7 +907,11 @@ export async function cmdStackCreate(
     return;
   }
   const created: string[] = [
-    ansi.brightGreen(`  Created ${branch} (onto ${parentBranch})`),
+    ansi.brightGreen(
+      parentBranch === meta.trunk
+        ? `  Created ${branch}: a new single PR onto ${parentBranch}${startRef ? ` (branched from ${startRef})` : ""}`
+        : `  Created ${branch}: a layer stacked on ${parentBranch} (--extend)`,
+    ),
   ];
   if (registeredHit) {
     created.push(
@@ -1170,6 +1201,7 @@ export async function cmdStackSubmit(
     const lines = published.map((row) =>
       ansi.brightGreen(`  #${row.prNumber}  ${row.branch} → ${row.base}  (${row.created ? "opened" : "exists"}, head ${row.head.slice(0, 12)})`),
     );
+    lines.push(ansi.brightGreen(stackShapeLine({ layers: layers.length, base: plans[0]?.githubBase ?? meta.trunk, extendedStack: registeredHits > 0 })));
     if (publishedStackId) lines.push(ansi.brightGreen(`  Registered stack ${publishedStackId}`));
     lines.push(ansi.dim("  Dashboard: https://mergestorm.ai/dashboard"));
     if (watch) lines.push(...stackWatchTextLines(watch).map((line) => `  ${line}`));
@@ -1350,6 +1382,7 @@ export async function cmdStackSubmit(
       ),
     );
   }
+  summary.push(ansi.brightGreen(stackShapeLine({ layers: layers.length, base: plans[0]?.githubBase ?? meta.trunk, extendedStack: registeredHits > 0 })));
   const adoptedTrunk = data.stack?.trunkBranch;
   if (adoptedTrunk?.startsWith("mg-stack-")) {
     summary.push(
@@ -1372,12 +1405,13 @@ export function parseStackPublishArgs(args: string[]): {
   title?: string;
   replaceHead?: string;
   autoLand?: boolean;
+  extend: boolean;
   status: boolean;
   asJson: boolean;
 } {
   const usage =
-    "usage: mergestorm stack publish [--branch <branch>] [--base <branch>] [--title <title>] [--replace-head <sha>] [--auto-land on|off] [--status] [--json]";
-  const out: ReturnType<typeof parseStackPublishArgs> = { status: false, asJson: false };
+    "usage: mergestorm stack publish [--branch <branch>] [--base <branch>] [--extend] [--title <title>] [--replace-head <sha>] [--auto-land on|off] [--status] [--json]";
+  const out: ReturnType<typeof parseStackPublishArgs> = { extend: false, status: false, asJson: false };
   const valued: Record<string, "branch" | "base" | "title" | "replaceHead"> = {
     "--branch": "branch",
     "--base": "base",
@@ -1392,6 +1426,10 @@ export function parseStackPublishArgs(args: string[]): {
     }
     if (a === "--status") {
       out.status = true;
+      continue;
+    }
+    if (a === "--extend") {
+      out.extend = true;
       continue;
     }
     if (a === "--auto-land") {
@@ -1442,6 +1480,7 @@ export async function cmdStackPublish(args: string[], deps: StackPublishDeps = {
       ...(parsed.title ? { title: parsed.title } : {}),
       ...(typeof parsed.autoLand === "boolean" ? { autoLand: parsed.autoLand } : {}),
       ...(parsed.replaceHead ? { replaceHead: parsed.replaceHead } : {}),
+      extend: parsed.extend,
     },
     publishDeps,
   );
@@ -1454,6 +1493,9 @@ export async function cmdStackPublish(args: string[], deps: StackPublishDeps = {
   await present("Stack", [
     ansi.brightGreen(`  ${result.branch} ${moved} at ${result.head.sha.slice(0, 12)} (tree ${result.head.tree.slice(0, 12)})`),
     ansi.brightGreen(`  #${result.pr.number}  ${result.branch} → ${result.baseBranch}  (${result.pr.created ? "opened" : "exists"})  ${result.pr.url}`),
+    ansi.brightGreen(
+      result.stacked ? `  A layer stacked on ${result.baseBranch}.` : `  A single PR onto ${result.baseBranch}.`,
+    ),
     ansi.brightGreen(`  Registered stack ${result.stack.id}`),
     ...stackWatchTextLines(watch).map((line) => `  ${line}`),
   ]);

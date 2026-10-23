@@ -1,5 +1,6 @@
 import {
   dismissPrFindings,
+  dismissThreadsLine,
   type PrFindingDismissInput,
   type PrFindingDismissOutcome,
   type PrFindingDismissResult,
@@ -104,6 +105,8 @@ export function formatDismissResult(result: PrFindingDismissResult, watch: Stack
       );
     }
     if (result.remaining.length) lines.push("Still open:", ...result.remaining.map(findingLine));
+    const threads = dismissThreadsLine(result);
+    if (threads) lines.push(threads);
   }
   const seam = result.gate.seam;
   if (seam) {

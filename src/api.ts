@@ -322,6 +322,14 @@ export type PrVortexReview = {
   reviewed_at: string | null;
   finding_count: number;
   findings: PrReviewFindings | null;
+  dismissed_findings?: Array<{
+    path: string;
+    line: number;
+    title: string;
+    severity: string;
+    finding_key: string;
+    github_comment_id: number | null;
+  }>;
   patch_policy: unknown | null;
   /**
    * MS-01: True when the returned row is a resting completion but a newer
@@ -1366,7 +1374,21 @@ export type PrFindingDismissResult = {
     other_gates: "unchanged";
   };
   stack_id: string | null;
+  threads?: Array<{ finding_id: string; state: "resolved" | "already_resolved" | "not_found" | "failed" }>;
 };
+
+export function dismissThreadsLine(result: Pick<PrFindingDismissResult, "threads">): string | null {
+  const threads = result.threads ?? [];
+  if (threads.length === 0) return null;
+  const closed = threads.filter((thread) => thread.state === "resolved" || thread.state === "already_resolved").length;
+  const failed = threads.filter((thread) => thread.state === "failed").map((thread) => thread.finding_id);
+  const missing = threads.filter((thread) => thread.state === "not_found").map((thread) => thread.finding_id);
+  return [
+    `GitHub threads: ${closed} of ${threads.length} resolved.`,
+    ...(failed.length ? [`Could not resolve ${failed.join(", ")}; run the same dismissal again to retry.`] : []),
+    ...(missing.length ? [`No thread found for ${missing.join(", ")}.`] : []),
+  ].join(" ");
+}
 
 export type PrFindingDismissOutcome =
   | { ok: true; result: PrFindingDismissResult }

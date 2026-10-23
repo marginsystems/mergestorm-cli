@@ -19,10 +19,13 @@ mg skill install --claude --cursor --agents
 
 ## Preconditions (in order)
 
+A hosted-only agent (no checkout of the PR head; see 5) checks 1, then follows 5 instead of 2 to 4: those gates are for the local patching loop it does not run, and the `mg login` sign-in in 4 needs a shell it does not have.
+
 1. There is an already-open GitHub PR on a Vortex-monitored repo. No PR, wrong skill.
 2. Auto-patch (Cyclone) must be off for this PR so you are the only patcher. Do not take anyone's word for it: the settings API and the PR's stack are the source of truth, and step 1 of the loop verifies them before anything else runs. Cyclone is off for the PR when its adopted stack has `autoPatchOverride` `false`, or when that override is unset and the account `auto_patch_enabled` is `false`.
 3. The Bearer key and the Cyclone GitHub App install must be the same Mergestorm account. `stack_list` / `stack_status` expose `keyUserId`, `cycloneInstallUserId`, and `cycloneOwnerMatch`. Cyclone apply always uses the install account, not the key. If those identities differ, your `settings_get` mute reading is about the wrong person.
 4. `whoami` works on the `mergestorm` MCP server (or `mg whoami --json` exits 0). Otherwise stop and ask for install, or sign in yourself: run `mg login --start`, send the person the link it prints, and after they approve it run `mg login --finish`.
+5. You have a checkout of the PR head that you can push. A chat agent that reaches Mergestorm only through the hosted MCP tools, with no such checkout, does not run this loop: Cyclone patches the PR. Call `cyclone_start` with task `fix_findings` for the PR, then call `cyclone_job` with its `dispatch_id` until the job is pushed, completed or failed, and tell the human what it pushed.
 
 ## Loop (in order)
 
@@ -55,9 +58,10 @@ mg skill install --claude --cursor --agents
      - A refusal (stale_head, review_mismatch, unknown_finding, forbidden) means nothing was written. Re-read the pass at the live head; do not retry with another review's ids.
      - The seam gate clears only when every finding of that seam review is dismissed. Once every Vortex Blocker (error finding) at the live head is dismissed (every Core review merged into that head, not only the one you name), the Vortex gate clears at that head; while any is open, or a Vortex review of the head is still running or incomplete, it stays shut and `gate.vortex.message` says why. The result's `gate` says whether either cleared; CI and Auto land policy are unchanged. For a stack PR, follow `watch.next` (the next `stack_wait` call).
 6. Patch on the PR head branch only.
-7. Push that head branch with an ordinary push. If the push is rejected because the remote branch moved, another patcher already pushed for this pass. Do not rebase, do not force, do not retry the push: stop and tell the human that a second patcher is active on this PR.
-8. Call `review_wait_pr` again with `after_sha` set to the SHA you just pushed (7+ hex) and `timeout_s` 45. If the last envelope you acted on has that same `head_sha` (no new commit, for example a re-review requested on the same head), also pass `after_pass` set to that envelope's saved `pass`, so the wait cannot hand you that attempt again. For a freshly pushed SHA omit `after_pass`; its first pass is 1. Keep `after_sha` and `after_pass` unchanged across 45s timeout retries; never replace `after_pass` with the `pass` of an in-progress envelope. `pass` reads one exact attempt; `timeout_s` 0 reads once without waiting. An envelope whose `head_sha` is an older commit is a previous pass, not yours; keep waiting.
-9. Repeat from step 4 until a stop rule fires.
+7. If the PR is a layer of a stack, call `queue_status` with that `stack_id` before you push. While an entry of the stack is `queued`, `running`, or `waiting`, do not push: the queue is verifying the reviewed diff, and a push that changes it bounces the entry `head_moved` and stops the batch it is in, which re-runs CI for every PR in that batch. Do not cancel the entry. Keep the fix on a local branch and wait for the entry to finish: when it bounces, continue with the push; when it lands, open the fix as a follow-up PR (`mg stack create <name> --onto main`, then `mg stack submit`), tell the human its number, and stop this loop. Without a live entry, continue. Auto land needs no change: a push before it queues the PR only restarts its wait on the new head.
+8. Push that head branch with an ordinary push. If the push is rejected because the remote branch moved, another patcher already pushed for this pass. Do not rebase, do not force, do not retry the push: stop and tell the human that a second patcher is active on this PR.
+9. Call `review_wait_pr` again with `after_sha` set to the SHA you just pushed (7+ hex) and `timeout_s` 45. If the last envelope you acted on has that same `head_sha` (no new commit, for example a re-review requested on the same head), also pass `after_pass` set to that envelope's saved `pass`, so the wait cannot hand you that attempt again. For a freshly pushed SHA omit `after_pass`; its first pass is 1. Keep `after_sha` and `after_pass` unchanged across 45s timeout retries; never replace `after_pass` with the `pass` of an in-progress envelope. `pass` reads one exact attempt; `timeout_s` 0 reads once without waiting. An envelope whose `head_sha` is an older commit is a previous pass, not yours; keep waiting.
+10. Repeat from step 4 until a stop rule fires.
 
 ## Stop rules
 

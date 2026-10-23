@@ -108,6 +108,7 @@ export type StackVortexReviewView = {
   phase: string | null;
   /** Earliest live job start while `reviewing`; null when lease-only. */
   started_at: string | null;
+  settled_at?: string | null;
   /** Stop control visibility: true only while a pass can actually be cancelled. */
   stoppable: boolean;
   /** Which table spoke: the authority row, a live job, a lease, or nothing. */
@@ -321,6 +322,7 @@ export type StackLayerDto = {
   cycloneConflictPendingSince?: string | null;
   cycloneCiHandoff?: StackCycloneHandoff | null;
   cycloneCiPendingSince?: string | null;
+  cycloneFindingsTakenAtHead?: boolean;
   conflictDetail: string | null;
   restackError?: RestackError | null;
   lastRestackedSha: string | null;

@@ -9,6 +9,7 @@ export type CommandErrorCode =
   | "not_found"
   | "missing_api_key"
   | "registered_parent"
+  | "implicit_stack"
   | "usage"
   | "review_quota"
   | "review_failed"

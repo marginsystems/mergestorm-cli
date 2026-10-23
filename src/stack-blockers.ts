@@ -303,10 +303,26 @@ function vortexChangesRequestedAtHead(layer: StackLayerDto): boolean {
   return vortexFindingsRestAtHead(layer) && layer.reviewStatus === "changes_requested";
 }
 
-function cycloneHandoffAtHead(stack: StackDto, layer: StackLayerDto): string | null {
-  if (sameHead(layer.cycloneHandoff?.headSha, layer.headSha)) return layer.cycloneHandoff!.reason;
-  return stack.cyclonePatchOff ?? (stack.autoPatchOverride === false ? "auto_patch_off" : null);
+export const CYCLONE_NOT_RUN_ATTENTION_MS = 30 * 60_000;
+
+export const CYCLONE_NOT_RUN_REASON = "not_run";
+
+function cycloneNotRunAtHead(layer: StackLayerDto, nowMs: number): boolean {
+  const review = layer.vortexReview;
+  if (layer.cycloneFindingsTakenAtHead !== false || layer.vortexStatus !== "findings") return false;
+  if (review?.status !== "done" || !sameHead(review.head_sha, layer.headSha)) return false;
+  const settledMs = Date.parse(review.settled_at ?? "");
+  return Number.isFinite(settledMs) && nowMs - settledMs >= CYCLONE_NOT_RUN_ATTENTION_MS;
 }
+
+function cycloneHandoffAtHead(stack: StackDto, layer: StackLayerDto, nowMs: number): string | null {
+  if (sameHead(layer.cycloneHandoff?.headSha, layer.headSha)) return layer.cycloneHandoff!.reason;
+  if (layer.cycloneStatus === "failed") return "failed";
+  const off = stack.cyclonePatchOff ?? (stack.autoPatchOverride === false ? "auto_patch_off" : null);
+  if (off) return off;
+  return cycloneNotRunAtHead(layer, nowMs) ? CYCLONE_NOT_RUN_REASON : null;
+}
+
 
 const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   failed: "Cyclone's patch failed, so it pushed nothing",
@@ -324,6 +340,11 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   unsupported_language: "the findings are in a language Cyclone does not patch",
   policy_owner_changed: "the stack's owner changed while the patch was queued",
   patch_job_lost: "Cyclone's patch job was lost before it finished",
+  pr_state_unavailable: "Cyclone could not read the PR's state, so it pushed nothing",
+  left_for_human: "Cyclone did not patch these findings and pushed nothing",
+  hold: "the review told Cyclone to hold, so it did not patch these findings",
+  vortex_patch_cap: "Cyclone already patched this PR as many times as it may",
+  [CYCLONE_NOT_RUN_REASON]: `Cyclone has not run on this head in the ${CYCLONE_NOT_RUN_ATTENTION_MS / 60_000} minutes since Vortex posted these findings, and nothing is patching it`,
   conflict_needs_person: "Cyclone could not resolve the conflict and left it for a person",
   conflict_unresolved: "Cyclone's conflict resolution failed",
   auto_resolve_daily_cap: "Cyclone already resolved conflicts on this PR twice today, its daily cap",
@@ -417,6 +438,10 @@ const CYCLONE_HELD_FINDINGS_REASONS: readonly string[] = [
   "pr_state_unavailable",
   "vortex_patch_cap",
   "patch_job_lost",
+  "unsupported_language",
+  "credits_exhausted",
+  "no_billing",
+  "policy_owner_changed",
 ];
 
 function vortexImportantFindingsHeldAtHead(layer: StackLayerDto): boolean {
@@ -430,11 +455,11 @@ function seamApprovedAtHead(stack: StackDto, layer: StackLayerDto): boolean {
   return member?.seamState?.trim().toLowerCase() === "approved" && sameHead(member.seamReviewedSha, layer.headSha);
 }
 
-function vortexFindingsLeftForPerson(stack: StackDto, layer: StackLayerDto): boolean {
+function vortexFindingsLeftForPerson(stack: StackDto, layer: StackLayerDto, nowMs: number): boolean {
   if (layerAgentsBusy(layer).cyclone) return false;
   if (seamApprovedAtHead(stack, layer)) return false;
   return vortexImportantFindingsHeldAtHead(layer) ||
-    (vortexChangesRequestedAtHead(layer) && cycloneHandoffAtHead(stack, layer) !== null);
+    (vortexChangesRequestedAtHead(layer) && cycloneHandoffAtHead(stack, layer, nowMs) !== null);
 }
 
 function quotaSkippedReview(layer: StackLayerDto): boolean {
@@ -562,6 +587,7 @@ function layerAttention(
   layer: StackLayerDto | undefined,
   queue: MergeQueueEntryDto[],
   cursor: Pick<StackWatchCursor, "bounceId" | "afterFinishedAt">,
+  nowMs: number,
 ): LayerAttention {
   const none: LayerAttention = { blocker: null, reason: null, bounceKind: null };
   if (stack.archivedAt) return none;
@@ -605,7 +631,7 @@ function layerAttention(
       const landing = stack.unit.landingBlockReason?.trim();
       if (landing && !landGateIsPending(landing)) return hardBlock(landing, "land_gate");
     }
-    if (vortexFindingsLeftForPerson(stack, layer)) return hardBlock(VORTEX_FINDINGS_NEED_PERSON, "vortex_findings_need_person");
+    if (vortexFindingsLeftForPerson(stack, layer, nowMs)) return hardBlock(VORTEX_FINDINGS_NEED_PERSON, "vortex_findings_need_person");
   }
   if (!bounce || !kind || recoverable || !layer || queue.some((entry) => ["queued", "running", "waiting"].includes(entry.state))) return none;
   if ((cursor.bounceId != null && cursor.bounceId === bounce.id) || (cursor.afterFinishedAt &&
@@ -970,6 +996,7 @@ export function stackRepair(
   layer: StackLayerDto | undefined,
   bounce: MergeQueueEntryDto | undefined,
   queueWait: MergeQueueWait | null = null,
+  nowMs: number = Date.now(),
 ): StackRepairHint | null {
   if (!attention || !layer || attention.prNumber !== layer.prNumber) return null;
   const reason = attention.reason;
@@ -1155,7 +1182,7 @@ export function stackRepair(
   }
   if (reason === "vortex_findings_need_person") {
     const findings = `gh api repos/${stack.owner}/${stack.repo}/pulls/${layer.prNumber}/reviews`;
-    const handoff = cycloneHandoffAtHead(stack, layer);
+    const handoff = cycloneHandoffAtHead(stack, layer, nowMs);
     return {
       kind: "vortex_findings",
       prNumber: layer.prNumber,
@@ -1163,7 +1190,7 @@ export function stackRepair(
       branch: layer.branch,
       handoff,
       findings,
-      steps: `Vortex ${vortexImportantFindingsHeldAtHead(layer) ? "left Important findings" : "requested changes"} on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them for a person${handoff ? ` (${cycloneHandoffWords(handoff, cycloneHandoffDetailAtHead(layer))})` : ""}, so nothing will patch them and Auto land waits. Read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). If a finding is wrong, tell the human; mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> dismisses that review. Do not retarget the PR base.`,
+      steps: `Vortex ${vortexImportantFindingsHeldAtHead(layer) ? "left Important findings" : "requested changes"} on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them undone${handoff ? ` (${cycloneHandoffWords(handoff, cycloneHandoffDetailAtHead(layer))})` : ""}, so nothing will patch them and Auto land waits. You fix them: read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). Dismiss a finding you verified is wrong yourself: mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> --finding <id> --reason <why> --evidence <link>. Ask the human only for a product or design decision. Do not retarget the PR base.`,
     };
   }
   if (reason === "ci_failed" || attention.bounceKind === "ci_failure") {
@@ -1266,7 +1293,7 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   for (const layer of open) {
     const selected = layer.prNumber === candidate?.prNumber;
     const inScope = selected || !candidate || layer.position > candidate.position;
-    let result = layerAttention(stack, layer, selected ? queue : [], cursor);
+    let result = layerAttention(stack, layer, selected ? queue : [], cursor, nowMs);
     let disarmed: MergeQueueEntryDto | undefined;
     if (!result.blocker && selected) {
       disarmed = disarmingBounce(stack, queue);
@@ -1370,7 +1397,7 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   if (busy.length && attention && classified && agentsCannotClear(classified.reason, stack, attentionLayer)) {
     held = { ...attention, actAfter: "agents_idle", waitingOn: busy.map((entry) => entry.agent) };
     shownIssues = [attention, ...issues];
-    repair = stackRepair(stack, classified, attentionLayer, undefined, queueWait);
+    repair = stackRepair(stack, classified, attentionLayer, undefined, queueWait, nowMs);
     attention = null;
     bounce = undefined;
   } else if (busy.length) {
@@ -1378,7 +1405,7 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
     attention = null;
     bounce = undefined;
   } else {
-    repair = landMissing?.repair ?? stackRepair(stack, classified, attentionLayer, bounce, queueWait);
+    repair = landMissing?.repair ?? stackRepair(stack, classified, attentionLayer, bounce, queueWait, nowMs);
   }
   if (!attention) {
     const next = found.find((item) => !layerBusy(item.layer));
@@ -1386,7 +1413,7 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
       attention = next.issue;
       repair = next.repair !== undefined
         ? next.repair
-        : stackRepair(stack, { ...next.issue, reason: next.reason }, next.layer, next.bounce, queueWait);
+        : stackRepair(stack, { ...next.issue, reason: next.reason }, next.layer, next.bounce, queueWait, nowMs);
       bounce = next.bounce;
       if (next.layer) agents = layerAgents(next.layer);
       busy = [];

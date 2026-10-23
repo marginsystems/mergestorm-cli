@@ -7,6 +7,7 @@ export const DEFAULT_API = "https://api.mergestorm.ai";
 export type Config = {
   apiKey?: string;
   apiBase?: string;
+  ignoreEnv?: boolean;
 };
 
 export function mergestormHome(env: NodeJS.ProcessEnv = process.env): string {
@@ -41,10 +42,12 @@ export async function clearConfig(): Promise<void> {
 }
 
 export function apiBase(cfg: Config): string {
-  return (process.env.MERGESTORM_API_URL?.trim() || cfg.apiBase || DEFAULT_API).replace(/\/$/, "");
+  const fromEnv = cfg.ignoreEnv ? undefined : process.env.MERGESTORM_API_URL?.trim();
+  return (fromEnv || cfg.apiBase || DEFAULT_API).replace(/\/$/, "");
 }
 
 export function resolveApiKey(cfg: Config): string | undefined {
+  if (cfg.ignoreEnv) return cfg.apiKey;
   return process.env.MERGESTORM_API_KEY?.trim() || cfg.apiKey;
 }
 

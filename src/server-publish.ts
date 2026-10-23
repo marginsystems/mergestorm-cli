@@ -255,6 +255,7 @@ export type ServerPublishDeps = {
   read?: GitRead;
   getStackPublication?: typeof getStackPublication;
   submitStackPublication?: typeof submitStackPublication;
+  assertBase?: (base: string) => void;
 };
 
 export type ServerPublishResult = StackPublication & { baseBranch: string };
@@ -271,6 +272,7 @@ export async function publishBranchServerSide(
   if (!resolves(read, branch, cwd)) throw new CommandError(`Branch missing locally: ${branch}`);
   const remote: StackPublicationStatus = await status(cfg, { owner, repo, branch });
   const baseBranch = remote.pr?.base ?? input.baseBranch;
+  deps.assertBase?.(baseBranch);
   const localBase =
     input.localBaseRef ??
     (resolves(read, `refs/remotes/origin/${input.baseBranch}`, cwd) ? `refs/remotes/origin/${input.baseBranch}` : input.baseBranch);
@@ -343,13 +345,32 @@ export type WorkingBranchInput = {
   body?: string;
   autoLand?: boolean;
   replaceHead?: string;
+  extend?: boolean;
   cfg?: Config;
 };
 
 export type WorkingBranchDeps = ServerPublishDeps & {
   publishBranchServerSide?: typeof publishBranchServerSide;
   loadConfig?: typeof loadConfig;
+  discoverTrunk?: typeof discoverTrunk;
 };
+
+export function assertExplicitStacking(input: {
+  parent: string;
+  trunk: string;
+  extend: boolean;
+  stackCommand: string;
+  trunkCommand: string;
+}): void {
+  if (input.extend || input.parent === input.trunk) return;
+  throw new CommandError(
+    `\`${input.parent}\` is not trunk (\`${input.trunk}\`), and stacking onto it needs --extend.\n` +
+      `• Stack onto \`${input.parent}\`: ${input.stackCommand}\n` +
+      `• New stack from \`${input.trunk}\`: ${input.trunkCommand}`,
+    1,
+    "implicit_stack",
+  );
+}
 
 export function workingBranchTarget(input: WorkingBranchInput): { cwd: string; owner: string; repo: string; branch: string } {
   const cwd = input.cwd ?? process.cwd();
@@ -365,18 +386,45 @@ export function workingBranchTarget(input: WorkingBranchInput): { cwd: string; o
 export async function publishWorkingBranch(
   input: WorkingBranchInput,
   deps: WorkingBranchDeps = {},
-): Promise<ServerPublishResult> {
+): Promise<ServerPublishResult & { stacked: boolean }> {
   const { cwd, owner, repo, branch } = workingBranchTarget(input);
-  let baseBranch = input.base;
-  if (!baseBranch) {
-    try {
-      baseBranch = discoverTrunk(cwd);
-    } catch (err) {
-      throw new CommandError(`${err instanceof Error ? err.message : String(err)} Name the base branch.`);
-    }
+  const {
+    publishBranchServerSide: publish = publishBranchServerSide,
+    loadConfig: load = loadConfig,
+    discoverTrunk: findTrunk = discoverTrunk,
+    ...publishDeps
+  } = deps;
+  let trunk: string | null = null;
+  let trunkError: unknown = null;
+  try {
+    trunk = findTrunk(cwd);
+  } catch (err) {
+    trunkError = err;
   }
-  const { publishBranchServerSide: publish = publishBranchServerSide, loadConfig: load = loadConfig, ...publishDeps } = deps;
-  return publish(
+  const trunkMessage = trunkError instanceof Error ? trunkError.message : String(trunkError);
+  const baseBranch = input.base ?? trunk;
+  if (!baseBranch) {
+    throw new CommandError(`${trunkMessage} Name the base branch.`);
+  }
+  const assertBase = (parent: string): void => {
+    if (trunk) {
+      assertExplicitStacking({
+        parent,
+        trunk,
+        extend: input.extend === true,
+        stackCommand: `\`mg stack publish --base ${parent} --extend\` (MCP stack_publish: extend true)`,
+        trunkCommand: "`mg stack publish` with no --base (MCP stack_publish: no base)",
+      });
+    } else if (input.extend !== true) {
+      throw new CommandError(
+        `${trunkMessage} \`${parent}\` cannot be verified as trunk, so stacking onto it needs --extend.`,
+        1,
+        "implicit_stack",
+      );
+    }
+  };
+  assertBase(baseBranch);
+  const result = await publish(
     {
       cfg: input.cfg ?? (await load()),
       cwd,
@@ -389,8 +437,9 @@ export async function publishWorkingBranch(
       ...(typeof input.autoLand === "boolean" ? { autoLand: input.autoLand } : {}),
       ...(input.replaceHead ? { replaceHead: input.replaceHead } : {}),
     },
-    publishDeps,
+    { ...publishDeps, assertBase },
   );
+  return { ...result, stacked: !trunk || result.baseBranch !== trunk };
 }
 
 export async function workingBranchPublication(

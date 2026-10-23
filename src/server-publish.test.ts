@@ -8,6 +8,7 @@ import type { StackPublication, StackPublicationCommit, StackPublicationRequest,
 import { CommandError } from "./errors.js";
 import {
   publishBranchServerSide,
+  publishWorkingBranch,
   readGit,
   readPublicationCommits,
   SERVER_PUBLISH_MAX_FILE_BYTES,
@@ -342,4 +343,51 @@ test("readPublicationCommits refuses a commit time outside the publishable range
     () => readPublicationCommits(readGit, "main", "dot/feature", badName),
     (err) => err instanceof CommandError && err.code === "unsupported_publication" && /not valid UTF-8/.test(err.message),
   );
+});
+
+function workingBranchCase(base: string | undefined, extend?: boolean) {
+  const bases: string[] = [];
+  const run = () =>
+    publishWorkingBranch(
+      {
+        cwd: "/tmp/no-repo",
+        owner: "acme",
+        repo: "widgets",
+        branch: "feat/b",
+        ...(base ? { base } : {}),
+        ...(extend === undefined ? {} : { extend }),
+        title: "T",
+        body: "B",
+        cfg: CFG,
+      },
+      {
+        discoverTrunk: () => "main",
+        publishBranchServerSide: async (input) => {
+          bases.push(input.baseBranch);
+          return { baseBranch: input.baseBranch } as Awaited<ReturnType<typeof publishBranchServerSide>>;
+        },
+      },
+    );
+  return { bases, run };
+}
+
+test("publishWorkingBranch refuses a base other than trunk unless extend is set", async () => {
+  const refused = workingBranchCase("feat/a");
+  await assert.rejects(
+    refused.run(),
+    (err: unknown) => err instanceof CommandError && err.code === "implicit_stack" && /mg stack publish --base feat\/a --extend/.test(err.message),
+  );
+  assert.deepEqual(refused.bases, []);
+
+  const stacked = workingBranchCase("feat/a", true);
+  assert.equal((await stacked.run()).stacked, true);
+  assert.deepEqual(stacked.bases, ["feat/a"]);
+});
+
+test("publishWorkingBranch publishes onto trunk with no extend, named or defaulted", async () => {
+  const named = workingBranchCase("main");
+  assert.equal((await named.run()).stacked, false);
+  const defaulted = workingBranchCase(undefined);
+  await defaulted.run();
+  assert.deepEqual([...named.bases, ...defaulted.bases], ["main", "main"]);
 });

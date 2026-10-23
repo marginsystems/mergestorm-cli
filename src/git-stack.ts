@@ -82,6 +82,22 @@ export function createBranchFromHead(name: string, cwd = process.cwd()): void {
   git(["checkout", "-b", name], cwd);
 }
 
+export function createBranchFrom(name: string, start: string, cwd = process.cwd()): void {
+  git(["checkout", "-b", name, start], cwd);
+}
+
+export function trunkStartRef(trunk: string, cwd = process.cwd()): string | null {
+  for (const ref of [`refs/remotes/origin/${trunk}`, `refs/heads/${trunk}`]) {
+    try {
+      git(["rev-parse", "--verify", "--quiet", ref], cwd);
+      return ref === `refs/heads/${trunk}` ? trunk : `origin/${trunk}`;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 /** Slugify a free-form name into a safe branch segment. */
 export function slugifyBranchName(raw: string): string {
   const s = raw

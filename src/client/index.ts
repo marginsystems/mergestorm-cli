@@ -29,6 +29,7 @@ export {
   cancelMergeQueueEntry,
   devicePost,
   dismissPrFindings,
+  dismissThreadsLine,
   enqueueStack,
   ensureUpperPark,
   getEnrichedStack,

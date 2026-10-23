@@ -1,6 +1,6 @@
 {
   "name": "mergestorm",
-  "version": "0.3.62",
+  "version": "0.3.63",
   "description": "Mergestorm CLI (mg) — local reviews & stacked PRs. MIT; build from source: https://github.com/marginsystems/mergestorm-cli",
   "license": "MIT",
   "type": "module",
@@ -20,7 +20,14 @@
   },
   "exports": {
     ".": "./dist/cli.js",
-    "./client": "./dist/client/index.js"
+    "./client": {
+      "mergestorm-source": "./src/client/index.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./skill": {
+      "mergestorm-source": "./src/commands/skill.ts",
+      "default": "./dist/commands/skill.js"
+    }
   },
   "homepage": "https://mergestorm.ai/docs#review-jobs-api",
   "repository": {

@@ -5,6 +5,7 @@ import {
   LandedQueueReadError,
   readLandedQueueEntry,
   apiFetch,
+  dismissThreadsLine,
   cancelMergeQueueEntry,
   enqueueStack,
   ensureUpperPark,
@@ -806,4 +807,20 @@ test("landed queue reads preserve caller cancellation", async () => {
   const request = readLandedQueueEntry(cfg, "stack", { signal: controller.signal });
   controller.abort();
   await assert.rejects(request, { name: "AbortError" });
+});
+
+test("dismissThreadsLine reports resolved, failed and missing review threads", () => {
+  assert.equal(dismissThreadsLine({ threads: [] }), null);
+  assert.equal(dismissThreadsLine({}), null);
+  assert.equal(
+    dismissThreadsLine({
+      threads: [
+        { finding_id: "1", state: "resolved" },
+        { finding_id: "2", state: "already_resolved" },
+        { finding_id: "3", state: "failed" },
+        { finding_id: "4", state: "not_found" },
+      ],
+    }),
+    "GitHub threads: 2 of 4 resolved. Could not resolve 3; run the same dismissal again to retry. No thread found for 4.",
+  );
 });

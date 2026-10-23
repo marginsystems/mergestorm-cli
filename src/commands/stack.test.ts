@@ -35,6 +35,7 @@ import {
   stackPolicyLabels,
   stackRepairLine,
   stackSetSummary,
+  stackShapeLine,
   type StackSubmitDeps,
   type StackCreateDeps,
 } from "./stack.js";
@@ -584,6 +585,77 @@ test("assertMayParentOntoRegistered allows with --extend", () => {
   );
   assert.ok(hit);
   assert.equal(hit!.prNumber, 99);
+});
+
+function stackCreateDepsOn(current: string) {
+  const saved: StackMeta[] = [];
+  const branchedFrom: string[] = [];
+  const deps: StackCreateDeps = {
+    cwd: "/tmp/fake-repo",
+    gitTopLevel: () => "/tmp/fake-repo",
+    worktreeDirty: () => false,
+    currentBranch: () => current,
+    branchExists: (branch) => branch === "main" || branch === current,
+    defaultLayerBranchName: () => "feat/new",
+    createBranchFromHead: () => {
+      branchedFrom.push("HEAD");
+    },
+    createBranchFrom: (_name, start) => {
+      branchedFrom.push(start);
+    },
+    trunkStartRef: (trunk) => `origin/${trunk}`,
+    deleteBranch: () => {},
+    discoverTrunk: () => "main",
+    loadStackMeta: async () => null,
+    saveStackMeta: async (meta) => {
+      saved.push(structuredClone(meta));
+    },
+    parseGithubOriginRepo: () => null,
+  };
+  return { deps, saved, branchedFrom };
+}
+
+test("cmdStackCreate on an old layer's branch starts a new single PR from trunk by default", async () => {
+  const h = stackCreateDepsOn("feat/old-pr");
+  const out = await captureStackOutput(() => cmdStackCreate([], h.deps));
+  assert.equal(out.error, null);
+  assert.deepEqual(h.branchedFrom, ["origin/main"]);
+  assert.deepEqual(h.saved[0]!.stacks[0]!.layers, [{ branch: "feat/new", parentBranch: "main" }]);
+  assert.match([...out.stdout, ...out.stderr].join("\n"), /a new single PR onto main \(branched from origin\/main\)/);
+});
+
+test("cmdStackCreate stacks onto the checked-out branch only with --extend", async () => {
+  const h = stackCreateDepsOn("feat/old-pr");
+  const out = await captureStackOutput(() => cmdStackCreate(["--extend"], h.deps));
+  assert.equal(out.error, null);
+  assert.deepEqual(h.branchedFrom, ["HEAD"]);
+  assert.deepEqual(h.saved[0]!.stacks[0]!.layers, [{ branch: "feat/new", parentBranch: "feat/old-pr" }]);
+  assert.match([...out.stdout, ...out.stderr].join("\n"), /a layer stacked on feat\/old-pr \(--extend\)/);
+});
+
+test("cmdStackCreate refuses --onto a non-trunk branch without --extend", async () => {
+  const h = stackCreateDepsOn("main");
+  await assert.rejects(
+    cmdStackCreate(["--onto", "feat/old-pr", "--json"], h.deps),
+    (err: unknown) => err instanceof CommandError && err.code === "implicit_stack" &&
+      /mg stack create <name> --onto feat\/old-pr --extend/.test(err.message) &&
+      /New stack from `main`: `mg stack create <name>`/.test(err.message),
+  );
+  assert.deepEqual(h.branchedFrom, []);
+  assert.equal(h.saved.length, 0);
+});
+
+test("cmdStackCreate on trunk branches from HEAD", async () => {
+  const h = stackCreateDepsOn("main");
+  await cmdStackCreate(["--json"], h.deps);
+  assert.deepEqual(h.branchedFrom, ["HEAD"]);
+  assert.deepEqual(h.saved[0]!.stacks[0]!.layers, [{ branch: "feat/new", parentBranch: "main" }]);
+});
+
+test("stackShapeLine says how the PRs were made", () => {
+  assert.equal(stackShapeLine({ layers: 1, base: "main", extendedStack: false }), "  A new single PR onto main.");
+  assert.equal(stackShapeLine({ layers: 2, base: "main", extendedStack: false }), "  A new stack of 2 layers onto main.");
+  assert.equal(stackShapeLine({ layers: 1, base: "main", extendedStack: true }), "  Added 1 layer to an existing stack (--extend).");
 });
 
 test("stack reset requires the explicit --force guard", () => {
@@ -1816,9 +1888,11 @@ test("parseStackPublishArgs reads its flags and rejects a short head SHA", () =>
     base: "main",
     title: "T",
     autoLand: false,
+    extend: false,
     status: false,
     asJson: true,
   });
+  assert.equal(parseStackPublishArgs(["--base", "feat/a", "--extend"]).extend, true);
   assert.equal(parseStackPublishArgs(["--status"]).status, true);
   assert.equal(parseStackPublishArgs(["--replace-head", "a".repeat(40)]).replaceHead, "a".repeat(40));
   assert.throws(() => parseStackPublishArgs(["--replace-head", "abc123"]), /40-character/);

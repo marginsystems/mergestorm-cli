@@ -48,7 +48,7 @@ Cursor `~/.cursor/mcp.json`:
 
 ## Preconditions
 
-1. Prefer the `mergestorm` MCP server. Call `whoami`. If MCP is missing, require `mg` on PATH with `mg whoami --json` exit 0. If neither is available, stop and print the install one-liner above.
+1. Prefer the `mergestorm` MCP server. Call `whoami`. If MCP is missing, require `mg` on PATH with `mg whoami --json` exit 0. If neither is available, stop and print the install one-liner above. A hosted connection to the Mergestorm MCP server, the kind a chat agent uses, has no `review_submit`: it cannot read your checkout. With only that connection, tell the human that this review runs where the branch is checked out, with `mg` or a local MCP server, and stop. Do not install `mg` yourself to get around it.
 2. Call `credits` (or `mg credits --json`). If remaining standard credits are 0, say so and stop.
 
 Ignored bot authors live in Settings → Vortex ("Ignore bot PR authors"), not Agents. Local `review_submit` is a manual review and is not an ignore-list skip.

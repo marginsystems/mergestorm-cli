@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.62`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.63`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.62                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.63                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
 │     ▝▀▀▘      review a diff · usage for tabs · /help for all commands        │
-│       ▀       New in v0.3.62: Watch wakes for a blocker on any layer         │
+│       ▀       New in v0.3.63: Stack create starts a new stack unless --extend│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -96,7 +96,7 @@ mergestorm thread <slug>        Jobs in a review thread
 mergestorm issue create --title <t>  Open a GitHub issue through Mergestorm, no `gh` (`--body`, `--body-file`, `--label`, `--repo`)
 mergestorm stack create [name]  New local stack layer (optional `--onto` / `--trunk` / `--extend`)
 mergestorm stack submit         Push layers, open PRs (`gh`), register via adopt (optional `--extend`, `--server-side`)
-mergestorm stack publish        Publish the current branch through Mergestorm with no GitHub credentials (`--status` to read it)
+mergestorm stack publish        Publish the current branch through Mergestorm with no GitHub credentials (`--base <branch> --extend` to stack, `--status` to read it)
 mergestorm stack list [--json]  List registered stacks
 mergestorm stack adopt <owner/repo>#<pr>  Import an existing open PR chain
 mergestorm stack restack <stack-id>  Restack descendants
@@ -141,9 +141,14 @@ Use `mergestorm dismiss` when a Vortex finding is wrong and you have checked it 
 
 `mg` is a short alias for `mergestorm` (same binary), e.g. `mg stack create`. Happy path: **create → commit → submit → restack → land**. On review-unit stacks, `stack land` **promotes** the tip into the unit (same gates as the dashboard); otherwise it lands the bottom open PR. `stack adopt` is for importing a chain that already exists on GitHub (legacy / Graphite). Restack/land use the same login key (`/api/v1/stacks`). Unattended landing is `mg queue add`.
 
-`stack create` checks out a new branch from the current tip (or `--onto <branch>`), discovers trunk (`main` / `master` / `origin/HEAD`, overridable with `--trunk`), and records `{ branch, parentBranch }` in CLI-managed state under **`~/.mergestorm/stacks/<repo-id>/stack.json`**. The CLI updates this automatically; never edit it. Each worktree has its own authoring state; independent clones stay isolated too. Creating onto trunk with a non-empty active stack starts a new one. `--trunk` only sets trunk metadata — it does **not** change the parent; use `--onto main` (etc.) for a fresh stack from trunk.
+`stack create` always starts a new single PR from trunk unless you pass **`--extend`**, even when the worktree is still on an earlier PR's branch: it checks out the new branch from `origin/<trunk>` (or local trunk; from `HEAD` when trunk is checked out). It discovers trunk (`main` / `master` / `origin/HEAD`, overridable with `--trunk`) and records `{ branch, parentBranch }` in CLI-managed state under **`~/.mergestorm/stacks/<repo-id>/stack.json`**. The CLI updates this automatically; never edit it. Each worktree has its own authoring state; independent clones stay isolated too. Creating onto trunk with a non-empty active stack starts a new one.
 
-If the parent branch is already a layer of a **registered** (submitted) stack, `create` and `submit` refuse unless you pass **`--extend`**. That blocks accidentally gluing an unrelated PR onto an open unit. Growing a registered stack on purpose: `mg stack create --onto <tip> --extend` → commit → `mg stack submit --extend`.
+Both paths are one command:
+
+- New stack from trunk: `mg stack create <name>` (from any branch), then `mg stack submit`.
+- Grow a stack: `mg stack create <name> --extend` on the branch to stack onto (or `--onto <branch> --extend`), then `mg stack submit --extend` when the parent is a layer of a registered stack. `mg stack publish --base <branch> --extend` does the same for publish.
+
+`--onto` or `--base` with a branch other than trunk and no `--extend` is refused, so nothing is added to a stack by accident. Every create, submit and publish prints which one it made: a new single PR onto trunk, or a layer stacked on its parent.
 
 `stack submit` walks the **active** local stack: `git push -u origin` each layer, opens a PR with `gh` (`--base` = parent or trunk; adopt then moves the bottom of a 2+ PR stack onto `mg-stack-<n>` — leave it there; skips heads that already have an open PR; body from the tip commit — Summary + Test plan, preserving Fixes/Closes/Resolves), registers the stack with `POST /api/v1/stacks/adopt` internally (Mergestorm API key), then drops that local stack entry so the next create onto trunk is clean. Push is always your local `git` credentials. PRs open as you when `gh` is installed and `gh api user` succeeds; otherwise `stack submit` asks the Mergestorm API (`POST /api/v1/stacks/pulls`) to open them as the Mergestorm Surge App on your behalf, after checking your GitHub account has write access, and assigns you. Stacks, the merge queue and Auto land run through Surge, and Cyclone is the auto-patch App. Without Surge, submit stops before pushing and prints the server's message, which names the App to install and links its install page. `mg settings` prints a `Stacks, merge queue, Auto land` line when the server reports whether that App is ready.
 
