@@ -4,6 +4,7 @@ import {
   patchRepoSettings,
   patchSettings,
   REPO_SETTINGS_KEYS,
+  REPO_SETTINGS_SWITCH_KEYS,
   type RepoSettings,
   type RepoSettingsKey,
   type RepoSettingsPatch,
@@ -37,7 +38,24 @@ const REPO_FLAG_LABELS: Readonly<Record<RepoSettingsKey, string>> = {
   auto_patch_enabled: "Auto patch",
   auto_review_enabled: "Auto review",
   auto_land_default: "Auto land (new stacks)",
+  merge_queue_batch_enabled: "Merge queue batching",
+  merge_queue_batch_size: "Merge queue batch size (pull requests)",
+  merge_queue_lands_alone_paths: "Merge queue lands-alone paths",
+  merge_queue_overdrive: "Merge queue overdrive",
 };
+
+export function parsePathsFlagValue(flag: string, value: string | undefined, defaults: readonly string[]): string[] {
+  if (value === undefined || value === "" || value.startsWith("--")) {
+    throw new CommandError(`${flag} takes a comma-separated list of path patterns, default, or none.`, 2, "usage");
+  }
+  if (value === "default") return [...defaults];
+  if (value === "none") return [];
+  const paths = [...new Set(value.split(",").map((entry) => entry.trim()).filter((entry) => entry !== ""))];
+  if (paths.length === 0 || paths.some((entry) => /\s/.test(entry))) {
+    throw new CommandError(`${flag} takes a comma-separated list of path patterns, default, or none.`, 2, "usage");
+  }
+  return paths;
+}
 
 function parseRepoSlug(raw: string | undefined): { owner: string; repo: string } {
   const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(raw ?? "");
@@ -82,22 +100,42 @@ function parseRepoSettingsArgs(slug: string, args: string[]): SettingsArgs {
     }
     if (!(REPO_SETTINGS_KEYS as readonly string[]).includes(key)) {
       throw new CommandError(
-        `${flag} is an account setting. With --repo only --auto-patch, --auto-review and --auto-land can be set.`,
+        `${flag} is an account setting. With --repo only --auto-patch, --auto-review, --auto-land, --merge-queue-batch, --merge-queue-batch-size, --merge-queue-lands-alone and --merge-queue-overdrive can be set.`,
         2,
         "usage",
       );
     }
     const value = eq >= 0 ? arg.slice(eq + 1) : args[++i];
-    if (value !== "on" && value !== "off" && value !== "inherit") {
+    const row = BEARER_SETTINGS.find((row) => row.key === key)!;
+    if (value === "inherit") {
+      scope.patch[key as RepoSettingsKey] = null;
+      continue;
+    }
+    if ("kind" in row && row.kind === "count") {
+      const amount = value !== undefined && /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      if (!Number.isInteger(amount) || amount < row.min || amount > row.max) {
+        throw new CommandError(`${flag} takes a whole number from ${row.min} through ${row.max}, or inherit, with --repo.`, 2, "usage");
+      }
+      scope.patch.merge_queue_batch_size = amount;
+      continue;
+    }
+    if ("kind" in row && row.kind === "paths") {
+      scope.patch.merge_queue_lands_alone_paths = parsePathsFlagValue(flag, value, row.defaults);
+      continue;
+    }
+    if (value !== "on" && value !== "off") {
       throw new CommandError(`${flag} takes on, off or inherit with --repo.`, 2, "usage");
     }
-    scope.patch[key as RepoSettingsKey] = value === "inherit" ? null : value === "on";
+    scope.patch[key as (typeof REPO_SETTINGS_SWITCH_KEYS)[number]] = value === "on";
   }
   return { json, patch: {}, repo: scope };
 }
 
-function repoSettingWords(value: boolean | null): string {
-  return value === null ? "inherit (follows the account)" : value ? "on" : "off";
+function repoSettingWords(value: boolean | number | string[] | null): string {
+  if (value === null) return "inherit (follows the account)";
+  if (Array.isArray(value)) return value.length === 0 ? "(none)" : value.join(", ");
+  if (typeof value === "number") return String(value);
+  return value ? "on" : "off";
 }
 
 export function formatRepoSettingsLines(repos: readonly RepoSettings[]): string[] {
@@ -183,6 +221,10 @@ export function parseSettingsArgs(rawArgs: string[]): SettingsArgs {
     }
     const value = eq >= 0 ? arg.slice(eq + 1) : args[++i];
     const row = BEARER_SETTINGS.find((row) => row.key === key)!;
+    if ("kind" in row && row.kind === "paths") {
+      Object.assign(patch, { [key]: parsePathsFlagValue(flag, value, row.defaults) });
+      continue;
+    }
     if ("kind" in row && row.kind === "logins") {
       if (value === "clear") ignoreBots.push({ action: "clear" });
       else if ((value === "add" || value === "remove") && args[i + 1] && !args[i + 1]!.startsWith("--")) {

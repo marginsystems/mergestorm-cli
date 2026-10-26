@@ -46,6 +46,14 @@ export function apiBase(cfg: Config): string {
   return (fromEnv || cfg.apiBase || DEFAULT_API).replace(/\/$/, "");
 }
 
+const CHAT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function resolveChatId(cfg: Config): string | undefined {
+  if (cfg.ignoreEnv) return undefined;
+  const chatId = process.env.MERGESTORM_CHAT_ID?.trim() ?? "";
+  return CHAT_ID.test(chatId) ? chatId.toLowerCase() : undefined;
+}
+
 export function resolveApiKey(cfg: Config): string | undefined {
   if (cfg.ignoreEnv) return cfg.apiKey;
   return process.env.MERGESTORM_API_KEY?.trim() || cfg.apiKey;

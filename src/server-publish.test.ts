@@ -145,13 +145,13 @@ function harness(work: string, remote: Partial<StackPublicationStatus> = {}) {
   };
 }
 
-test("readPublicationCommits carries binaries, deletions, modes, symlinks and renames so each commit's tree can be rebuilt exactly", () => {
+test("readPublicationCommits carries binaries, deletions, modes, symlinks and renames so each commit's tree can be rebuilt exactly", async () => {
   const work = repo();
   const first = firstFeatureCommit(work);
   writeFileSync(path.join(work, "logo.png"), Buffer.concat([PNG, PNG]));
   chmodSync(path.join(work, "run.sh"), 0o644);
   const second = commit(work, "Grow the logo");
-  const commits = readPublicationCommits(readGit, "main", "dot/feature", work);
+  const commits = await readPublicationCommits(readGit, "main", "dot/feature", work);
   assert.equal(commits.length, 2);
 
   const byPath = new Map(commits[0]!.changes.map((change) => [change.path, change]));
@@ -180,12 +180,12 @@ test("readPublicationCommits carries binaries, deletions, modes, symlinks and re
   }
 });
 
-test("readPublicationCommits refuses submodules, merge commits and oversized files with a reason", () => {
+test("readPublicationCommits refuses submodules, merge commits and oversized files with a reason", async () => {
   const withSubmodule = repo();
   const gitlink = out(withSubmodule, ["rev-parse", "main"]);
   run(withSubmodule, ["update-index", "--add", "--cacheinfo", `160000,${gitlink},vendor/lib`]);
   run(withSubmodule, ["commit", "-q", "-m", "Add a submodule"]);
-  assert.throws(
+  await assert.rejects(
     () => readPublicationCommits(readGit, "main", "dot/feature", withSubmodule),
     (err) => err instanceof CommandError && err.code === "unsupported_publication" && /vendor\/lib.*submodule/.test(err.message),
   );
@@ -198,7 +198,7 @@ test("readPublicationCommits refuses submodules, merge commits and oversized fil
   commit(withMerge, "b");
   run(withMerge, ["checkout", "-q", "dot/feature"]);
   run(withMerge, ["merge", "-q", "--no-ff", "-m", "Merge side", "side"]);
-  assert.throws(
+  await assert.rejects(
     () => readPublicationCommits(readGit, "main", "dot/feature", withMerge),
     (err) => err instanceof CommandError && err.code === "unsupported_publication" && /merge commit/.test(err.message),
   );
@@ -206,7 +206,7 @@ test("readPublicationCommits refuses submodules, merge commits and oversized fil
   const withBigFile = repo();
   writeFileSync(path.join(withBigFile, "big.bin"), Buffer.alloc(SERVER_PUBLISH_MAX_FILE_BYTES + 1, 7));
   commit(withBigFile, "Add a big file");
-  assert.throws(
+  await assert.rejects(
     () => readPublicationCommits(readGit, "main", "dot/feature", withBigFile),
     (err) => err instanceof CommandError && err.code === "payload_too_large" && /big\.bin/.test(err.message),
   );
@@ -314,7 +314,7 @@ test("publishBranchServerSide builds an upper layer on the server's head of its 
   await assert.rejects(() => publishBranchServerSide({ ...empty.input, branch: "empty" }, empty.deps), /No commits on `empty` ahead of `main`/);
 });
 
-test("readPublicationCommits refuses a commit time outside the publishable range and a file name that is not UTF-8", () => {
+test("readPublicationCommits refuses a commit time outside the publishable range and a file name that is not UTF-8", async () => {
   const farFuture = repo();
   writeFileSync(path.join(farFuture, "a.txt"), "a\n");
   run(farFuture, ["add", "-A"]);
@@ -323,7 +323,7 @@ test("readPublicationCommits refuses a commit time outside the publishable range
   const object = `tree ${tree}\nparent ${parent}\nauthor Dot Agent <dot@example.com> 99999999999999999 +0000\ncommitter Dot Agent <dot@example.com> 1760000000 +0000\n\nFrom the far future\n`;
   const sha = out(farFuture, ["hash-object", "-t", "commit", "-w", "--literally", "--stdin"], { input: object });
   run(farFuture, ["update-ref", "refs/heads/dot/feature", sha]);
-  assert.throws(
+  await assert.rejects(
     () => readPublicationCommits(readGit, "main", "dot/feature", farFuture),
     (err) => err instanceof CommandError && err.code === "unsupported_publication" && /outside the years 1970-9999/.test(err.message),
   );
@@ -339,7 +339,7 @@ test("readPublicationCommits refuses a commit time outside the publishable range
   const badTree = out(badName, ["write-tree"], { env });
   const badCommit = out(badName, ["commit-tree", badTree, "-p", "HEAD", "-m", "Add a file with a broken name"]);
   run(badName, ["update-ref", "refs/heads/dot/feature", badCommit]);
-  assert.throws(
+  await assert.rejects(
     () => readPublicationCommits(readGit, "main", "dot/feature", badName),
     (err) => err instanceof CommandError && err.code === "unsupported_publication" && /not valid UTF-8/.test(err.message),
   );

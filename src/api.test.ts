@@ -824,3 +824,24 @@ test("dismissThreadsLine reports resolved, failed and missing review threads", (
     "GitHub threads: 2 of 4 resolved. Could not resolve 3; run the same dismissal again to retry. No thread found for 4.",
   );
 });
+
+test("apiFetch names the Breeze chat from MERGESTORM_CHAT_ID, unless the config ignores the environment", async () => {
+  const seen: Array<string | null> = [];
+  originalFetch ??= globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    seen.push(new Headers(init?.headers).get("x-mergestorm-chat-id"));
+    return new Response("{}", { status: 200 });
+  };
+  const before = process.env.MERGESTORM_CHAT_ID;
+  try {
+    process.env.MERGESTORM_CHAT_ID = "6A1F0000-0000-4000-8000-000000000001";
+    await apiFetch(cfg, "/api/v1/me");
+    await apiFetch({ ...cfg, ignoreEnv: true }, "/api/v1/me");
+    process.env.MERGESTORM_CHAT_ID = "not-a-chat";
+    await apiFetch(cfg, "/api/v1/me");
+  } finally {
+    if (before === undefined) delete process.env.MERGESTORM_CHAT_ID;
+    else process.env.MERGESTORM_CHAT_ID = before;
+  }
+  assert.deepEqual(seen, ["6a1f0000-0000-4000-8000-000000000001", null, null]);
+});

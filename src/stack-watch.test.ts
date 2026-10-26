@@ -2789,3 +2789,43 @@ test("a failed current Vortex review is not hidden by a proven cancelled CI hand
   assert.equal(result.attention?.blocker, "Review failed");
   assert.equal(result.repair?.kind, "vortex_failed");
 });
+
+test("#5613: a red live head after a handled red-batch bounce is ci_failure attention with the bounce cursor", async () => {
+  const live = "a248217b24ffb007eb77cc305327736c3de782a9";
+  const bounced = "254466c2205e9171483d741311348c6baa0d2ca9";
+  const failing = "Workspace tests (packages, Vortex, API, Analytics)";
+  const entry = bounce({
+    id: "feddf111-0de4-4451-b965-67ebe3fd504b", finishedAt: "2026-10-23T14:32:51.95+00:00", verifyHeadSha: bounced,
+    bounceDetail: { kind: "ci_failure", headSha: bounced, prNumber: 42, failingCheck: failing,
+      batch: { id: "efdeb08a-576f-400d-acd1-0c2220e6d81e", withPrNumbers: [5635] } },
+  });
+  const red = layer({
+    headSha: live, mergeableHeadSha: live, ciStatus: "failure",
+    checks: { total: 11, success: 7, pending: 0, failure: 1, failingName: failing },
+  });
+  const h = harness({ ...stack([red]), cycloneCiOff: "account_auto_fix_ci_off" }, [entry]);
+  const cursor = { stackId: "stack", enrolledHeadSha: live, bounceId: entry.id, afterFinishedAt: "2026-10-23T14:32:51.950Z" };
+  const result = await pollStackWatch(cfg, "stack", { ...h.options, cursor });
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, `CI failed — ${failing}`);
+  assert.equal(result.headSha, live);
+  assert.equal(result.repair?.kind, "ci_failure");
+  assert.deepEqual(result.busy, []);
+  assert.equal(result.assessment, "available");
+});
+
+test("a rate limit after the first snapshot says the poll read the stack", async () => {
+  const h = harness();
+  let queueReads = 0;
+  h.state.respond = (route) => {
+    if (route.includes("/queue") && ++queueReads > 1) return { status: 429, body: {}, retryAfterSeconds: 60 };
+  };
+  const err = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 60_000 }).then(() => null, (e: unknown) => e);
+  assert.ok(err instanceof StackWatchError);
+  assert.equal(err.lastEnvelope.status, "rate_limited");
+  assert.equal(err.readSnapshot, true);
+  h.state.respond = () => ({ status: 429, body: {}, retryAfterSeconds: 60 });
+  const before = await pollStackWatch(cfg, "stack", { ...h.options, timeoutMs: 60_000 }).then(() => null, (e: unknown) => e);
+  assert.ok(before instanceof StackWatchError);
+  assert.equal(before.readSnapshot, false);
+});

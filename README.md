@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.63`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.64`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.63                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.64                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
 │     ▝▀▀▘      review a diff · usage for tabs · /help for all commands        │
-│       ▀       New in v0.3.63: Stack create starts a new stack unless --extend│
+│       ▀       New in v0.3.64: Memory commands and Overdrive merge batches    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -116,7 +116,8 @@ mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --finding <id> --
 - It prints nothing while the stack is `waiting` or `in_progress`, including while Cyclone or Vortex holds the blocked PR (`busy[]`, `actAfter: "agents_idle"`).
 - On attention it prints `MS-WATCH ATTENTION pr=<n> head=<sha> blocker="<blocker>" repair=<kind>` and exits 3. Attention names the lowest layer with a blocker an agent must fix, on any layer of the stack, not only the current candidate.
 - A confirmed landing prints `MS-WATCH LANDED stack=<id> reason=landed` and exits 0. `closed`, `archived` and `not_found` end the watch with `MS-WATCH ATTENTION stack=<id> reason=<reason>` and exit 3. A missing stack does not prove a landing; verify each PR before reporting it merged.
-- A failed read is retried once. If the retry fails too, it prints `MS-WATCH ATTENTION failed stack=<id> error="<message>"` and exits 3. A rate limit is waited out.
+- A permanent read error is retried once; if the retry fails too, it prints `MS-WATCH ATTENTION failed stack=<id> error="<message>"` and exits 3. Timeouts, 5xx and rate limits are retried, but after 15 minutes with no stack read it prints the same line and exits 3.
+- A watch that cannot start (bad flags, a config it cannot read, a crash) prints `MS-WATCH ATTENTION failed` too, so the command never exits without an `MS-WATCH` line unless you stop it (Ctrl+C or an abort, exit 130). Pass each flag as its own word: in zsh an unquoted `$args` holding several flags stays one word and the command refuses it.
 - `--head <sha>` enrolls the SHA you just pushed. After fixing a blocker, restart the watcher with it.
 - `--ignore <text>` keeps it silent on the first attention whose blocker contains that text (case-insensitive), until the blocker, its PR or its head changes. Use it for a blocker a human has taken over. Repeat the flag for more than one.
 - `--until landed` keeps running after an attention, printing each new attention once, and exits only when the watch is done or reads keep failing.

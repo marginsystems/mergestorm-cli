@@ -150,6 +150,7 @@ export {
 } from "../stack-watch.js";
 
 export {
+  BREEZE_BRANCH_PREFIX,
   stackBlockers,
   stackBlockersSummary,
   sameHead,
@@ -185,9 +186,34 @@ export {
 } from "../stack-watch-obligation.js";
 
 export {
+  READ_ONLY_GIT,
   publishBranchServerSide,
   publishWorkingBranch,
   workingBranchPublication,
+  type GitRead,
+  type ServerPublishDeps,
+  type ServerPublishInput,
   type ServerPublishResult,
   type WorkingBranchInput,
 } from "../server-publish.js";
+
+export {
+  MEMORY_KINDS,
+  MEMORY_MODES,
+  MEMORY_SCOPES,
+  MEMORY_SEARCH_LIMIT_MAX,
+  deleteMemory,
+  getMemoryMode,
+  listMemories,
+  memoryChatId,
+  saveMemory,
+  searchMemories,
+  setMemoryMode,
+  updateMemory,
+  type MemoryItem,
+  type MemoryKind,
+  type MemoryList,
+  type MemoryMode,
+  type MemoryScope,
+  type MemorySearch,
+} from "../memory-api.js";

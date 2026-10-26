@@ -84,6 +84,7 @@ export type StackRepairHint =
     branch: string;
     liveParent: string | null;
     files: string[];
+    publishedBy?: "breeze";
     steps: string;
     note?: string;
   }
@@ -119,6 +120,7 @@ export type StackRepairHint =
     branch: string;
     liveParent: string | null;
     restackKind: string;
+    publishedBy?: "breeze";
     steps: string;
   }
   | {
@@ -954,15 +956,28 @@ export function conflictRepairSteps(branch: string, liveParent: string | null): 
   return `Merge ${liveParent} into ${branch}: git fetch origin, check out ${branch} at its live remote head, git merge origin/${liveParent}, resolve the conflicts, run the tests, then an ordinary git push (no force). Do not rebase onto trunk, main, or mg-park-*, and do not retarget the PR base.`;
 }
 
+export const BREEZE_BRANCH_PREFIX = "breeze/";
+
+export function isBreezeBranch(branch: string | null | undefined): boolean {
+  return typeof branch === "string" && branch.startsWith(BREEZE_BRANCH_PREFIX);
+}
+
+export function breezeConflictRepairSteps(branch: string, liveParent: string | null, prNumber: number): string {
+  if (!liveParent) return conflictRepairSteps(branch, liveParent);
+  return `${branch} is a Breeze branch: Breeze updates it only with open_pull_request, which publishes single-parent commits, so it cannot publish a merge of ${liveParent}. Rebase it in the Breeze chat that opened #${prNumber}: fetch ${liveParent} with fetch_repository, git rebase origin/${liveParent}, resolve the conflicts, run the tests, then call open_pull_request again. Or have Cyclone resolve it: cyclone_start with task resolve_conflicts and pr_number ${prNumber}. Do not retarget the PR base.`;
+}
+
 export function restackFailedRepairSteps(
   branch: string,
   liveParent: string | null,
   failure: { kind: string; detail?: string | null },
+  prNumber?: number,
 ): string {
   const why = `Mergestorm could not restack ${branch}${liveParent ? ` onto ${liveParent}` : ""} (${failure.kind}${failure.detail?.trim() ? `: ${failure.detail.trim()}` : ""}) and will not try this head again.`;
   if (!liveParent) {
     return `${why} The live parent of ${branch} is unknown (it is never an mg-park-* freeze). Do not merge or rebase anything; stop and tell the human.`;
   }
+  if (prNumber !== undefined && isBreezeBranch(branch)) return `${why} ${breezeConflictRepairSteps(branch, liveParent, prNumber)}`;
   return `${why} Merge ${liveParent} into ${branch}: git fetch origin, check out ${branch} at its live remote head, git merge origin/${liveParent}, resolve any conflicts, run the tests, then an ordinary git push (no force). Mergestorm clears Restack failed once the pushed head contains the tip of ${liveParent}. If GitHub refuses the push (branch protection or permissions), stop and tell the human. Do not rebase onto trunk, main, or mg-park-*, and do not retarget the PR base.`;
 }
 
@@ -1014,6 +1029,7 @@ export function stackRepair(
   const landPr = !!stack.unit?.branch && layer.prNumber === stack.unit.landPrNumber && layer.branch === stack.unit.branch;
   const restackConflict = reason === "restack_conflict" || attention.bounceKind === "restack_conflict";
   const mergeConflict = reason === "merge_conflict";
+  const breeze = !landPr && isBreezeBranch(layer.branch);
   if (restackConflict || mergeConflict) {
     const liveParent = landPr ? landPrLiveParent(stack, layer) : conflictLiveParent(stack, layer);
     const note = conflictHandoffNote(stack, layer);
@@ -1024,7 +1040,8 @@ export function stackRepair(
       branch: layer.branch,
       liveParent,
       files: conflictFiles(layer, bounce),
-      steps: conflictRepairSteps(layer.branch, liveParent),
+      ...(breeze ? { publishedBy: "breeze" as const } : {}),
+      steps: breeze ? breezeConflictRepairSteps(layer.branch, liveParent, layer.prNumber) : conflictRepairSteps(layer.branch, liveParent),
       ...(note ? { note } : {}),
     };
   }
@@ -1037,7 +1054,8 @@ export function stackRepair(
       branch: layer.branch,
       liveParent,
       restackKind: layer.restackError.kind,
-      steps: restackFailedRepairSteps(layer.branch, liveParent, layer.restackError),
+      ...(breeze ? { publishedBy: "breeze" as const } : {}),
+      steps: restackFailedRepairSteps(layer.branch, liveParent, layer.restackError, layer.prNumber),
     };
   }
   if (reason === "unit_abandoned") {

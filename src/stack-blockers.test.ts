@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { AutoLandOffReason, MergeQueueEntryDto, StackDto, StackLayerDto } from "./stack-dto.js";
 import {
   VORTEX_FINDINGS_NEED_PERSON,
+  conflictRepairSteps,
   cycloneStatusWords,
   stackBlockers,
   stackBlockersSummary,
@@ -420,4 +421,32 @@ test("the 2026-10-19 cases are attention: #45 fix_held, #1970 left_for_human, #1
   assert.equal(conflict.attention?.prNumber, 1964);
   assert.equal(conflict.repair?.kind, "merge_conflict");
   assert.match(conflict.repair && "note" in conflict.repair ? conflict.repair.note ?? "" : "", /auto-resolve conflicts is off for the account/);
+});
+
+test("a conflict on a Breeze branch is repaired by a rebase in its chat or by Cyclone, never by a merge commit", () => {
+  const breeze = stackBlockers(stack([layer({ branch: "breeze/fix-login-ab12", prNumber: 77, mergeable: false, mergeableState: "dirty" })]));
+  assert.equal(breeze.repair?.kind, "merge_conflict");
+  const repair = breeze.repair?.kind === "merge_conflict" ? breeze.repair : null;
+  assert.equal(repair?.publishedBy, "breeze");
+  assert.match(repair?.steps ?? "", /git rebase origin\/main/);
+  assert.match(repair?.steps ?? "", /open_pull_request again/);
+  assert.match(repair?.steps ?? "", /cyclone_start with task resolve_conflicts and pr_number 77/);
+  assert.doesNotMatch(repair?.steps ?? "", /git merge|git push/);
+
+  const plain = stackBlockers(stack([layer({ mergeable: false, mergeableState: "dirty" })]));
+  const plainRepair = plain.repair?.kind === "merge_conflict" ? plain.repair : null;
+  assert.equal(plainRepair?.publishedBy, undefined);
+  assert.equal(plainRepair?.steps, conflictRepairSteps("feature", "main"));
+});
+
+test("a failed restack of a Breeze branch gives the Breeze rebase steps", () => {
+  const failed = stackBlockers(stack([layer({
+    branch: "breeze/fix-login-ab12", prNumber: 77, state: "needs_restack",
+    restackError: { kind: "checkout_failed", detail: "boom", headSha: HEAD, attemptedAt: "2026-01-01T00:00:00Z", attempts: 3, backupRef: null },
+  })]));
+  const repair = failed.repair?.kind === "restack_failed" ? failed.repair : null;
+  assert.equal(repair?.publishedBy, "breeze");
+  assert.match(repair?.steps ?? "", /^Mergestorm could not restack breeze\/fix-login-ab12 onto main \(checkout_failed: boom\)/);
+  assert.match(repair?.steps ?? "", /git rebase origin\/main/);
+  assert.doesNotMatch(repair?.steps ?? "", /git merge/);
 });

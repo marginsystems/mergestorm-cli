@@ -183,6 +183,60 @@ test("stack watch reports a failed read once transient failures have lasted fift
   assert.match(lines[0]!, /^MS-WATCH ATTENTION failed /);
 });
 
+test("stack watch reports a failed read when whole slices end without any stack snapshot for fifteen minutes", async () => {
+  const unread = envelope({ status: "failed", assessment: "unavailable", prNumber: null, headSha: null });
+  const steps: Step[] = Array.from({ length: 1_000 }, () => new StackWatchTimeoutError(unread));
+  const { run, lines, calls } = harness(steps);
+  const result = await run;
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.exitCode, STACK_WATCH_EXIT.attention);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /^MS-WATCH ATTENTION failed .*No stack read for 15 minutes/);
+  assert.equal(calls.length, 900);
+});
+
+test("stack watch reports a failed read when the API rate-limits it for fifteen minutes", async () => {
+  const limited = envelope({ status: "rate_limited", assessment: "unavailable" });
+  const steps: Step[] = Array.from({ length: 40 }, () => new StackWatchError("Stack poll failed (HTTP 429)", limited, undefined, 60));
+  const { run, lines } = harness(steps);
+  const result = await run;
+  assert.equal(result.outcome, "failed");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /^MS-WATCH ATTENTION failed .*No stack read for 15 minutes: Stack poll failed \(HTTP 429\)/);
+});
+
+test("a rate limit after a stack read in the same slice does not count toward fifteen minutes without a read", async () => {
+  const limited = envelope({ status: "rate_limited", assessment: "unavailable" });
+  const steps: Step[] = [
+    ...Array.from({ length: 40 }, () => new StackWatchError("Stack poll failed (HTTP 429)", limited, undefined, 60, true)),
+    envelope({}, "landed"),
+  ];
+  const { run, lines } = harness(steps);
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.deepEqual(lines.filter((line) => line.includes("failed")), []);
+});
+
+test("a long Retry-After does not sleep past fifteen minutes without a read", async () => {
+  const limited = envelope({ status: "rate_limited", assessment: "unavailable" });
+  const steps: Step[] = Array.from({ length: 10 }, () => new StackWatchError("Stack poll failed (HTTP 429)", limited, undefined, 1_200));
+  const { run, lines, sleeps } = harness(steps);
+  const result = await run;
+  assert.equal(result.outcome, "failed");
+  assert.match(lines[0]!, /^MS-WATCH ATTENTION failed .*No stack read for 15 minutes/);
+  assert.ok(sleeps.every((ms) => ms <= 15 * 60_000), JSON.stringify(sleeps));
+  assert.ok(sleeps.reduce((a, b) => a + b, 0) < 16 * 60_000);
+});
+
+test("a slice that read the stack once keeps the watch silent however its later reads went", async () => {
+  const readOnce = envelope({ status: "waiting", assessment: "unavailable" });
+  const steps: Step[] = [...Array.from({ length: 20 }, () => new StackWatchTimeoutError(readOnce)), envelope({}, "landed")];
+  const { run, lines } = harness(steps);
+  const result = await run;
+  assert.equal(result.outcome, "landed");
+  assert.deepEqual(lines.filter((line) => line.includes("failed")), []);
+});
+
 test("stack watch confirms a landing when the stack is gone but its merge queue entry landed", async () => {
   const { run, lines } = harness([envelope({ prNumber: 4119 }, "not_found")], {
     readLanded: async () => ({ state: "landed", finishedAt: "2026-10-07T19:03:58Z", landedPrNumbers: [4119] }) as never,

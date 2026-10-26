@@ -76,7 +76,7 @@ import {
   StackWatchTimeoutError,
   type StackWatchEnvelope,
 } from "../stack-watch.js";
-import { runStackWatch, STACK_WATCH_EXIT, type StackWatchUntil } from "../stack-watch-loop.js";
+import { runStackWatch, STACK_WATCH_EXIT, stackWatchFailedLine, type StackWatchLoopResult, type StackWatchUntil } from "../stack-watch-loop.js";
 import { isMgParkBranch, planSubmitLayerBases } from "../submit-pr-base.js";
 import { ansi } from "../ui/ansi.js";
 import { runLineTabsBrowser } from "../ui/line-tabs.js";
@@ -128,7 +128,8 @@ const STACK_USAGE = `usage:
   mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--bounce-id <id>] [--after-finished-at <iso>] [--json]
     Loops stack wait with the cursor and stays silent while the stack is waiting or in progress.
     Prints one MS-WATCH ATTENTION line and exits 3 on attention or on reads that keep failing (a permanent
-    error twice, or 15 minutes of timeouts and 5xx, which it retries with backoff); prints MS-WATCH LANDED
+    error twice, or 15 minutes with no stack read: timeouts, 5xx and rate limits, which it retries with backoff).
+    It also prints MS-WATCH ATTENTION failed when it cannot start (bad flags, no config), so it never exits without an MS-WATCH line unless you stop it; prints MS-WATCH LANDED
     and exits 0 only for a confirmed landing, including a stack Mergestorm deleted after its queue entry landed. Other terminal reasons exit 3 with ATTENTION. Run it as a background command.
     An ATTENTION line for a merge queue bounce ends with restart="mg stack watch <id> --bounce-id <id> --after-finished-at <iso>":
     restart with that command (plus --head <sha> after a push) so a bounce you already handled is not reported again.
@@ -1605,14 +1606,14 @@ export async function cmdStackWait(
   }
 }
 
-export async function cmdStackWatch(
+async function startStackWatch(
   args: string[],
   deps: {
     loadConfig?: typeof loadConfig;
     runStackWatch?: typeof runStackWatch;
     signal?: AbortSignal;
-  } = {},
-): Promise<void> {
+  },
+): Promise<{ stackId: string; result: StackWatchLoopResult }> {
   const usage = "usage: mergestorm stack watch <stack-id> [--until attention|landed] [--ignore <blocker-substring>] [--max <minutes>] [--head <sha>] [--bounce-id <id>] [--after-finished-at <iso>] [--json]";
   const fail = (detail?: string) => new CommandError(detail ? `${usage}\n${detail}` : usage, REVIEW_EXIT.usage, "usage");
   const positional: string[] = [];
@@ -1669,6 +1670,35 @@ export async function cmdStackWatch(
       ...(afterFinishedAt ? { afterFinishedAt } : {}),
     } } : {}),
   });
+  return { stackId, result };
+}
+
+export async function cmdStackWatch(
+  args: string[],
+  deps: {
+    loadConfig?: typeof loadConfig;
+    runStackWatch?: typeof runStackWatch;
+    signal?: AbortSignal;
+    writeMarker?: (line: string) => void;
+  } = {},
+): Promise<void> {
+  let started: { stackId: string; result: StackWatchLoopResult };
+  try {
+    started = await startStackWatch(args, deps);
+  } catch (err) {
+    const valueFlags = new Set(["--until", "--ignore", "--max", "--head", "--bounce-id", "--after-finished-at"]);
+    let json = false;
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--json") json = true;
+      else if (valueFlags.has(args[i])) i++;
+    }
+    const marker = deps.writeMarker ?? (json ? console.error : console.log);
+    const stackId = args.find((arg, i) => UUID_RE.test(arg.trim()) && !valueFlags.has(args[i - 1]))?.trim() ?? "none";
+    marker(stackWatchFailedLine(stackId, err instanceof Error ? err.message : String(err)));
+    if (json) console.log(JSON.stringify({ stackId, outcome: "failed" }));
+    throw err;
+  }
+  const { stackId, result } = started;
   if (result.exitCode === STACK_WATCH_EXIT.landed) return;
   const reason = result.outcome === "timeout"
     ? `Stopped watching stack ${stackId} after --max; it is not landed.`

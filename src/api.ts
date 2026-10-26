@@ -1,4 +1,4 @@
-import { apiBase, loadConfig, resolveApiKey, type Config } from "./config.js";
+import { apiBase, loadConfig, resolveApiKey, resolveChatId, type Config } from "./config.js";
 import {
   BEARER_SETTINGS_KEYS as SETTINGS_WRITABLE_KEYS,
 } from "./automation-catalog.js";
@@ -140,8 +140,10 @@ export async function apiFetch(
     );
   }
   const { json, timeoutMs = DEFAULT_API_TIMEOUT_MS, signal: userSignal, ...rest } = init;
+  const chatId = resolveChatId(cfg);
   const headers: Record<string, string> = {
     Authorization: `Bearer ${key}`,
+    ...(chatId ? { "x-mergestorm-chat-id": chatId } : {}),
     ...(rest.headers as Record<string, string> | undefined),
   };
   let body = rest.body;
@@ -376,13 +378,26 @@ export type SettingsResponse = import("./automation-catalog.js").BearerSettingsV
   stacks_ready?: boolean;
 };
 
-export const REPO_SETTINGS_KEYS = ["auto_patch_enabled", "auto_review_enabled", "auto_land_default"] as const;
+export const REPO_SETTINGS_SWITCH_KEYS = [
+  "auto_patch_enabled",
+  "auto_review_enabled",
+  "auto_land_default",
+  "merge_queue_batch_enabled",
+  "merge_queue_overdrive",
+] as const;
+
+export const REPO_SETTINGS_KEYS = [...REPO_SETTINGS_SWITCH_KEYS, "merge_queue_batch_size", "merge_queue_lands_alone_paths"] as const;
 
 export type RepoSettingsKey = (typeof REPO_SETTINGS_KEYS)[number];
 
-export type RepoSettings = { owner: string; repo: string } & Record<RepoSettingsKey, boolean | null>;
+export type RepoSettingsValues = Record<(typeof REPO_SETTINGS_SWITCH_KEYS)[number], boolean | null> & {
+  merge_queue_batch_size: number | null;
+  merge_queue_lands_alone_paths: string[] | null;
+};
 
-export type RepoSettingsPatch = Partial<Record<RepoSettingsKey, boolean | null>>;
+export type RepoSettings = { owner: string; repo: string } & RepoSettingsValues;
+
+export type RepoSettingsPatch = Partial<RepoSettingsValues>;
 
 function repoSettingsFailure(status: number, body: unknown, retryAfterSeconds: number | undefined, action: string): CommandError {
   if (status === 429) {

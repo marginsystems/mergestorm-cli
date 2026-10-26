@@ -9,7 +9,7 @@ import {
   type StackPublicationStatus,
 } from "./api.js";
 import { loadConfig, type Config } from "./config.js";
-import { CommandError } from "./errors.js";
+import { CommandError, isCommandErrorCode } from "./errors.js";
 import { parseGithubOriginRepo } from "./git.js";
 import { currentBranch, discoverTrunk, tipCommitMessage, tipCommitSubject } from "./git-stack.js";
 import { buildPrBodyFromCommit } from "./pr-body.js";
@@ -24,30 +24,32 @@ export const SERVER_PUBLISH_HISTORY_SCAN = 500;
 
 type FileMode = (typeof SERVER_PUBLISH_FILE_MODES)[number];
 
-export type GitRead = (args: string[], cwd: string) => Buffer;
+export type GitRead = (args: string[], cwd: string) => Buffer | Promise<Buffer>;
 
-const READ_ONLY_GIT = new Set(["cat-file", "diff-tree", "merge-base", "rev-list", "rev-parse", "symbolic-ref"]);
+export const READ_ONLY_GIT = new Set(["cat-file", "diff-tree", "merge-base", "rev-list", "rev-parse", "symbolic-ref"]);
 
 export function readGit(args: string[], cwd: string): Buffer {
   if (!READ_ONLY_GIT.has(args[0] ?? "")) {
     throw new Error(`server-side publication only reads the repository; refusing git ${args[0] ?? ""}`);
   }
   const result = spawnSync("git", args, { cwd, maxBuffer: 256 * 1024 * 1024 });
+  if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(result.stderr?.toString("utf8").trim() || `git ${args.join(" ")} failed`);
+    throw new CommandError(result.stderr?.toString("utf8").trim() || `git ${args.join(" ")} failed`, 1, "git_failed");
   }
   return result.stdout;
 }
 
-function text(read: GitRead, args: string[], cwd: string): string {
-  return read(args, cwd).toString("utf8").trim();
+async function text(read: GitRead, args: string[], cwd: string): Promise<string> {
+  return (await read(args, cwd)).toString("utf8").trim();
 }
 
-function resolves(read: GitRead, ref: string, cwd: string): string | null {
+async function resolves(read: GitRead, ref: string, cwd: string): Promise<string | null> {
   try {
-    return text(read, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd) || null;
-  } catch {
-    return null;
+    return await text(read, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd) || null;
+  } catch (err) {
+    if (isCommandErrorCode(err, "git_failed")) return null;
+    throw err;
   }
 }
 
@@ -73,12 +75,12 @@ function parseIdentity(line: string, sha: string): StackPublicationIdentity {
   return { name: match[1]!.trim() ? match[1]! : match[2]!, email: match[2]!, date };
 }
 
-export function readCommitHeader(
+export async function readCommitHeader(
   read: GitRead,
   sha: string,
   cwd: string,
-): { tree: string; parents: string[]; author: StackPublicationIdentity; committer: StackPublicationIdentity; message: string } {
-  const commitBytes = Number(text(read, ["cat-file", "-s", sha], cwd));
+): Promise<{ tree: string; parents: string[]; author: StackPublicationIdentity; committer: StackPublicationIdentity; message: string }> {
+  const commitBytes = Number(await text(read, ["cat-file", "-s", sha], cwd));
   if (commitBytes > SERVER_PUBLISH_MAX_COMMIT_BYTES) {
     throw new CommandError(
       `Commit ${sha} is ${commitBytes} bytes; server-side publication reads commits up to ${SERVER_PUBLISH_MAX_COMMIT_BYTES} bytes.`,
@@ -86,7 +88,7 @@ export function readCommitHeader(
       "payload_too_large",
     );
   }
-  const commitObject = read(["cat-file", "commit", sha], cwd);
+  const commitObject = await read(["cat-file", "commit", sha], cwd);
   let raw: string;
   try {
     raw = new TextDecoder("utf-8", { fatal: true }).decode(commitObject);
@@ -112,14 +114,14 @@ export function readCommitHeader(
   return { tree, parents, author: parseIdentity(author, sha), committer: parseIdentity(committer, sha), message };
 }
 
-export function readCommitChanges(
+export async function readCommitChanges(
   read: GitRead,
   parent: string,
   sha: string,
   cwd: string,
   budget: { changes: number; bytes: number },
-): StackPublicationChange[] {
-  const listing = read(
+): Promise<StackPublicationChange[]> {
+  const listing = await read(
     ["diff-tree", "-r", "-z", "--raw", "--no-renames", "--no-commit-id", "--abbrev=40", parent, sha],
     cwd,
   );
@@ -159,7 +161,7 @@ export function readCommitChanges(
         "unsupported_publication",
       );
     }
-    const size = Number(text(read, ["cat-file", "-s", newSha!], cwd));
+    const size = Number(await text(read, ["cat-file", "-s", newSha!], cwd));
     if (size > SERVER_PUBLISH_MAX_FILE_BYTES) {
       throw new CommandError(
         `${path} is ${size} bytes; server-side publication carries files up to ${SERVER_PUBLISH_MAX_FILE_BYTES} bytes.`,
@@ -175,26 +177,27 @@ export function readCommitChanges(
         "payload_too_large",
       );
     }
-    const content = read(["cat-file", "blob", newSha!], cwd);
+    const content = await read(["cat-file", "blob", newSha!], cwd);
     changes.push({ path, mode: newMode as FileMode, sha: newSha!, content: content.toString("base64") });
   }
   return changes;
 }
 
-export function readPublicationCommits(read: GitRead, from: string, to: string, cwd: string): StackPublicationCommit[] {
+export async function readPublicationCommits(read: GitRead, from: string, to: string, cwd: string): Promise<StackPublicationCommit[]> {
   try {
-    read(["merge-base", "--is-ancestor", from, to], cwd);
-  } catch {
+    await read(["merge-base", "--is-ancestor", from, to], cwd);
+  } catch (err) {
+    if (!isCommandErrorCode(err, "git_failed")) throw err;
     throw new CommandError(`${from} is not an ancestor of ${to}; the commits to publish are not a straight line.`, 1, "unsupported_publication");
   }
-  if (text(read, ["rev-list", "--min-parents=2", "--max-count=1", `${from}..${to}`], cwd)) {
+  if (await text(read, ["rev-list", "--min-parents=2", "--max-count=1", `${from}..${to}`], cwd)) {
     throw new CommandError(
       `A merge commit sits between ${from} and ${to}. Server-side publication carries single-parent commits only; rebase or squash the branch.`,
       1,
       "unsupported_publication",
     );
   }
-  const shas = text(read, ["rev-list", "--reverse", `${from}..${to}`], cwd).split("\n").filter(Boolean);
+  const shas = (await text(read, ["rev-list", "--reverse", `${from}..${to}`], cwd)).split("\n").filter(Boolean);
   if (shas.length > SERVER_PUBLISH_MAX_COMMITS) {
     throw new CommandError(
       `${shas.length} commits to publish; server-side publication carries at most ${SERVER_PUBLISH_MAX_COMMITS} at once. Squash the branch.`,
@@ -205,8 +208,8 @@ export function readPublicationCommits(read: GitRead, from: string, to: string, 
   const commits: StackPublicationCommit[] = [];
   const budget = { changes: 0, bytes: 0 };
   for (const sha of shas) {
-    const header = readCommitHeader(read, sha, cwd);
-    const changes = readCommitChanges(read, header.parents[0]!, sha, cwd, budget);
+    const header = await readCommitHeader(read, sha, cwd);
+    const changes = await readCommitChanges(read, header.parents[0]!, sha, cwd, budget);
     commits.push({
       message: header.message,
       author: header.author,
@@ -218,11 +221,13 @@ export function readPublicationCommits(read: GitRead, from: string, to: string, 
   return commits;
 }
 
-function localCommitWithTree(read: GitRead, from: string, branch: string, head: { sha: string; tree: string }, cwd: string): string | null {
-  const lines = text(
-    read,
-    ["rev-list", `--max-count=${SERVER_PUBLISH_HISTORY_SCAN}`, "--format=%H %T", "--no-commit-header", `${from}..${branch}`],
-    cwd,
+async function localCommitWithTree(read: GitRead, from: string, branch: string, head: { sha: string; tree: string }, cwd: string): Promise<string | null> {
+  const lines = (
+    await text(
+      read,
+      ["rev-list", `--max-count=${SERVER_PUBLISH_HISTORY_SCAN}`, "--format=%H %T", "--no-commit-header", `${from}..${branch}`],
+      cwd,
+    )
   )
     .split("\n")
     .filter(Boolean);
@@ -242,6 +247,7 @@ export type ServerPublishInput = {
   owner: string;
   repo: string;
   branch: string;
+  localRef?: string;
   baseBranch: string;
   localBaseRef?: string;
   remoteBaseSha?: string;
@@ -268,23 +274,24 @@ export async function publishBranchServerSide(
   const status = deps.getStackPublication ?? getStackPublication;
   const submit = deps.submitStackPublication ?? submitStackPublication;
   const { cfg, cwd, owner, repo, branch } = input;
+  const local = input.localRef ?? branch;
 
-  if (!resolves(read, branch, cwd)) throw new CommandError(`Branch missing locally: ${branch}`);
+  if (!(await resolves(read, local, cwd))) throw new CommandError(`Branch missing locally: ${local}`);
   const remote: StackPublicationStatus = await status(cfg, { owner, repo, branch });
   const baseBranch = remote.pr?.base ?? input.baseBranch;
   deps.assertBase?.(baseBranch);
   const localBase =
     input.localBaseRef ??
-    (resolves(read, `refs/remotes/origin/${input.baseBranch}`, cwd) ? `refs/remotes/origin/${input.baseBranch}` : input.baseBranch);
-  if (!resolves(read, localBase, cwd)) throw new CommandError(`Base branch missing locally: ${localBase}`);
-  const fork = text(read, ["merge-base", localBase, branch], cwd);
+    ((await resolves(read, `refs/remotes/origin/${input.baseBranch}`, cwd)) ? `refs/remotes/origin/${input.baseBranch}` : input.baseBranch);
+  if (!(await resolves(read, localBase, cwd))) throw new CommandError(`Base branch missing locally: ${localBase}`);
+  const fork = await text(read, ["merge-base", localBase, local], cwd);
   const baseSha = input.remoteBaseSha ?? fork;
 
   let onto: "base" | "head" = "base";
   let expectedHead: string | null = null;
   let from = fork;
   if (remote.head) {
-    const published = remote.head.tree ? localCommitWithTree(read, fork, branch, { sha: remote.head.sha, tree: remote.head.tree }, cwd) : null;
+    const published = remote.head.tree ? await localCommitWithTree(read, fork, local, { sha: remote.head.sha, tree: remote.head.tree }, cwd) : null;
     if (published) {
       onto = "head";
       expectedHead = remote.head.sha;
@@ -309,7 +316,7 @@ export async function publishBranchServerSide(
     }
   }
 
-  const commits = readPublicationCommits(read, from, branch, cwd);
+  const commits = await readPublicationCommits(read, from, local, cwd);
   if (commits.length === 0 && onto === "base") {
     throw new CommandError(`No commits on \`${branch}\` ahead of \`${input.baseBranch}\`. Commit your changes, then retry.`);
   }
@@ -324,7 +331,7 @@ export async function publishBranchServerSide(
     pr: { title: input.title, body: input.body },
     ...(typeof input.autoLand === "boolean" ? { autoLand: input.autoLand } : {}),
   });
-  const localTree = text(read, ["rev-parse", `${branch}^{tree}`], cwd);
+  const localTree = await text(read, ["rev-parse", `${local}^{tree}`], cwd);
   if (publication.head.tree !== localTree) {
     throw new CommandError(
       `GitHub has tree ${publication.head.tree} at ${branch}, but your local branch has tree ${localTree}.`,

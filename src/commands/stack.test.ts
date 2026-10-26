@@ -2024,3 +2024,33 @@ test("stack watch restarts with the bounce cursor from --bounce-id and --after-f
     await assert.rejects(() => cmdStack(["watch", stackId, ...args]), /usage: mergestorm stack watch/);
   }
 });
+
+test("stack watch prints MS-WATCH ATTENTION failed when it cannot start, so a loop waiting for a marker wakes", async () => {
+  const stackId = "86dfb7ca-9e21-4b07-890f-c91c74570924";
+  const joined = "--head a248217b24ffb007eb77cc305327736c3de782a9 --bounce-id feddf111-0de4-4451-b965-67ebe3fd504b " +
+    "--after-finished-at 2026-10-23T14:32:51.95+00:00";
+  let ran = 0;
+  const runStackWatch = async () => {
+    ran += 1;
+    return { outcome: "landed", exitCode: 0, envelope: null } as StackWatchLoopResult;
+  };
+  const cases: Array<{ args: string[]; loadConfig: () => Promise<object>; error: RegExp }> = [
+    { args: [stackId, joined], loadConfig: async () => ({}), error: /usage: mergestorm stack watch/ },
+    { args: ["not-a-stack"], loadConfig: async () => ({}), error: /usage: mergestorm stack watch/ },
+    { args: [stackId], loadConfig: async () => { throw new Error("config unreadable"); }, error: /config unreadable/ },
+  ];
+  for (const { args, loadConfig, error } of cases) {
+    const markers: string[] = [];
+    await assert.rejects(() => cmdStackWatch(args, { loadConfig, runStackWatch, writeMarker: (line) => markers.push(line) }), error);
+    assert.equal(markers.length, 1, args.join(" "));
+    assert.match(markers[0]!, /^MS-WATCH ATTENTION failed stack=\S+ error=/);
+  }
+  assert.equal(ran, 0);
+  const crashed: string[] = [];
+  await assert.rejects(() => cmdStackWatch([stackId], {
+    loadConfig: async () => ({}),
+    runStackWatch: async () => { throw new TypeError("boom"); },
+    writeMarker: (line) => crashed.push(line),
+  }), /boom/);
+  assert.deepEqual(crashed, [`MS-WATCH ATTENTION failed stack=${stackId} error="boom"`]);
+});

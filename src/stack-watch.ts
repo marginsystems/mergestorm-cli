@@ -94,6 +94,7 @@ export class StackWatchError extends Error {
     readonly lastEnvelope: StackWatchEnvelope,
     options?: ErrorOptions,
     readonly retryAfterSeconds?: number,
+    readonly readSnapshot = false,
   ) {
     super(message, options);
     this.name = "StackWatchError";
@@ -132,6 +133,7 @@ export async function pollStackWatch(
     landGatePending: null,
   };
   let terminal: StackWatchDoneReason | null = null;
+  let readSnapshot = false;
   const seal = (snapshot: StackWatchSnapshot, retryAfterSeconds?: number): StackWatchEnvelope => ({
     ...snapshot,
     watch: stackWatchObligation({
@@ -190,7 +192,7 @@ export async function pollStackWatch(
       throw new StackWatchError(`Stack poll failed (HTTP ${response.status})`, seal({
         ...lastEnvelope, status: response.status === 429 ? "rate_limited" : "failed",
         assessment: "unavailable",
-      }, response.retryAfterSeconds), undefined, response.retryAfterSeconds);
+      }, response.retryAfterSeconds), undefined, response.retryAfterSeconds, readSnapshot);
     }
     throw timeout();
   };
@@ -226,6 +228,7 @@ export async function pollStackWatch(
   const evaluate = (stack: StackDto, entries: MergeQueueEntryDto[]) => {
     const { attention, held: named, issues, currentCandidate, bounce, busy, agents, repair, landGatePending, queueWait } =
       stackBlockers(stack, entries, cursor, now());
+    readSnapshot = true;
     if (bounce) cursor = Object.freeze({ ...cursor, bounceId: bounce.id,
       ...(bounce.finishedAt !== undefined ? { afterFinishedAt: bounce.finishedAt } : {}) });
     const held = busy[0];

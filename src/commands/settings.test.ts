@@ -35,6 +35,8 @@ const SETTINGS_BODY = {
   auto_land_settle_seconds: 60,
   merge_queue_batch_enabled: false,
   merge_queue_batch_size: 4,
+  merge_queue_lands_alone_paths: ["**/migrations/**", "db/migrate/**", ".github/workflows/**"],
+  merge_queue_overdrive: false,
 };
 
 // --- parseSettingsArgs --------------------------------------------------------
@@ -73,27 +75,48 @@ test("parseSettingsArgs maps --auto-land on to auto_land_default: true", () => {
   assert.deepEqual(parseSettingsArgs(["--auto-land=off"]).patch, { auto_land_default: false });
 });
 
-test("parseSettingsArgs maps --merge-queue-batch and a batch size from 2 through 8", () => {
+test("parseSettingsArgs maps --merge-queue-batch and a batch size from 2 through 10", () => {
   assert.deepEqual(parseSettingsArgs(["--merge-queue-batch", "on", "--merge-queue-batch-size", "6"]), {
     json: false,
     patch: { merge_queue_batch_enabled: true, merge_queue_batch_size: 6 },
   });
   assert.deepEqual(parseSettingsArgs(["--merge-queue-batch=off"]).patch, { merge_queue_batch_enabled: false });
   assert.deepEqual(parseSettingsArgs(["--merge-queue-batch-size=2"]).patch, { merge_queue_batch_size: 2 });
-  assert.deepEqual(parseSettingsArgs(["--merge-queue-batch-size", "8"]).patch, { merge_queue_batch_size: 8 });
+  assert.deepEqual(parseSettingsArgs(["--merge-queue-batch-size", "10"]).patch, { merge_queue_batch_size: 10 });
+  assert.deepEqual(parseSettingsArgs(["--merge-queue-overdrive", "on"]).patch, { merge_queue_overdrive: true });
+  assert.deepEqual(parseSettingsArgs(["--merge-queue-overdrive=off"]).patch, { merge_queue_overdrive: false });
   for (const args of [
-    ["--merge-queue-batch-size"], ["--merge-queue-batch-size", "1"], ["--merge-queue-batch-size", "9"],
+    ["--merge-queue-batch-size"], ["--merge-queue-batch-size", "1"], ["--merge-queue-batch-size", "11"],
     ["--merge-queue-batch-size", "on"], ["--merge-queue-batch-size", "3.5"], ["--merge-queue-batch-size="],
   ]) {
     assert.throws(
       () => parseSettingsArgs(args),
       (err: unknown) =>
         err instanceof Error &&
-        err.message === "--merge-queue-batch-size takes a whole number from 2 through 8.",
+        err.message === "--merge-queue-batch-size takes a whole number from 2 through 10.",
       args.join(" "),
     );
   }
   assert.throws(() => parseSettingsArgs(["--merge-queue-batch", "4"]), /--merge-queue-batch takes on or off\./);
+});
+
+test("parseSettingsArgs maps --merge-queue-lands-alone to a list, default or none, and never eats the next flag", () => {
+  assert.deepEqual(parseSettingsArgs(["--merge-queue-lands-alone", "db/migrate/**, **/*.sql"]).patch, {
+    merge_queue_lands_alone_paths: ["db/migrate/**", "**/*.sql"],
+  });
+  assert.deepEqual(parseSettingsArgs(["--merge-queue-lands-alone=default"]).patch, {
+    merge_queue_lands_alone_paths: ["**/migrations/**", "db/migrate/**", ".github/workflows/**"],
+  });
+  assert.deepEqual(parseSettingsArgs(["--merge-queue-lands-alone", "none"]).patch, { merge_queue_lands_alone_paths: [] });
+  for (const args of [["--merge-queue-lands-alone"], ["--merge-queue-lands-alone", "--json"], ["--merge-queue-lands-alone", "a b"]]) {
+    assert.throws(() => parseSettingsArgs(args), /--merge-queue-lands-alone takes a comma-separated list of path patterns, default, or none\./);
+  }
+  assert.deepEqual(parseSettingsArgs(["--repo", "acme/app", "--merge-queue-lands-alone", "none", "--merge-queue-batch-size", "6", "--merge-queue-batch", "inherit"]).repo, {
+    owner: "acme",
+    repo: "app",
+    patch: { merge_queue_lands_alone_paths: [], merge_queue_batch_size: 6, merge_queue_batch_enabled: null },
+  });
+  assert.throws(() => parseSettingsArgs(["--repo", "acme/app", "--merge-queue-batch-size", "11"]), /from 2 through 10, or inherit, with --repo/);
 });
 
 test("formatSettingsLines prints the batch size as a plain number and the settle wait in seconds", () => {
@@ -485,6 +508,21 @@ test("parseSettingsArgs with --repo refuses account-only flags, bad values and a
   ] as const) {
     assert.throws(() => parseSettingsArgs([...args]), (err: unknown) => err instanceof CommandError && words.test(err.message));
   }
+});
+
+test("parseSettingsArgs with --repo sets or clears that repository's merge queue overdrive", () => {
+  assert.deepEqual(parseSettingsArgs(["--repo", "acme/app", "--merge-queue-overdrive", "on"]).repo, {
+    owner: "acme",
+    repo: "app",
+    patch: { merge_queue_overdrive: true },
+  });
+  assert.deepEqual(parseSettingsArgs(["--repo=acme/app", "--merge-queue-overdrive=inherit"]).repo?.patch, {
+    merge_queue_overdrive: null,
+  });
+  assert.throws(
+    () => parseSettingsArgs(["--repo", "acme/app", "--auto-fix-ci", "on"]),
+    /--merge-queue-lands-alone and --merge-queue-overdrive can be set\./,
+  );
 });
 
 test("inherit is not a value for an account setting", () => {

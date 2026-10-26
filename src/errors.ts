@@ -35,7 +35,12 @@ export type CommandErrorCode =
   | "payload_too_large"
   | "unsupported_publication"
   | "publication_failed"
-  | "unknown_label";
+  | "git_failed"
+  | "unknown_label"
+  | "invalid_input"
+  | "memory_off"
+  | "memory_full"
+  | "memory_unavailable";
 
 /** Stable one-shot exit codes for machine callers of `mergestorm review`. */
 export const REVIEW_EXIT = {

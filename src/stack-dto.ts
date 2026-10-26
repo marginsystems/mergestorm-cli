@@ -677,6 +677,7 @@ export type MergeQueueEntryDto = {
   verifyBaseSha: string | null;
   cancelRequestedAt?: string | null;
   batch?: MergeQueueEntryBatchDto | null;
+  ci?: MergeQueueBatchCiDto | null;
   finishedAt: string | null;
   claimedAt?: string | null;
   aheadInRepo?: MergeQueueAheadDto | null;

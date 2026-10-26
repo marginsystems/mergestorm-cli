@@ -9,6 +9,7 @@ import { cmdIssue } from "./issue.js";
 import { cmdJobs, cmdThread } from "./jobs.js";
 import { cmdLogin } from "./login.js";
 import { cmdLogout } from "./logout.js";
+import { cmdMemory } from "./memory.js";
 import { cmdQueue } from "./queue.js";
 import { cmdPr } from "./pr.js";
 import { cmdReview } from "./review.js";
@@ -224,7 +225,8 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "  [--auto-land on|off]  Auto land default for new stacks",
       "  [--auto-land-settle <seconds>]  How long Auto land waits before queueing (15-300, default 60)",
       "  [--merge-queue-batch on|off]  Test several queued pull requests on one CI run",
-      "  [--merge-queue-batch-size <n>]  Most pull requests per batch (2-8, default 4)",
+      "  [--merge-queue-batch-size <n>]  Most pull requests per batch (2-10, default 4)",
+      "  [--merge-queue-overdrive on|off]  Account default: batch up to 10 queued pull requests; --repo overrides it per repository",
       "  [--ignore-bot add <login>|remove <login>|clear]",
       "  [--vortex-skip-check none|neutral] [--vortex-findings failure|neutral|success]",
       "  [--cyclone-fail-check failure|neutral]",
@@ -236,6 +238,21 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     ],
     async run(args, ctx) {
       await cmdSettings(args, { mode: ctx.mode });
+    },
+  },
+  {
+    name: "memory",
+    summary: "Your memories: list, search, add, update, delete, mode",
+    usage: [
+      "mergestorm memory list [--scope user|repo] [--repo <owner/repo>] [--kind <kind>] [--json]",
+      "mergestorm memory search <query> [--repo <owner/repo>] [--limit <1-20>] [--json]",
+      "mergestorm memory add <text> --kind rule|style|preference|fact|project [--repo <owner/repo>] [--json]",
+      "mergestorm memory update <id> <text> [--kind <kind>] [--json]",
+      "mergestorm memory delete <id> [--json]",
+      "mergestorm memory mode [off|on_request|all] [--json]  Read or set whether Breeze remembers",
+    ],
+    async run(args) {
+      await cmdMemory(args);
     },
   },
   {

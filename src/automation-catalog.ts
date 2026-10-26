@@ -13,7 +13,9 @@ export const BEARER_SETTINGS = [
   { key: "auto_land_default", flag: "--auto-land", label: "Auto land (new stacks)" },
   { key: "auto_land_settle_seconds", flag: "--auto-land-settle", label: "Auto land settle (seconds)", kind: "seconds", min: 15, max: 300 },
   { key: "merge_queue_batch_enabled", flag: "--merge-queue-batch", label: "Merge queue batching" },
-  { key: "merge_queue_batch_size", flag: "--merge-queue-batch-size", label: "Merge queue batch size (pull requests)", kind: "count", min: 2, max: 8 },
+  { key: "merge_queue_batch_size", flag: "--merge-queue-batch-size", label: "Merge queue batch size (pull requests)", kind: "count", min: 2, max: 10 },
+  { key: "merge_queue_lands_alone_paths", flag: "--merge-queue-lands-alone", label: "Merge queue lands-alone paths", kind: "paths", defaults: ["**/migrations/**", "db/migrate/**", ".github/workflows/**"] },
+  { key: "merge_queue_overdrive", flag: "--merge-queue-overdrive", label: "Merge queue overdrive (up to 10 per batch)" },
   { key: "ignored_bot_logins", flag: "--ignore-bot", label: "Ignored bot logins", kind: "logins" },
   { key: "vortex_bot_skip_check", flag: "--vortex-skip-check", label: "Vortex bot skip check", kind: "enum", values: ["none", "neutral"] },
   { key: "vortex_findings_check", flag: "--vortex-findings", label: "Vortex findings check", kind: "enum", values: ["failure", "neutral", "success"] },
@@ -35,7 +37,7 @@ export const BEARER_SETTINGS_LABELS: Record<BearerSettingsKey, string> = Object.
 /** Omitted kind means boolean for the original toggle rows. */
 export type BearerSettingsValues = {
   [Row in (typeof BEARER_SETTINGS)[number] as Row["key"]]:
-    Row extends { kind: "logins" } ? string[] :
+    Row extends { kind: "logins" | "paths" } ? string[] :
     Row extends { kind: "seconds" | "count" } ? number :
     Row extends { values: readonly (infer Value)[] } ? Value : boolean;
 };

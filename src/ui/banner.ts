@@ -240,6 +240,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.63": [
     "Stack create starts a new stack unless --extend",
   ],
+  "0.3.64": [
+    "Memory commands and Overdrive merge batches",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

@@ -211,9 +211,17 @@ export async function runStackWatch(
     return null;
   };
 
+  const unreadTooLong = (message: string, envelope: StackWatchEnvelope, since: number): StackWatchLoopResult | null => {
+    transientSince ??= since;
+    if (now() - transientSince < STACK_WATCH_TRANSIENT_WINDOW_MS) return null;
+    emit(stackWatchFailedLine(id, `No stack read for 15 minutes: ${message}`), envelope, "failed");
+    return { outcome: "failed", exitCode: STACK_WATCH_EXIT.attention, envelope };
+  };
+
   try {
     while (now() < deadline) {
       let envelope: StackWatchEnvelope;
+      const sliceStartedAt = now();
       try {
         envelope = await poll(cfg, id, {
           timeoutMs: Math.min(STACK_WATCH_SLICE_MS, Math.max(0, deadline - now())),
@@ -227,7 +235,11 @@ export async function runStackWatch(
           cursor = err.lastEnvelope.cursor;
           failures = 0;
           permanentFailures = 0;
-          if (err.lastEnvelope.assessment === "available") transientSince = null;
+          if (err.lastEnvelope.status !== "failed") transientSince = null;
+          else {
+            const unread = unreadTooLong("No stack snapshot was read in a whole watch slice", err.lastEnvelope, sliceStartedAt);
+            if (unread) return unread;
+          }
           continue;
         }
         if (err instanceof StackWatchError && err.lastEnvelope.watch.done) {
@@ -235,7 +247,13 @@ export async function runStackWatch(
           return await finished(err.lastEnvelope);
         }
         if (err instanceof StackWatchError && err.lastEnvelope.status === "rate_limited") {
-          await pause(err.retryAfterSeconds !== undefined ? Math.max(1_000, err.retryAfterSeconds * 1000) : STACK_WATCH_RATE_LIMIT_WAIT_MS);
+          if (err.readSnapshot) transientSince = now();
+          else {
+            const unread = unreadTooLong(err.message, err.lastEnvelope, sliceStartedAt);
+            if (unread) return unread;
+          }
+          const retryAfterMs = err.retryAfterSeconds !== undefined ? Math.max(1_000, err.retryAfterSeconds * 1000) : STACK_WATCH_RATE_LIMIT_WAIT_MS;
+          await pause(Math.min(retryAfterMs, Math.max(1_000, transientSince! + STACK_WATCH_TRANSIENT_WINDOW_MS - now())));
           continue;
         }
         const result = await failed(err instanceof Error ? err.message : String(err),
