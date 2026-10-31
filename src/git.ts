@@ -3,9 +3,9 @@ import { realpathSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
-export function git(args: string[], cwd = process.cwd()): string {
+export function git(args: string[], cwd = process.cwd(), env?: NodeJS.ProcessEnv): string {
   try {
-    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    const result = spawnSync("git", args, { cwd, encoding: "utf8", env });
     if (result.status !== 0) {
       throw new Error(result.stderr?.trim() || `git ${args.join(" ")} failed`);
     }

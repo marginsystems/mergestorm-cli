@@ -1972,6 +1972,36 @@ test("Auto land's vortex_not_green is held while Vortex reviews and attention on
   assert.equal(idle.repair?.kind, "vortex_not_green");
 });
 
+const OLDER = "0".repeat(40);
+const stalledPatch = (startedMinutesAgo: number, nowMs: number) => changesRequested({
+  cycloneStatus: "patching",
+  cycloneFindingsTakenAtHead: true,
+  agentRuns: [{ agent: "cyclone", status: "patching", sha: OLDER, startedAt: new Date(nowMs - startedMinutesAgo * MINUTE).toISOString() }],
+  agentsBusy: undefined,
+});
+
+test("a Cyclone run patching with no result holds the watch at first, then turns into attention (organism#223, #6539)", () => {
+  const now = Date.now();
+  const young = stackBlockers(waiting("vortex_not_green", {}, [stalledPatch(30, now)]), [], {}, now);
+  assert.equal(young.attention, null);
+  assert.deepEqual(young.busy.map((entry) => entry.agent), ["cyclone"]);
+
+  const stalled = stackBlockers(waiting("vortex_not_green", {}, [stalledPatch(80, now)]), [], {}, now);
+  assert.equal(stalled.attention?.blocker, "Cyclone stalled: patching 0000000 for 80m with no push or result");
+  assert.deepEqual(stalled.busy, []);
+  assert.equal(stalled.repair?.kind, "cyclone_stalled");
+  assert.equal(stalled.repair?.kind === "cyclone_stalled" ? stalled.repair.runSha : null, OLDER);
+  assert.match(stalled.repair?.steps ?? "", /Patch the open Vortex findings at a{40} yourself/);
+});
+
+test("the watch returns attention for a stalled Cyclone run instead of staying in_progress", async () => {
+  const h = harness(waiting("vortex_not_green", {}, [stalledPatch(90, 0)]));
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.match(result.blocker ?? "", /^Cyclone stalled: /);
+  assert.equal(result.repair?.kind, "cyclone_stalled");
+});
+
 test("a promote Auto land stopped retrying is attention with a promote_failed repair (#3453)", () => {
   const twice = waiting("promote_merge_failed", { attempts: 2, detail: "Base branch was modified" });
   assert.equal(stackBlockers(twice, [], {}, MINUTE).attention, null);
@@ -2532,6 +2562,7 @@ for (const [reason, words] of [
   ["unsupported_language", /the findings are in a language Cyclone does not patch/],
   ["policy_owner_changed", /the stack's owner changed while the patch was queued/],
   ["patch_job_lost", /Cyclone's patch job was lost before it finished/],
+  ["run_deadline", /Cyclone's patch ran past its time limit and stopped without pushing/],
 ] as const) {
   test(`the Cyclone hand-off ${reason} is said in plain words`, () => {
     const result = stackBlockers(stack([changesRequested({ cycloneHandoff: { headSha: HEAD, reason, at: null } })]));
@@ -2569,6 +2600,7 @@ test("the agents-busy hold names exactly the blockers no agent run clears", () =
     auto_land_ci_unreadable: false,
     auto_land_waited: false,
     queue_stalled: false,
+    cyclone_stalled: false,
     land_pr_missing: false,
   };
   for (const reason of Object.keys(expected) as StackBlockerReason[]) {

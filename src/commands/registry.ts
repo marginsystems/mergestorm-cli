@@ -1,6 +1,7 @@
-import { DEFAULT_API } from "../config.js";
+import { DEFAULT_API, splitAccountFlag, withAccount } from "../config.js";
 import { CommandError } from "../errors.js";
 import type { CommandSpec } from "../ui/prompt.js";
+import { cmdAccount } from "./account.js";
 import { cmdBranches, cmdChain } from "./branches.js";
 import { canBrowse, openTabsBrowser } from "./browse.js";
 import { cmdCredits } from "./credits.js";
@@ -23,6 +24,7 @@ import { cmdWhoami } from "./whoami.js";
 export type CommandContext = {
   mode: "oneshot" | "shell";
   signal?: AbortSignal;
+  account?: string;
   /** Shell: refresh banner after login/logout. */
   afterAuth?: () => Promise<void>;
 };
@@ -45,9 +47,9 @@ export type RegistryCommand = {
 export const COMMAND_REGISTRY: RegistryCommand[] = [
   {
     name: "login",
-    summary: "Sign in via browser (or paste a key)",
+    summary: "Sign in via browser (or paste a key); adds an account, up to 3",
     usage: [
-      "mergestorm login                Sign in via browser and store an API key",
+      "mergestorm login                Sign in via browser and add the account (up to 3 saved)",
       "mergestorm login --start        Print a sign-in URL and code, then exit (agents)",
       "mergestorm login --finish       Store the API key once the code from --start is approved",
       "mergestorm login --key          Paste an existing API key instead (headless/CI)",
@@ -59,10 +61,23 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
   },
   {
     name: "logout",
-    summary: "Remove the stored API key",
-    usage: ["mergestorm logout               Remove the stored API key"],
+    summary: "Log out of the active account and revoke its key",
+    usage: ["mergestorm logout               Log out of the active account (or --account <name>) and revoke its key"],
     async run(_args, ctx) {
       await cmdLogout();
+      if (ctx.afterAuth) await ctx.afterAuth();
+    },
+  },
+  {
+    name: "account",
+    summary: "Saved accounts: list, use <name>, remove <name>",
+    usage: [
+      "mergestorm account list [--json]  Saved accounts (up to 3), the active one marked",
+      "mergestorm account use <name>   Make <name> the active account",
+      "mergestorm account remove <name>  Log out of <name> and revoke its key",
+    ],
+    async run(args, ctx) {
+      await cmdAccount(args);
       if (ctx.afterAuth) await ctx.afterAuth();
     },
   },
@@ -121,11 +136,15 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
   },
   {
     name: "issue",
-    summary: "Open a GitHub issue through Mergestorm, no gh needed",
+    summary: "Open a GitHub issue through Mergestorm and wait for its Vortex review",
     usage: [
-      "mergestorm issue create --title <title> [--body <text> | --body-file <path>] [--label <name>]… [--repo <owner/repo>] [--json]",
+      "mergestorm issue create --title <title> [--body <text> | --body-file <path>] [--label <name>]… [--repo <owner/repo>] [--wait [--timeout <s>]] [--json]",
       "  Opens the issue as the Surge App; needs write access on GitHub, uses existing labels only",
       "  The same title again returns the open issue it already made when it is among the newest 100 open issues; an older one, or two calls at once, can still create a duplicate",
+      "  --wait then waits for the Vortex issue review, like issue wait",
+      "mergestorm issue wait <n> [--repo <owner/repo>] [--timeout <s>] [--json]",
+      "  Waits for the Vortex issue review (default 900s); exits 0 once approved or when issue reviews are off",
+      "  Exits 4 with the points to answer: reply in a comment on the issue, wait again, and open the PR only after approval",
     ],
     async run(args) {
       await cmdIssue(args);
@@ -207,7 +226,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
   {
     name: "whoami",
     summary: "Key + plan (Status tab on a TTY)",
-    usage: ["mergestorm whoami [--json]      Key + plan + API base"],
+    usage: ["mergestorm whoami [--json]      Account + key + plan + API base"],
     async run(args, ctx) {
       await cmdWhoami(args, { mode: ctx.mode });
     },
@@ -222,6 +241,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "  [--cyclone-skip-ci on|off]",
       "  [--cyclone-patch-unverified on|off]  Patch languages we cannot typecheck",
       "  [--vortex-seam on|off] [--vortex-skip-all-clear on|off]",
+      "  [--issue-review on|off]  Account default for Vortex issue reviews; --repo overrides it per repository",
       "  [--auto-land on|off]  Auto land default for new stacks",
       "  [--auto-land-settle <seconds>]  How long Auto land waits before queueing (15-300, default 60)",
       "  [--merge-queue-batch on|off]  Test several queued pull requests on one CI run",
@@ -246,7 +266,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
     usage: [
       "mergestorm memory list [--scope user|repo] [--repo <owner/repo>] [--kind <kind>] [--json]",
       "mergestorm memory search <query> [--repo <owner/repo>] [--limit <1-20>] [--json]",
-      "mergestorm memory add <text> --kind rule|style|preference|fact|project [--repo <owner/repo>] [--json]",
+      "mergestorm memory add <text> --kind rule|style|preference|fact|project [--repo <owner/repo>] [--keep-both] [--json]",
       "mergestorm memory update <id> <text> [--kind <kind>] [--json]",
       "mergestorm memory delete <id> [--json]",
       "mergestorm memory mode [off|on_request|all] [--json]  Read or set whether Breeze remembers",
@@ -377,9 +397,12 @@ export function formatUsageBody(): string {
   return `${cmdLines}
 
   mg is a short alias for mergestorm (same binary).
+  --account <name> before or after any command runs it as that saved account
+  without changing the active one; MERGESTORM_ACCOUNT=<name> does the same.
 
 Env:
-  MERGESTORM_API_KEY   API key (overrides config)
+  MERGESTORM_API_KEY   API key (overrides every saved account)
+  MERGESTORM_ACCOUNT   Saved account to run as (default: the active one)
   MERGESTORM_API_URL   API base (default ${DEFAULT_API})
   MERGESTORM_HOME      State directory for login and stack state (default ~/.mergestorm)
 `;
@@ -398,6 +421,7 @@ export async function dispatchCommand(
   if (!cmd) return false;
   // `shell` as a subcommand is oneshot-only.
   if (cmd.name === "shell" && ctx.mode === "shell") return false;
-  await cmd.run(args, ctx);
+  const split = splitAccountFlag(args);
+  await withAccount(split.account ?? ctx.account, () => cmd.run(split.args, ctx));
   return true;
 }

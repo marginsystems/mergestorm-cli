@@ -29,10 +29,10 @@ export const REVIEW_POLL_STRETCH_SPAN_MS = 60_000;
 
 /** Same thread slug contract as POST /api/v1/reviews. */
 export const REVIEW_THREAD_SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,119}$/;
-export const MAX_CONTEXT_TEXT_CHARS = 60_000;
+const MAX_CONTEXT_TEXT_CHARS = 60_000;
 export const MAX_CONTEXT_FILES = 10;
 export const MAX_CONTEXT_FILE_CHARS = 16_000;
-export const MAX_CONTEXT_FILES_TOTAL = 60_000;
+const MAX_CONTEXT_FILES_TOTAL = 60_000;
 export const MAX_IDEMPOTENCY_KEY_CHARS = 128;
 
 export type ReviewInput = {
@@ -207,7 +207,7 @@ export async function loadReviewContext(
 const REPLAYED_JOB_RESUBMIT_STATUSES: readonly string[] = ["failed", "quota_exceeded"];
 const MAX_REPLAYED_JOB_RESUBMITS = 5;
 
-export function reviewIdempotencyKey(
+function reviewIdempotencyKey(
   input: ReviewInput,
   opts: SubmitReviewOptions = {},
   afterJobId: string | null = null,

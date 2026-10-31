@@ -4,8 +4,11 @@ import {
   deriveStackAgentsBusy,
   mergeQueueBounceLabel,
   restackRetryPending,
+  STACK_AGENT_PATCHING_STALE_MS,
+  stalledCycloneRun,
   type AutoLandOffReason,
   type MergeQueueEntryDto,
+  type StackAgentRun,
   type StackAgentsBusy,
   type StackDto,
   type StackLayerDto,
@@ -47,9 +50,10 @@ export type StackBlockerReason =
   | "auto_land_ci_unreadable"
   | "auto_land_waited"
   | "queue_stalled"
+  | "cyclone_stalled"
   | "land_pr_missing";
 
-export type ClassifiedStackBlocker = StackBlocker & { reason: StackBlockerReason };
+type ClassifiedStackBlocker = StackBlocker & { reason: StackBlockerReason };
 
 type NamedBlocker = { blocker: string; reason: StackBlockerReason };
 
@@ -165,6 +169,15 @@ export type StackRepairHint =
     steps: string;
   }
   | {
+    kind: "cyclone_stalled";
+    prNumber: number;
+    headSha: string | null;
+    branch: string;
+    runSha: string | null;
+    since: string | null;
+    steps: string;
+  }
+  | {
     kind: "queue_stalled";
     prNumber: number;
     headSha: string | null;
@@ -235,19 +248,19 @@ export function layerAgents(layer: StackLayerDto): StackLayerAgents {
   };
 }
 
-export function isMgParkBase(branch: string | null | undefined): boolean {
+function isMgParkBase(branch: string | null | undefined): boolean {
   return (branch ?? "").trim().toLowerCase().startsWith("mg-park-");
 }
 
 /** GitHub DIRTY vs an mg-park-* freeze is not a merge conflict, verified or not. */
-export function boundDirty(layer: StackLayerDto): boolean {
+function boundDirty(layer: StackLayerDto): boolean {
   if (isMgParkBase(layer.parentBranch)) return false;
   if (layer.mergeable == null) return false;
   return (!layer.headSha || layer.mergeableHeadSha === layer.headSha) &&
     (layer.mergeable === false || layer.mergeableState?.toLowerCase() === "dirty");
 }
 
-export function mergeabilityPending(layer: StackLayerDto): boolean {
+function mergeabilityPending(layer: StackLayerDto): boolean {
   if (isMgParkBase(layer.parentBranch)) return false;
   return layer.mergeable == null && !!layer.headSha && layer.mergeableHeadSha === layer.headSha &&
     layer.mergeableState?.toLowerCase() === "pending";
@@ -274,17 +287,17 @@ export function currentLayer(stack: StackDto): StackLayerDto | undefined {
     (land && land.prNumber > 0 && land.state !== "merged" && land.state !== "closed" ? land : undefined);
 }
 
-export const RESTACK_FAILED = "Restack failed";
+const RESTACK_FAILED = "Restack failed";
 
-export const SEAM_REVIEW_NOT_RUNNING = "Seam review pending, no review running";
+const SEAM_REVIEW_NOT_RUNNING = "Seam review pending, no review running";
 
-export const VORTEX_REVIEW_OUT_OF_QUOTA = "Review skipped, out of review quota";
+const VORTEX_REVIEW_OUT_OF_QUOTA = "Review skipped, out of review quota";
 
-export const SEAM_REVIEW_STUCK = "Seam review stuck in reviewing, no review running";
+const SEAM_REVIEW_STUCK = "Seam review stuck in reviewing, no review running";
 
-export const SEAM_REREVIEW_NOT_RUNNING = "Seam re-review pending, no review running";
+const SEAM_REREVIEW_NOT_RUNNING = "Seam re-review pending, no review running";
 
-export const SEAM_VERDICT_STALE = "Seam verdict is for an older head, no review running";
+const SEAM_VERDICT_STALE = "Seam verdict is for an older head, no review running";
 
 const STUCK_SEAM_REASONS: readonly StackBlockerReason[] = ["seam_review_stuck", "seam_rereview_not_running", "seam_verdict_stale"];
 
@@ -305,9 +318,9 @@ function vortexChangesRequestedAtHead(layer: StackLayerDto): boolean {
   return vortexFindingsRestAtHead(layer) && layer.reviewStatus === "changes_requested";
 }
 
-export const CYCLONE_NOT_RUN_ATTENTION_MS = 30 * 60_000;
+const CYCLONE_NOT_RUN_ATTENTION_MS = 30 * 60_000;
 
-export const CYCLONE_NOT_RUN_REASON = "not_run";
+const CYCLONE_NOT_RUN_REASON = "not_run";
 
 function cycloneNotRunAtHead(layer: StackLayerDto, nowMs: number): boolean {
   const review = layer.vortexReview;
@@ -342,6 +355,7 @@ const CYCLONE_HANDOFF_WORDS: Readonly<Record<string, string>> = {
   unsupported_language: "the findings are in a language Cyclone does not patch",
   policy_owner_changed: "the stack's owner changed while the patch was queued",
   patch_job_lost: "Cyclone's patch job was lost before it finished",
+  run_deadline: "Cyclone's patch ran past its time limit and stopped without pushing",
   pr_state_unavailable: "Cyclone could not read the PR's state, so it pushed nothing",
   left_for_human: "Cyclone did not patch these findings and pushed nothing",
   hold: "the review told Cyclone to hold, so it did not patch these findings",
@@ -414,7 +428,7 @@ export function autoFixCiActive(stack: StackDto, layer: StackLayerDto): boolean 
 
 export const CI_DID_NOT_FINISH_BLOCKER = "CI did not finish — left for a person";
 
-export function pendingCiLeftForPerson(stack: StackDto, layer: StackLayerDto): boolean {
+function pendingCiLeftForPerson(stack: StackDto, layer: StackLayerDto): boolean {
   return layer.ciStatus === "pending" && layer.checks?.cancelledOnly === true &&
     sameHead(layer.checks.namedRunsCompleteHeadSha, layer.headSha) && !isLandPrLayer(stack, layer) &&
     sameHead(layer.cycloneCiHandoff?.headSha, layer.headSha);
@@ -440,6 +454,7 @@ const CYCLONE_HELD_FINDINGS_REASONS: readonly string[] = [
   "pr_state_unavailable",
   "vortex_patch_cap",
   "patch_job_lost",
+  "run_deadline",
   "unsupported_language",
   "credits_exhausted",
   "no_billing",
@@ -470,19 +485,19 @@ function quotaSkippedReview(layer: StackLayerDto): boolean {
     sameHead(review.head_sha, layer.headSha);
 }
 
-export const VORTEX_AUTO_REVIEW_OFF = "Vortex auto-review is off, so this head was not reviewed";
+const VORTEX_AUTO_REVIEW_OFF = "Vortex auto-review is off, so this head was not reviewed";
 
-export const VORTEX_BILLING_SKIPPED = "Vortex skipped this head: it could not confirm billing";
+const VORTEX_BILLING_SKIPPED = "Vortex skipped this head: it could not confirm billing";
 
-export const VORTEX_REVIEW_INCOMPLETE = "Vortex reviewed only part of this PR";
+const VORTEX_REVIEW_INCOMPLETE = "Vortex reviewed only part of this PR";
 
-export const VORTEX_IGNORED_AUTHOR = "Vortex skipped this head: the PR author is on the ignored authors list";
+const VORTEX_IGNORED_AUTHOR = "Vortex skipped this head: the PR author is on the ignored authors list";
 
-export const VORTEX_REPO_DISABLED = "Vortex skipped this head: reviews are turned off for this repository";
+const VORTEX_REPO_DISABLED = "Vortex skipped this head: reviews are turned off for this repository";
 
-export const VORTEX_RETRY_SCHEDULED = "Vortex hit a temporary error on this head and will retry by itself";
+const VORTEX_RETRY_SCHEDULED = "Vortex hit a temporary error on this head and will retry by itself";
 
-export const VORTEX_REVIEW_FAILED = "Review failed";
+const VORTEX_REVIEW_FAILED = "Review failed";
 
 const VORTEX_SKIP_BLOCKERS: Readonly<Record<string, string>> = {
   auto_review_off: VORTEX_AUTO_REVIEW_OFF,
@@ -492,7 +507,7 @@ const VORTEX_SKIP_BLOCKERS: Readonly<Record<string, string>> = {
   repo_disabled: VORTEX_REPO_DISABLED,
 };
 
-export function vortexRetryScheduled(layer: StackLayerDto): boolean {
+function vortexRetryScheduled(layer: StackLayerDto): boolean {
   const review = layer.vortexReview;
   const reason = review?.skip_reason?.trim();
   return (reason === "retry_scheduled" || reason === "post_delayed") && sameHead(review?.head_sha, layer.headSha);
@@ -633,6 +648,8 @@ function layerAttention(
       const landing = stack.unit.landingBlockReason?.trim();
       if (landing && !landGateIsPending(landing)) return hardBlock(landing, "land_gate");
     }
+    const stalled = stalledCycloneRun(layer, nowMs);
+    if (stalled) return hardBlock(cycloneStalledBlocker(stalled, nowMs), "cyclone_stalled");
     if (vortexFindingsLeftForPerson(stack, layer, nowMs)) return hardBlock(VORTEX_FINDINGS_NEED_PERSON, "vortex_findings_need_person");
   }
   if (!bounce || !kind || recoverable || !layer || queue.some((entry) => ["queued", "running", "waiting"].includes(entry.state))) return none;
@@ -648,6 +665,13 @@ function layerAttention(
 }
 
 const UNIT_ABANDONED_BLOCKER_PREFIX = "Review unit abandoned: based on ";
+
+export const CYCLONE_STALLED_PREFIX = "Cyclone stalled: ";
+
+function cycloneStalledBlocker(run: StackAgentRun, nowMs: number): string {
+  const minutes = Math.floor((nowMs - Date.parse(run.startedAt ?? "")) / 60_000);
+  return `${CYCLONE_STALLED_PREFIX}patching ${run.sha?.slice(0, 7) ?? "this PR"} for ${minutes}m with no push or result`;
+}
 
 function unitAbandonedUnder(stack: StackDto, layer: StackLayerDto): boolean {
   if (stack.unit?.state !== "abandoned") return false;
@@ -690,15 +714,15 @@ function switchedOffByAnotherActor(stack: StackDto): AutoLandOffReason | undefin
   return reason && AUTO_LAND_SWITCHED_OFF_BY[reason] ? reason : undefined;
 }
 
-export const AUTO_LAND_CI_PENDING_ATTENTION_MS = 45 * 60_000;
-export const AUTO_LAND_VORTEX_WAIT_ATTENTION_MS = 30 * 60_000;
-export const AUTO_LAND_PROMOTE_FAILED_ATTEMPTS = 3;
-export const AUTO_LAND_CI_FAILED_BLOCKER = "CI failed — Auto land reads a failing check on GitHub at this head";
+const AUTO_LAND_CI_PENDING_ATTENTION_MS = 45 * 60_000;
+const AUTO_LAND_VORTEX_WAIT_ATTENTION_MS = 30 * 60_000;
+const AUTO_LAND_PROMOTE_FAILED_ATTEMPTS = 3;
+const AUTO_LAND_CI_FAILED_BLOCKER = "CI failed — Auto land reads a failing check on GitHub at this head";
 const AUTO_LAND_CI_PENDING_PREFIX = "CI pending for ";
 const AUTO_LAND_VORTEX_WAIT_PREFIX = "No green Vortex review for ";
 const AUTO_LAND_PROMOTE_FAILED_PREFIX = "Promote failed ";
-export const AUTO_LAND_WAIT_ATTENTION_MS = 45 * 60_000;
-export const AUTO_LAND_CI_UNREADABLE_ATTENTION_MS = 10 * 60_000;
+const AUTO_LAND_WAIT_ATTENTION_MS = 45 * 60_000;
+const AUTO_LAND_CI_UNREADABLE_ATTENTION_MS = 10 * 60_000;
 const AUTO_LAND_CI_UNREADABLE_PREFIX = "Mergestorm cannot read ";
 const AUTO_LAND_WAITED_PREFIX = "Auto land has waited ";
 const AUTO_LAND_MEMBERS_REMAINING_PREFIX = "The land PR cannot be queued: ";
@@ -763,7 +787,7 @@ function lastPrLayer(stack: StackDto): StackLayerDto | undefined {
   return stack.layers.filter((layer) => layer.prNumber > 0).sort((a, b) => b.position - a.position)[0];
 }
 
-export function autoLandWaitLayer(stack: StackDto): StackLayerDto | undefined {
+function autoLandWaitLayer(stack: StackDto): StackLayerDto | undefined {
   const wait = armedAutoLandWait(stack);
   if (!wait) return undefined;
   const candidate = currentLayer(stack);
@@ -830,7 +854,7 @@ function autoLandWaitNamed(stack: StackDto, layer: StackLayerDto, nowMs: number)
     : null;
 }
 
-export const MERGE_QUEUE_STALL_ATTENTION_MS = 45 * 60_000;
+const MERGE_QUEUE_STALL_ATTENTION_MS = 45 * 60_000;
 const MERGE_QUEUE_STALLED_PREFIX = "Merge queue stuck: ";
 const LIVE_QUEUE_STATES: readonly string[] = ["queued", "running", "waiting"];
 
@@ -958,16 +982,16 @@ export function conflictRepairSteps(branch: string, liveParent: string | null): 
 
 export const BREEZE_BRANCH_PREFIX = "breeze/";
 
-export function isBreezeBranch(branch: string | null | undefined): boolean {
+function isBreezeBranch(branch: string | null | undefined): boolean {
   return typeof branch === "string" && branch.startsWith(BREEZE_BRANCH_PREFIX);
 }
 
-export function breezeConflictRepairSteps(branch: string, liveParent: string | null, prNumber: number): string {
+function breezeConflictRepairSteps(branch: string, liveParent: string | null, prNumber: number): string {
   if (!liveParent) return conflictRepairSteps(branch, liveParent);
   return `${branch} is a Breeze branch: Breeze updates it only with open_pull_request, which publishes single-parent commits, so it cannot publish a merge of ${liveParent}. Rebase it in the Breeze chat that opened #${prNumber}: fetch ${liveParent} with fetch_repository, git rebase origin/${liveParent}, resolve the conflicts, run the tests, then call open_pull_request again. Or have Cyclone resolve it: cyclone_start with task resolve_conflicts and pr_number ${prNumber}. Do not retarget the PR base.`;
 }
 
-export function restackFailedRepairSteps(
+function restackFailedRepairSteps(
   branch: string,
   liveParent: string | null,
   failure: { kind: string; detail?: string | null },
@@ -1110,6 +1134,18 @@ export function stackRepair(
       steps: `Auto land is off for this stack (autoLandOff reason ${offReason}: ${AUTO_LAND_SWITCHED_OFF_BY[offReason] ?? offReason}), so nothing will enqueue it and it will not land by itself. No bounce did this and nothing in the layers needs a change: do not patch or push for it. A person or another agent session may have switched it off on purpose, so do not turn Auto land back on yourself. Tell the human that Auto land is off and why, and turn it back on (mg stack set ${stack.id} --auto-land on) only when they say so.`,
     };
   }
+  if (reason === "cyclone_stalled") {
+    const run = stalledCycloneRun(layer, nowMs);
+    return {
+      kind: "cyclone_stalled",
+      prNumber: layer.prNumber,
+      headSha: layer.headSha ?? null,
+      branch: layer.branch,
+      runSha: run?.sha ?? null,
+      since: run?.startedAt ?? null,
+      steps: `Cyclone has been patching #${layer.prNumber}${run?.sha ? ` (a run for ${run.sha.slice(0, 7)})` : ""} since ${run?.startedAt ?? "an unknown time"} without pushing or finishing, past the ${STACK_AGENT_PATCHING_STALE_MS / 60_000}-minute limit, so the watch no longer waits for it. Patch the open Vortex findings at ${layer.headSha ?? "the head"} yourself: verify each one against a checkout of ${layer.branch}, fix the real ones with the smallest patch and an ordinary push, and dismiss the ones you judge wrong with mg dismiss. If ${layer.branch} moves before you push, Cyclone pushed after all: re-read stack_status instead of pushing. Tell the human Cyclone stalled on this PR.`,
+    };
+  }
   if (reason === "vortex_failed") {
     return {
       kind: "vortex_failed",
@@ -1229,7 +1265,7 @@ export function stackRepair(
   return null;
 }
 
-export const LAND_PR_MISSING_PREFIX = "No open land PR for ";
+const LAND_PR_MISSING_PREFIX = "No open land PR for ";
 
 function landPrMissing(
   stack: StackDto,

@@ -19,29 +19,28 @@ import {
   type MemoryScope,
 } from "../memory-api.js";
 
-export const MEMORY_USAGE = [
+const MEMORY_USAGE = [
   "usage: mergestorm memory list [--scope user|repo] [--repo <owner/repo>] [--kind <kind>] [--json]",
   "       mergestorm memory search <query> [--repo <owner/repo>] [--limit <1-20>] [--json]",
-  "       mergestorm memory add <text> --kind <kind> [--repo <owner/repo>] [--json]",
+  "       mergestorm memory add <text> --kind <kind> [--repo <owner/repo>] [--keep-both] [--json]",
   "       mergestorm memory update <id> <text> [--kind <kind>] [--json]",
   "       mergestorm memory delete <id> [--json]",
   "       mergestorm memory mode [off|on_request|all] [--json]",
   `  kind is one of ${MEMORY_KINDS.join(", ")}. With --repo a memory is about that repository, otherwise about you.`,
+  "  add refuses text close to a memory you have; update that memory, or add again with --keep-both when they are different things.",
   "  search covers your memories, and with --repo that repository's memories and standing rules too.",
   "  Inside a Breeze chat (MERGESTORM_CHAT_ID), add and search follow that chat's memory setting.",
 ].join("\n");
 
-export const MEMORY_SUBCOMMANDS = ["list", "search", "add", "update", "delete", "mode"] as const;
-
 const REPO = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
 
-type Flags = { positional: string[]; json: boolean; repo?: string; kind?: MemoryKind; scope?: MemoryScope; limit?: number };
+type Flags = { positional: string[]; json: boolean; keepBoth?: boolean; repo?: string; kind?: MemoryKind; scope?: MemoryScope; limit?: number };
 
 function usage(message?: string): CommandError {
   return new CommandError(message ? `${message}\n${MEMORY_USAGE}` : MEMORY_USAGE, REVIEW_EXIT.usage, "usage");
 }
 
-export function parseMemoryFlags(args: string[], allowed: ReadonlyArray<"repo" | "kind" | "scope" | "limit">): Flags {
+export function parseMemoryFlags(args: string[], allowed: ReadonlyArray<"repo" | "kind" | "scope" | "limit" | "keep-both">): Flags {
   const flags: Flags = { positional: [], json: false };
   const value = (flag: string, raw: string | undefined): string => {
     if (raw === undefined || raw.startsWith("--")) throw usage(`${flag} needs a value`);
@@ -51,6 +50,7 @@ export function parseMemoryFlags(args: string[], allowed: ReadonlyArray<"repo" |
     const arg = args[i]!;
     const name = arg.startsWith("--") ? arg.slice(2) : null;
     if (arg === "--json") flags.json = true;
+    else if (name === "keep-both" && allowed.includes("keep-both")) flags.keepBoth = true;
     else if (name === "repo" && allowed.includes("repo")) {
       const repo = value(arg, args[++i]).replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/i, "");
       if (!REPO.test(repo)) throw usage("--repo needs <owner/repo>");
@@ -134,12 +134,12 @@ export async function cmdMemory(args: string[], deps: MemoryDeps = {}): Promise<
   }
 
   if (sub === "add" || sub === "save" || sub === "remember") {
-    const flags = parseMemoryFlags(rest, ["repo", "kind"]);
+    const flags = parseMemoryFlags(rest, ["repo", "kind", "keep-both"]);
     const text = flags.positional.join(" ").trim();
     if (!text) throw usage("add needs the text to remember");
     if (!flags.kind) throw usage(`add needs --kind (${MEMORY_KINDS.join(", ")})`);
-    const saved = await api.saveMemory({ text, kind: flags.kind, ...(flags.repo ? { repo: flags.repo } : {}), chatId }, await config());
-    emit(flags.json, saved, () => [saved.merged ? `That matched memory ${saved.id}, which now says this.` : `Saved to memory as ${saved.id}.`]);
+    const saved = await api.saveMemory({ text, kind: flags.kind, ...(flags.repo ? { repo: flags.repo } : {}), chatId, ...(flags.keepBoth ? { keepBoth: true } : {}) }, await config());
+    emit(flags.json, saved, () => [saved.merged ? `Memory ${saved.id} already says this.` : `Saved to memory as ${saved.id}.`]);
     return;
   }
 

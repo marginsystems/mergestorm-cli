@@ -25,7 +25,7 @@ import { buildConfigRows, canBrowse, openTabsBrowser } from "./browse.js";
 export const SETTINGS_FLAGS = BEARER_SETTINGS_FLAGS;
 
 type IgnoreBotOperation = { action: "add" | "remove"; login: string } | { action: "clear" };
-export type RepoSettingsScope = { owner: string; repo: string; patch: RepoSettingsPatch };
+type RepoSettingsScope = { owner: string; repo: string; patch: RepoSettingsPatch };
 export type SettingsArgs = {
   json: boolean;
   patch: SettingsPatch;
@@ -42,9 +42,10 @@ const REPO_FLAG_LABELS: Readonly<Record<RepoSettingsKey, string>> = {
   merge_queue_batch_size: "Merge queue batch size (pull requests)",
   merge_queue_lands_alone_paths: "Merge queue lands-alone paths",
   merge_queue_overdrive: "Merge queue overdrive",
+  issue_review_enabled: "Vortex issue reviews",
 };
 
-export function parsePathsFlagValue(flag: string, value: string | undefined, defaults: readonly string[]): string[] {
+function parsePathsFlagValue(flag: string, value: string | undefined, defaults: readonly string[]): string[] {
   if (value === undefined || value === "" || value.startsWith("--")) {
     throw new CommandError(`${flag} takes a comma-separated list of path patterns, default, or none.`, 2, "usage");
   }
@@ -100,7 +101,7 @@ function parseRepoSettingsArgs(slug: string, args: string[]): SettingsArgs {
     }
     if (!(REPO_SETTINGS_KEYS as readonly string[]).includes(key)) {
       throw new CommandError(
-        `${flag} is an account setting. With --repo only --auto-patch, --auto-review, --auto-land, --merge-queue-batch, --merge-queue-batch-size, --merge-queue-lands-alone and --merge-queue-overdrive can be set.`,
+        `${flag} is an account setting. With --repo only --auto-patch, --auto-review, --auto-land, --merge-queue-batch, --merge-queue-batch-size, --merge-queue-lands-alone, --merge-queue-overdrive and --issue-review can be set.`,
         2,
         "usage",
       );
@@ -138,7 +139,7 @@ function repoSettingWords(value: boolean | number | string[] | null): string {
   return value ? "on" : "off";
 }
 
-export function formatRepoSettingsLines(repos: readonly RepoSettings[]): string[] {
+function formatRepoSettingsLines(repos: readonly RepoSettings[]): string[] {
   if (repos.length === 0) return ["  No repositories are connected to this account."];
   const width = Math.max(...Object.values(REPO_FLAG_LABELS).map((label) => label.length));
   return repos.flatMap((entry) => [

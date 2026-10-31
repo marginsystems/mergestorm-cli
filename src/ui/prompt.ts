@@ -72,7 +72,7 @@ export function promptRedrawPrefix(inputRow: number): string {
  */
 export const HEADER_REDRAW_PREFIX = `\u001b[H${clearDown}`;
 
-export const DROPDOWN_MAX_COMMAND_ROWS = 8;
+const DROPDOWN_MAX_COMMAND_ROWS = 8;
 
 export function formatSlashLabel(spec: CommandSpec): string {
   const extra = spec.aliases?.length
@@ -81,12 +81,12 @@ export function formatSlashLabel(spec: CommandSpec): string {
   return `/${spec.name}${extra}`;
 }
 
-export function specMatchesTerm(spec: CommandSpec, term: string): boolean {
+function specMatchesTerm(spec: CommandSpec, term: string): boolean {
   if (spec.name.toLowerCase().startsWith(term)) return true;
   return (spec.aliases ?? []).some((alias) => alias.toLowerCase().startsWith(term));
 }
 
-export function slashToken(buffer: string): string | null {
+function slashToken(buffer: string): string | null {
   if (!buffer.startsWith("/")) return null;
   return buffer.slice(1).split(/\s/, 1)[0]!.toLowerCase();
 }
@@ -162,7 +162,7 @@ export function overlayReserve(
 }
 
 /** Pad so the slash list sits just above the input bar (Claude-style). */
-export function padOverlayRows(rows: OverlayRow[], reserve: number): OverlayRow[] {
+function padOverlayRows(rows: OverlayRow[], reserve: number): OverlayRow[] {
   const max = Math.max(0, reserve);
   if (max === 0) return [];
   const visible = rows.slice(0, max);
@@ -285,11 +285,11 @@ export function dropdownOverlayRows(
 }
 
 /** Input prefix glyph (U+203A), kept as an escape so editors can't mangle it. */
-export const INPUT_PREFIX_GLYPH = "\u203a";
+const INPUT_PREFIX_GLYPH = "\u203a";
 /** Cells the `> ` prefix occupies before the buffer. */
-export const INPUT_PREFIX_CELLS = 2;
+const INPUT_PREFIX_CELLS = 2;
 /** Padding inside the boxed input frame. */
-export const INPUT_BOX_PADDING = 1;
+const INPUT_BOX_PADDING = 1;
 
 export interface InputWindow {
   /** First buffer cell shown. */

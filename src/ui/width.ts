@@ -8,7 +8,7 @@
 const SGR_PATTERN = /\u001b\[[0-9;]*m/g;
 const SGR_SPLIT = /(\u001b\[[0-9;]*m)/;
 
-export function stripSgr(str: string): string {
+function stripSgr(str: string): string {
   return str.replace(SGR_PATTERN, "");
 }
 
@@ -131,7 +131,7 @@ function isWide(cp: number): boolean {
 }
 
 /** Cells for one code point on its own (no cluster context). */
-export function codePointWidth(cp: number): number {
+function codePointWidth(cp: number): number {
   if (cp === 0xfe0f) return 0; // VS16 handled at cluster level
   const ch = String.fromCodePoint(cp);
   if (ZERO_WIDTH_RE.test(ch)) return 0;
@@ -169,7 +169,7 @@ function* graphemes(text: string): Generator<string> {
  * base (a ZWJ family emoji is 2, not 6); VS16 promotes a text-style symbol
  * to emoji presentation (2 cells); a cluster of nothing but marks is 0.
  */
-export function graphemeWidth(cluster: string): number {
+function graphemeWidth(cluster: string): number {
   let width = 0;
   let vs16 = false;
   for (const ch of cluster) {

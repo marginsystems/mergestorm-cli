@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.64`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.66`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.64                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.66                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
 │     ▝▀▀▘      review a diff · usage for tabs · /help for all commands        │
-│       ▀       New in v0.3.64: Memory commands and Overdrive merge batches    │
+│       ▀       New in v0.3.66: `issue wait`; submit needs an approved issue   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -78,11 +78,14 @@ One-shot subcommands work the same inside the shell and from argv (scripts/CI):
 ```
 mergestorm                      Interactive shell (TTY only)
 mergestorm shell                Explicit shell entry
-mergestorm login                Sign in via browser; stores an API key in ~/.mergestorm/config.json
+mergestorm login                Sign in via browser and add the account (up to 3 saved)
 mergestorm login --start        Print a sign-in URL and code, then exit (agents)
 mergestorm login --finish       Store the API key once the code from --start is approved
 mergestorm login --key          Paste an existing API key instead (headless/CI)
-mergestorm logout               Remove the stored API key
+mergestorm logout               Log out of the active account (or --account <name>) and revoke its key
+mergestorm account list [--json]  Saved accounts (up to 3), the active one marked
+mergestorm account use <name>   Make <name> the active account
+mergestorm account remove <name>  Log out of <name> and revoke its key
 mergestorm review [base] [head] Review git diff base...head (default: origin/HEAD or main or master)
 mergestorm status <job_id>      Fetch a review job (envelope; --json --wait --timeout)
 mergestorm status               Tabbed Status / Usage / Jobs browser (TTY)
@@ -90,10 +93,11 @@ mergestorm credits [--json]     Usage panel (bar + last 5 jobs); tabbed browser 
 mergestorm jobs [n] [--json]    Recent review jobs (default 10, max 50)
 mergestorm branches [n]         Recently reviewed branches (arrow-pick on TTY)
 mergestorm chain [slug]         Branch review-chain timeline (default: current branch)
-mergestorm whoami [--json]      Key prefix, plan, API base, config path
+mergestorm whoami [--json]      Active account, key prefix, plan, API base, config path
 mergestorm skill install --claude|--cursor|--agents  Copy the Mergestorm skills into this repo
 mergestorm thread <slug>        Jobs in a review thread
-mergestorm issue create --title <t>  Open a GitHub issue through Mergestorm, no `gh` (`--body`, `--body-file`, `--label`, `--repo`)
+mergestorm issue create --title <t>  Open a GitHub issue through Mergestorm, no `gh` (`--body`, `--body-file`, `--label`, `--repo`, `--wait`)
+mergestorm issue wait <n>       Wait for the Vortex issue review; exits 0 once approved, 4 with points to answer
 mergestorm stack create [name]  New local stack layer (optional `--onto` / `--trunk` / `--extend`)
 mergestorm stack submit         Push layers, open PRs (`gh`), register via adopt (optional `--extend`, `--server-side`)
 mergestorm stack publish        Publish the current branch through Mergestorm with no GitHub credentials (`--base <branch> --extend` to stack, `--status` to read it)
@@ -170,25 +174,39 @@ mg stack publish --status               # absent | pushed | opened | registered
 ```
 
 - **Issues too.** `mg issue create` opens the issue a PR needs through the same Surge App, with existing labels only. Running it again with the same title returns the issue it already opened. Put `Fixes #<n>` in the commit message; `stack submit` carries it into the PR body.
+- **Issue reviews first.** On a repository with Vortex issue reviews on, Vortex reviews each new issue before any PR. `mg issue wait <n>` (or `mg issue create --wait`) waits for that review: it exits 0 once the issue is approved, or exits 4 with the numbered points to answer. Answer them in a comment on the issue and wait again; Vortex re-reviews on each reply, up to four rounds, after which a person approves with an issue comment whose first line is `mergestorm-issue: approve`. `stack submit` refuses to open a PR whose tip commit links an issue that is not approved yet, or links no issue at all while issue reviews are on.
 - **Exact contents.** Every commit travels with its Git tree SHA and the whole content of each changed file, so binaries, deletions, renames, executable bits and symlinks arrive unchanged. Mergestorm moves the branch only when GitHub builds the same tree, and `mg` checks the returned tree against your local branch.
 - **Never overwrites surprises.** `mg` looks at the branch on GitHub first. If its files match one of your local commits, only the commits after that one are appended. If they match none (someone else pushed, or you rebased), `mg` stops with `head_changed`; `--replace-head <sha>` replaces exactly that head and nothing else. Mergestorm refuses `main`, `master`, the default branch, protected branches and its own `mg-stack-*`, `mg-park-*` and `mq-batch-*` branches.
 - **Safe to run again.** After a timeout or an error, run the same command again. It finds the branch, pull request and stack it already made and finishes the missing step; it does not create duplicates.
 - **Read-only home directory.** `mg` keeps the saved login and the local stack state of `stack create` / `stack submit` under `~/.mergestorm`. Where the home directory cannot be written, set `MERGESTORM_HOME` to a writable directory (outside the repository) and every command uses that instead. `MERGESTORM_API_KEY` supplies the key without `mg login`.
+- **Several accounts.** `mg login` keeps up to three accounts signed in; `mg account use <name>` picks the active one, and `--account <name>` or `MERGESTORM_ACCOUNT` runs one command as another.
 - **Limits.** 20 commits, 500 changed paths, 2 MiB a file and 8 MiB in total per publication. Submodules and merge commits are refused with the path or the reason. `stack submit --server-side` publishes the first two layers of a stack; a third layer needs a park freeze, which this mode does not create, so add it once the first two are registered.
 
 If local authoring state is stale or malformed, use `mg stack reset --force`; this clears only pre-submit CLI state and never deletes branches, PRs, or registered stacks.
 
 ### `login`
 
-Runs a browser device-authorization flow: prints a short code, opens `https://mergestorm.ai/cli/auth`, and — once you approve — mints and stores an API key in `~/.mergestorm/config.json` (mode `600`), or in `$MERGESTORM_HOME/config.json` when `MERGESTORM_HOME` is set. No key copy/paste needed.
+Runs a browser device-authorization flow: prints a short code, opens `https://mergestorm.ai/cli/auth`, and — once you approve — mints an API key and saves it as an account in `~/.mergestorm/config.json` (mode `600`), or in `$MERGESTORM_HOME/config.json` when `MERGESTORM_HOME` is set. No key copy/paste needed. The account is named by its GitHub login (or its email when there is no GitHub login), as `mg whoami` reports it, and becomes the active account.
+
+Up to three accounts can stay logged in at once. `mg login` again adds another account, or replaces the key of an account that is already saved. A fourth login is refused with the three names; remove one first. A login saved by an older `mg` migrates on first read into an account named by its key prefix (`msk_live_abcd`), and takes its real name the next time a command such as `mg whoami` reaches the API. The file also keeps the active account's key at its top level, so an older `mg` or `mergestorm-mcp` on the same machine keeps signing in as the active account.
 
 For headless or CI environments, use `mergestorm login --key` to paste an existing `msk_live_…` key (create one on the dashboard [Settings → API](https://mergestorm.ai/settings#api)). On a TTY the paste is hidden (not echoed); the CLI verifies the key with the API before saving.
 
 For an agent, which cannot sit in a prompt while a person signs in, use two steps. `mergestorm login --start` prints the URL and the short code and exits. Give both to the account owner, who opens [mergestorm.ai/cli/auth](https://mergestorm.ai/cli/auth) on any device, signs in, and approves the code. Then `mergestorm login --finish` stores the API key. The code lasts 10 minutes, and `--finish` can be run again if it is interrupted before the approval.
 
+### `account`
+
+```bash
+mg account list            # saved accounts, the active one marked ● (--json for machines)
+mg account use work        # make "work" the active account for every later command
+mg account remove work     # log "work" out: revoke its API key and drop it
+```
+
+Every command runs as the active account. To run one command as another saved account without switching, pass `--account <name>` anywhere on the command line (`mg --account work stack submit`, `mg whoami --account work`), or set `MERGESTORM_ACCOUNT=<name>`; the flag wins over the variable, and both win over the active account. An unknown name stops the command and lists the saved accounts. `MERGESTORM_API_KEY` still overrides every saved account. The `mergestorm-mcp` server reads the same store, so `MERGESTORM_ACCOUNT` in its environment picks the account it serves.
+
 ### `logout`
 
-Removes `~/.mergestorm/config.json` (or `$MERGESTORM_HOME/config.json` when `MERGESTORM_HOME` is set) so the stored key is no longer used.
+Logs out of the active account (or the one named with `--account`): revokes that API key on the server when it can, then drops the account from the store. The next saved account, if any, becomes active. `mg account remove <name>` does the same for a named account.
 
 ### `review [base] [head]`
 
@@ -237,7 +255,8 @@ Require a logged-in key and API support for `GET /api/v1/me` and `GET /api/v1/re
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MERGESTORM_API_KEY` | API key (overrides the stored config) | — |
+| `MERGESTORM_API_KEY` | API key (overrides every saved account) | — |
+| `MERGESTORM_ACCOUNT` | Saved account to run as; `--account <name>` on a command wins over it | the active account |
 | `MERGESTORM_API_URL` | API base URL | `https://api.mergestorm.ai` |
 | `MERGESTORM_HOME` | Directory for the saved login and local stack state, for machines whose home directory is read-only | `~/.mergestorm` |
 | `NO_COLOR` | Disable ANSI colors | — |

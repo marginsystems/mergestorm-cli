@@ -20,6 +20,9 @@ import {
   parseRetryAfterSeconds,
   patchSettings,
   setStackPolicy,
+  getIssueReview,
+  pollIssueReview,
+  IssueReviewTimeoutError,
 } from "./api.js";
 import type { Config } from "./config.js";
 import { CommandError } from "./errors.js";
@@ -605,6 +608,20 @@ test("openStackPull keeps today's Cyclone sentence for a refusal without a Surge
   }
 });
 
+test("adoptStack surfaces a Surge installation held by another Mergestorm account under its own code", async () => {
+  const message =
+    "The Mergestorm Surge GitHub App is installed on acme/widgets, but its installation on GitHub ohnodev is linked to a different Mergestorm account. Sign in to the Mergestorm account that connected GitHub ohnodev, or connect GitHub ohnodev to this account from Agents.";
+  mockFetch(400, { error: "surge_other_account", reason: "surge_other_account", installed_on: "ohnodev", message });
+  await assert.rejects(
+    () => adoptStack("acme", "widgets", 42, cfg),
+    (err: unknown) =>
+      err instanceof CommandError &&
+      err.code === "surge_other_account" &&
+      err.reason === "surge_other_account" &&
+      err.message === message,
+  );
+});
+
 test("adoptStack carries the Surge reason with the server's Surge message, and no reason without one", async () => {
   mockFetch(400, { error: "cyclone_not_connected", reason: "surge_not_connected", message: "Install the Mergestorm Surge GitHub App to adopt this pull request. Surge is the write app: adopt, restack, the merge queue, and Auto land all run through it. Install it from Agents." });
   await assert.rejects(
@@ -844,4 +861,131 @@ test("apiFetch names the Breeze chat from MERGESTORM_CHAT_ID, unless the config 
     else process.env.MERGESTORM_CHAT_ID = before;
   }
   assert.deepEqual(seen, ["6a1f0000-0000-4000-8000-000000000001", null, null]);
+});
+
+const ISSUE_TARGET = { owner: "acme", repo: "widgets", number: 12 };
+
+function issueReviewBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    owner: "acme",
+    repo: "widgets",
+    number: 12,
+    enabled: true,
+    state: "needs_answers",
+    approvedBy: null,
+    round: 2,
+    maxRounds: 4,
+    verdict: "needs_answers",
+    summary: "Two questions first.",
+    points: [{ kind: "question", text: "Which repo?" }, { kind: "risk", text: "Rollback?" }],
+    commentUrl: "https://github.com/acme/widgets/issues/12#issuecomment-1",
+    next: "Answer both points in a comment on #12.",
+    ...overrides,
+  };
+}
+
+test("getIssueReview reads the review state of the issue in that repository", async () => {
+  const urls: string[] = [];
+  originalFetch ??= globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    urls.push(String(input));
+    return new Response(JSON.stringify(issueReviewBody()), { status: 200 });
+  };
+  assert.deepEqual(await getIssueReview(cfg, ISSUE_TARGET), issueReviewBody());
+  assert.deepEqual(urls, ["https://api.example.test/api/v1/stacks/issues/12/review?owner=acme&repo=widgets"]);
+});
+
+test("getIssueReview returns null when the server predates issue reviews", async () => {
+  mockFetch(404, { error: "not_found" });
+  assert.equal(await getIssueReview(cfg, ISSUE_TARGET), null);
+});
+
+test("getIssueReview refuses an unknown state and keeps the server message and rate limits", async () => {
+  mockFetch(200, issueReviewBody({ state: "maybe" }));
+  await assert.rejects(() => getIssueReview(cfg, ISSUE_TARGET), /Failed to read the issue review of acme\/widgets#12 \(HTTP 200\)/);
+  mockFetch(503, { message: "GitHub is down" });
+  await assert.rejects(
+    () => getIssueReview(cfg, ISSUE_TARGET),
+    (err) => err instanceof CommandError && err.code === "issue_review_unavailable" && err.message === "GitHub is down",
+  );
+  mockFetch(429, { error: "rate_limited" }, { "retry-after": "4" });
+  await assert.rejects(
+    () => getIssueReview(cfg, ISSUE_TARGET),
+    (err) => err instanceof CommandError && err.code === "rate_limited" && err.exitCode === 7,
+  );
+});
+
+test("pollIssueReview polls every interval while the review is pending and retries a 5xx", async () => {
+  const responses = [
+    { status: 200, body: issueReviewBody({ state: "pending", verdict: null, points: [] }) },
+    { status: 502, body: { message: "bad gateway" } },
+    { status: 200, body: issueReviewBody({ state: "approved", approvedBy: "vortex", verdict: "ready", points: [] }) },
+  ];
+  originalFetch ??= globalThis.fetch;
+  globalThis.fetch = async () => {
+    const next = responses.shift()!;
+    return new Response(JSON.stringify(next.body), { status: next.status });
+  };
+  const sleeps: number[] = [];
+  let clock = 0;
+  const status = await pollIssueReview(cfg, ISSUE_TARGET, {
+    now: () => clock,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      clock += ms;
+    },
+  });
+  assert.equal(status?.state, "approved");
+  assert.equal(status?.approvedBy, "vortex");
+  assert.deepEqual(sleeps, [10_000, 10_000]);
+});
+
+test("pollIssueReview returns a settled state at once and times out with the last pending read", async () => {
+  mockFetch(200, issueReviewBody());
+  assert.equal((await pollIssueReview(cfg, ISSUE_TARGET, { sleep: async () => assert.fail("no sleep") }))?.state, "needs_answers");
+  mockFetch(200, issueReviewBody({ state: "pending", round: 1 }));
+  let clock = 0;
+  await assert.rejects(
+    () =>
+      pollIssueReview(cfg, ISSUE_TARGET, {
+        timeoutMs: 25_000,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+      }),
+    (err) =>
+      err instanceof IssueReviewTimeoutError &&
+      err.exitCode === 5 &&
+      err.lastStatus.state === "pending" &&
+      err.lastStatus.round === 1,
+  );
+});
+
+test("adoptStack and openStackPull turn a 409 issue_not_approved into the blocking issues and what to do", async () => {
+  const refusal = {
+    error: "issue_not_approved",
+    message: "Vortex has not approved #12.",
+    issues: [issueReviewBody()],
+  };
+  const expected = [
+    "Vortex has not approved #12.",
+    "acme/widgets#12: needs_answers (round 2 of 4)",
+    "  Two questions first.",
+    "  1. [question] Which repo?",
+    "  2. [risk] Rollback?",
+    "  Review: https://github.com/acme/widgets/issues/12#issuecomment-1",
+    "  Next: Answer both points in a comment on #12.",
+    "  Reply in a comment on #12, then run `mergestorm issue wait 12`.",
+  ].join("\n");
+  mockFetch(409, refusal);
+  await assert.rejects(
+    () => adoptStack("acme", "widgets", 42, cfg),
+    (err) => err instanceof CommandError && err.code === "issue_not_approved" && err.message === expected,
+  );
+  mockFetch(409, refusal);
+  await assert.rejects(
+    () => openStackPull(cfg, PULL_INPUT),
+    (err) => err instanceof CommandError && err.code === "issue_not_approved" && err.message === expected,
+  );
 });

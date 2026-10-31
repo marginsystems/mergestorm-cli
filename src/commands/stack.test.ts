@@ -1,51 +1,19 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { CommandError } from "../errors.js";
-import {
-  createPrs,
-  createPrsOnRepository,
-  findOpenPrNumber,
-  GraphqlBlockedError,
-  type GhResult,
-  type GithubApi,
-  type GraphqlRunner,
-} from "../gh.js";
-import type { StackMeta } from "../stack-meta.js";
-import {
-  assertMayParentOntoRegistered,
-  buildStackListLines,
-  cmdStack,
-  cmdStackStatus,
-  cmdStackWatch,
-  cmdStackCreate,
-  cmdStackSet,
-  cmdStackPublish,
-  cmdStackSubmit,
-  openStackWatch,
-  findRegisteredParent,
-  openPolicyPatch,
-  parseAdoptTarget,
-  parseStackAdoptArgs,
-  parseStackCreateArgs,
-  parseStackPublishArgs,
-  parseStackResetArgs,
-  parseStackSetArgs,
-  parseStackSubmitArgs,
-  requireStackId,
-  stackPolicyLabels,
-  stackRepairLine,
-  stackSetSummary,
-  stackShapeLine,
-  type StackSubmitDeps,
-  type StackCreateDeps,
-} from "./stack.js";
-import type { StackDto, StackPublication, StackPublicationRequest } from "../api.js";
-import type { RunStackWatchOptions, StackWatchLoopResult } from "../stack-watch-loop.js";
+import { test, describe } from "node:test";
+import { CommandError, REVIEW_EXIT } from "../errors.js";
+import { createPrs, createPrsOnRepository, findOpenPrNumber, GraphqlBlockedError, type GhResult, type GithubApi, type GraphqlRunner } from "../gh.js";
+import { type StackMeta } from "../stack-meta.js";
+import { assertMayParentOntoRegistered, buildStackListLines, cmdStack, cmdStackStatus, cmdStackWatch, cmdStackCreate, cmdStackSet, cmdStackPublish, cmdStackSubmit, openStackWatch, findRegisteredParent, openPolicyPatch, parseAdoptTarget, parseStackAdoptArgs, parseStackCreateArgs, parseStackPublishArgs, parseStackResetArgs, parseStackSetArgs, parseStackSubmitArgs, requireStackId, stackPolicyLabels, stackRepairLine, stackSetSummary, stackShapeLine, type StackSubmitDeps, type StackCreateDeps, cmdStackWait } from "./stack.js";
+import { type IssueReviewStatus, type StackDto, type StackPublication, type StackPublicationRequest } from "../api.js";
+import { type RunStackWatchOptions, type StackWatchLoopResult } from "../stack-watch-loop.js";
 import { publishBranchServerSide, type ServerPublishInput, type ServerPublishResult } from "../server-publish.js";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createServer } from "node:http";
+import { StackWatchError, StackWatchTimeoutError, type StackWatchEnvelope } from "../stack-watch.js";
+import { STACK_WATCH_NOT_DONE_SENTENCE, stackWatchObligation } from "../stack-watch-obligation.js";
 
 const SAMPLE_META: StackMeta = {
   version: 2,
@@ -137,6 +105,7 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
       events.push(`claim:${input.heads.join(",")}`);
     },
     listStacks: async () => [],
+    issueReviewsEnabled: async () => false,
     adoptStack: async (owner, repo, prNumber, cfg, policy) => {
       events.push(`adopt:${prNumber}`);
       adoptCalls += 1;
@@ -761,6 +730,125 @@ test("cmdStackSubmit happy path pushes, creates PR, adopts, clears local state",
   assert.equal(h.saved.length, 1);
   // Active stack cleared — no layers left to submit.
   assert.equal(h.saved[0]!.stacks[0]!.layers.length, 0);
+});
+
+function issueStatus(number: number, overrides: Partial<IssueReviewStatus> = {}): IssueReviewStatus {
+  return {
+    owner: "acme",
+    repo: "widgets",
+    number,
+    enabled: true,
+    state: "approved",
+    approvedBy: "vortex",
+    round: 1,
+    maxRounds: 4,
+    verdict: "ready",
+    summary: null,
+    points: [],
+    commentUrl: null,
+    next: "",
+    ...overrides,
+  };
+}
+
+test("cmdStackSubmit opens the PR once every issue a new layer links is approved or reviews are off", async () => {
+  const asked: number[] = [];
+  const h = makeSubmitHarness({
+    loadStackMeta: async () => chainMeta(["feat/a", "feat/b"]),
+    tipCommitMessage: (branch) => (branch === "feat/a" ? "A\n\nFixes #12\n" : "B\n\nCloses #13\n"),
+    getIssueReview: async (_cfg, target) => {
+      asked.push(target.number);
+      return issueStatus(target.number, target.number === 13 ? { state: "off", enabled: false } : {});
+    },
+    issueReviewsEnabled: async () => {
+      throw new Error("settings must not be read when every layer links an issue");
+    },
+  });
+  await cmdStackSubmit([], h.deps);
+  assert.deepEqual(asked, [12, 13]);
+  assert.equal(h.createPrCalls, 2);
+});
+
+test("cmdStackSubmit refuses a layer whose linked issue is not approved and pushes nothing", async () => {
+  const h = makeSubmitHarness({
+    tipCommitMessage: () => "A\n\nFixes #12\n",
+    getIssueReview: async (_cfg, target) =>
+      issueStatus(target.number, {
+        state: "needs_answers",
+        approvedBy: null,
+        verdict: "needs_answers",
+        points: [{ kind: "question", text: "Which repo?" }],
+        commentUrl: "https://github.com/acme/widgets/issues/12#issuecomment-1",
+        next: "Answer the point in a comment on #12.",
+      }),
+  });
+  const out = await captureStackOutput(() => cmdStackSubmit([], h.deps));
+  assert.ok(out.error instanceof CommandError);
+  assert.equal(out.error.code, "issue_not_approved");
+  assert.equal(
+    out.error.message,
+    [
+      "Vortex has not approved the linked issue yet; refusing to open the pull request.",
+      "acme/widgets#12: needs_answers (round 1 of 4)",
+      "  1. [question] Which repo?",
+      "  Review: https://github.com/acme/widgets/issues/12#issuecomment-1",
+      "  Next: Answer the point in a comment on #12.",
+      "  Reply in a comment on #12, then run `mergestorm issue wait 12`.",
+    ].join("\n"),
+  );
+  assert.deepEqual(h.pushCalls, []);
+  assert.deepEqual(h.events, []);
+});
+
+test("cmdStackSubmit with issue reviews on refuses a new layer that links no issue", async () => {
+  const h = makeSubmitHarness({ issueReviewsEnabled: async () => true });
+  const out = await captureStackOutput(() => cmdStackSubmit([], h.deps));
+  assert.ok(out.error instanceof CommandError);
+  assert.equal(out.error.code, "issue_not_approved");
+  assert.match(out.error.message, /feat\/layer-1 links no issue/);
+  assert.match(out.error.message, /add `Fixes #N`/);
+  assert.deepEqual(h.pushCalls, []);
+});
+
+test("cmdStackSubmit does not gate a layer whose PR is already open", async () => {
+  const h = makeSubmitHarness({
+    findOpenPrNumber: () => 99,
+    getIssueReview: async () => {
+      throw new Error("an open PR must not be gated");
+    },
+    issueReviewsEnabled: async () => {
+      throw new Error("an open PR must not be gated");
+    },
+  });
+  await cmdStackSubmit([], h.deps);
+  assert.equal(h.adoptCalls, 1);
+});
+
+test("cmdStackSubmit passes with a warning on a server without issue reviews and fails closed when it cannot ask", async () => {
+  const older = makeSubmitHarness({ tipCommitMessage: () => "A\n\nFixes #12\n", getIssueReview: async () => null });
+  const passed = await captureStackOutput(() => cmdStackSubmit([], older.deps));
+  assert.equal(passed.error, null);
+  assert.ok(passed.stdout.some((line) => line.includes("does not check issue reviews yet")));
+  assert.equal(older.createPrCalls, 1);
+
+  const unreachable = makeSubmitHarness({
+    tipCommitMessage: () => "A\n\nFixes #12\n",
+    getIssueReview: async () => {
+      throw new CommandError("Request timed out after 8000ms", 1, "api_timeout");
+    },
+  });
+  const failed = await captureStackOutput(() => cmdStackSubmit([], unreachable.deps));
+  assert.ok(failed.error instanceof CommandError);
+  assert.match(failed.error.message, /Could not verify the Vortex reviews of the linked issues \(Request timed out after 8000ms\); refusing to submit/);
+  assert.deepEqual(unreachable.pushCalls, []);
+
+  const noSettings = makeSubmitHarness({
+    issueReviewsEnabled: async () => {
+      throw new Error("fetch failed");
+    },
+  });
+  const closed = await captureStackOutput(() => cmdStackSubmit([], noSettings.deps));
+  assert.match(String((closed.error as Error | null)?.message), /Could not verify the Vortex reviews/);
 });
 
 test("cmdStackSubmit claims new heads before opening their PRs so Work never paints them unadopted", async () => {
@@ -1977,6 +2065,7 @@ test("stack submit --server-side and stack publish reach GitHub only through Mer
         listStacks: async () => [],
         findStackPull: async () => null,
         claimStackPulls: async () => {},
+        issueReviewsEnabled: async () => false,
         publishBranchServerSide: publish,
       }),
     );
@@ -2053,4 +2142,322 @@ test("stack watch prints MS-WATCH ATTENTION failed when it cannot start, so a lo
     writeMarker: (line) => crashed.push(line),
   }), /boom/);
   assert.deepEqual(crashed, [`MS-WATCH ATTENTION failed stack=${stackId} error="boom"`]);
+});
+
+describe("stack-wait", { concurrency: false }, () => {
+  const stackId = "11111111-1111-4111-8111-111111111111";
+  const envelope: StackWatchEnvelope = {
+    issues: [], currentCandidate: null, assessment: "available", busy: [], actAfter: null, waitingOn: [], agents: null,
+    schema: "mergestorm.stack_watch/v1", status: "attention", stackId,
+    blocker: "Conflict", bounceKind: null, prNumber: 12, headSha: "head",
+    cursor: { stackId, enrolledHeadSha: "enrolled" },
+    repair: {
+      kind: "restack_conflict", prNumber: 12, headSha: "head", branch: "feat/c", liveParent: "mg-stack-79",
+      files: ["src/a.ts"], steps: "Merge mg-stack-79 into feat/c",
+    },
+    landGatePending: null,
+    watch: stackWatchObligation({ stackId, terminal: null, cursor: { enrolledHeadSha: "enrolled" }, status: "attention" }),
+  };
+
+  test("stack wait prints one human summary and defaults to 45 seconds", async (t) => {
+    const log = t.mock.method(console, "log", () => {});
+    const signal = new AbortController().signal;
+    await cmdStackWait([stackId], { loadConfig: async () => ({}), pollStackWatch: async (_cfg, id, opts) => {
+      assert.equal(id, stackId);
+      assert.equal(opts?.timeoutMs, 45_000);
+      assert.equal(opts?.signal, signal);
+      return envelope;
+    }, signal });
+    assert.equal(log.mock.calls.length, 1);
+    const lines = String(log.mock.calls[0]!.arguments[0]).split("\n");
+    assert.equal(lines[0], `Stack ${stackId} · attention · blocked: #12 Conflict`);
+    assert.equal(lines[1], "Repair #12 restack_conflict (files: src/a.ts): Merge mg-stack-79 into feat/c");
+    assert.equal(lines[2], `Only with a confirmed host notification that resumes this task: run mg stack watch ${stackId} as a background command (notify on MS-WATCH (ATTENTION|LANDED)), then end your turn`);
+    assert.equal(lines[3], `Or poll: mg stack wait ${stackId} --json (MCP: stack_wait {"stack_id":"${stackId}","enrolled_head_sha":"enrolled","timeout_s":45})`);
+    assert.equal(lines.at(-1), STACK_WATCH_NOT_DONE_SENTENCE);
+  });
+
+  test("stack wait text for a landed stack ends with the done message, not the obligation", async (t) => {
+    const log = t.mock.method(console, "log", () => {});
+    const landed = { ...envelope, status: "waiting" as const, blocker: null, repair: null,
+      watch: stackWatchObligation({ stackId, terminal: "landed" }) };
+    await cmdStackWait([stackId], { loadConfig: async () => ({}), pollStackWatch: async () => landed });
+    const lines = String(log.mock.calls[0]!.arguments[0]).split("\n");
+    assert.equal(lines.at(-1), landed.watch.message);
+    assert.doesNotMatch(lines.join("\n"), /Your task is not done/);
+  });
+
+  test("stack wait --json prints the envelope and forwards timeout", async (t) => {
+    const log = t.mock.method(console, "log", () => {});
+    await cmdStackWait(["--timeout", "12", stackId, "--json"], { loadConfig: async () => ({}), pollStackWatch: async (_cfg, _id, opts) => {
+      assert.equal(opts?.timeoutMs, 12_000);
+      return envelope;
+    } });
+    assert.deepEqual(JSON.parse(log.mock.calls[0].arguments[0]), envelope);
+  });
+
+  test("stack wait accepts an equals-form timeout", async (t) => {
+    const log = t.mock.method(console, "log", () => {});
+    await cmdStackWait([stackId, "--timeout=12"], {
+      loadConfig: async () => ({}),
+      pollStackWatch: async (_cfg, _id, opts) => {
+        assert.equal(opts?.timeoutMs, 12_000);
+        return envelope;
+      },
+    });
+    assert.match(log.mock.calls[0].arguments[0], /attention/);
+  });
+
+  test("stack wait timeout prints waiting envelope and throws review_timeout exit 5", async (t) => {
+    const log = t.mock.method(console, "log", () => {});
+    const last = { ...envelope, status: "waiting" as const, blocker: null };
+    await assert.rejects(() => cmdStackWait([stackId, "--json"], {
+      loadConfig: async () => ({}),
+      pollStackWatch: async () => { throw new StackWatchTimeoutError(last); },
+    }), (err: unknown) => err instanceof CommandError && err.exitCode === REVIEW_EXIT.timeout && err.code === "review_timeout");
+    assert.equal(REVIEW_EXIT.timeout, 5);
+    assert.deepEqual(JSON.parse(log.mock.calls[0].arguments[0]), last);
+  });
+
+  test("stack wait maps exhausted 429 retries to exit 7 with a rate-limited envelope", async (t) => {
+    const log = t.mock.method(console, "log", () => {});
+    const last = { ...envelope, status: "rate_limited" as const, blocker: null };
+    await assert.rejects(() => cmdStackWait([stackId, "--json"], {
+      loadConfig: async () => ({}),
+      pollStackWatch: async () => { throw new StackWatchError("Stack poll failed (HTTP 429)", last, undefined, 12); },
+    }), (err: unknown) => err instanceof CommandError &&
+      err.exitCode === REVIEW_EXIT.rate_limited && err.code === "rate_limited" &&
+      err.retryAfterSeconds === 12);
+    const printed = JSON.parse(log.mock.calls[0].arguments[0]);
+    assert.equal(printed.status, "rate_limited");
+    assert.equal(printed.retry_after_seconds, 12);
+  });
+
+  test("stack wait prints a failed envelope before rethrowing the poll error", async (t) => {
+    const log = t.mock.method(console, "log", () => {});
+    const issues = [{ prNumber: 12, headSha: null, blocker: "Conflict", bounceKind: null }];
+    const last = { ...envelope, status: "failed" as const, assessment: "unavailable" as const, issues };
+    const error = new StackWatchError("Stack poll failed", last);
+    await assert.rejects(() => cmdStackWait([stackId, "--json"], {
+      loadConfig: async () => ({}),
+      pollStackWatch: async () => { throw error; },
+    }), (err: unknown) => err === error);
+    assert.deepEqual(JSON.parse(log.mock.calls[0].arguments[0]), last);
+  });
+
+  test("cmdStack routes wait and validates arguments", async () => {
+    for (const args of [[], [stackId, "extra"], [stackId, "--other"], [stackId, "--timeout"],
+      ...["-1", "301", "NaN", "Infinity", ""].map(value => [stackId, "--timeout", value])]) {
+      await assert.rejects(() => cmdStack(["wait", ...args]), /usage: mergestorm stack wait/);
+    }
+  });
+
+  test("CLI zero timeout reads one snapshot and exits successfully", async (t) => {
+    const routes: string[] = [];
+    const server = createServer((request, response) => {
+      routes.push(request.url!);
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify(request.url!.includes("/queue") ? { entries: [] } : { stacks: [{ id: stackId, layers: [] }] }));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => server.close());
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const child = spawn(process.execPath, ["--import", "tsx/esm",
+      new URL("../cli.ts", import.meta.url).pathname,
+      "stack", "wait", stackId, "--json", "--timeout", "0"], {
+        env: { PATH: process.env.PATH, HOME: process.env.HOME, MERGESTORM_API_KEY: "test", MERGESTORM_API_URL: `http://127.0.0.1:${address.port}` },
+    });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", chunk => { stdout += chunk; });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    const status = await new Promise<number | null>((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
+    assert.equal(status, 0, stderr);
+    const data = JSON.parse(stdout);
+    assert.equal(data.schema, "mergestorm.stack_watch/v1");
+    assert.equal(data.status, "waiting");
+    assert.equal(data.assessment, "available");
+    assert.deepEqual(data.issues, []);
+    assert.equal(data.stackId, stackId);
+    assert.deepEqual(routes, [`/api/v1/stacks/enrich?stackId=${stackId}`, `/api/v1/stacks/queue?stackId=${stackId}`]);
+  });
+
+  async function runCli(port: number, args: string[]) {
+    const child = spawn(process.execPath, ["--import", "tsx/esm",
+      new URL("../cli.ts", import.meta.url).pathname, ...args], {
+        env: { PATH: process.env.PATH, HOME: process.env.HOME, MERGESTORM_API_KEY: "test", MERGESTORM_API_URL: `http://127.0.0.1:${port}` },
+    });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", chunk => { stdout += chunk; });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    const status = await new Promise<number | null>((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
+    return { status, stdout, stderr };
+  }
+
+  async function serve(t: { after: (fn: () => void) => void }, body: (url: string) => unknown) {
+    const server = createServer((request, response) => {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify(body(request.url!)));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => server.close());
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    return address.port;
+  }
+
+  const openLayer = {
+    branch: "feat/a", parentBranch: "main", prNumber: 7, position: 1, state: "clean", headSha: "a".repeat(40),
+    ciStatus: "success", reviewStatus: "none", checks: null, vortexStatus: null, cycloneStatus: null,
+    conflictDetail: null, lastRestackedSha: null, mergeable: true, mergeableState: "clean", mergeableHeadSha: "a".repeat(40),
+  };
+
+  test("CLI --json writes exactly one JSON document to stdout when the wait times out; the reason goes to stderr", async (t) => {
+    const port = await serve(t, url => url.includes("/queue")
+      ? { entries: [] }
+      : { stacks: [{ id: stackId, trunkBranch: "main", archivedAt: null, layers: [openLayer] }] });
+    const { status, stdout, stderr } = await runCli(port, ["stack", "wait", stackId, "--json", "--timeout", "1"]);
+    assert.equal(status, REVIEW_EXIT.timeout);
+    const data = JSON.parse(stdout);
+    assert.equal(data.status, "waiting");
+    assert.equal(data.watch.done, false);
+    assert.equal(data.watch.reason, "open");
+    assert.deepEqual(data.watch.next.args, { stack_id: stackId, enrolled_head_sha: "a".repeat(40), timeout_s: 45 });
+    assert.match(data.watch.message, /^This stack is not landed\. Your task is not done\. Call stack_wait again with this cursor\./);
+    assert.match(stderr, /Timed out waiting for stack/);
+    assert.doesNotMatch(stdout, /Timed out/);
+  });
+
+  test("CLI --json reports a vanished stack as one JSON document with watch done: not_found", async (t) => {
+    const port = await serve(t, url => url.includes("/queue") ? { entries: [] } : { stacks: [] });
+    const { status, stdout, stderr } = await runCli(port, ["stack", "wait", stackId, "--json", "--timeout", "0"]);
+    assert.equal(status, 1);
+    const data = JSON.parse(stdout);
+    assert.equal(data.status, "failed");
+    assert.deepEqual({ done: data.watch.done, reason: data.watch.reason, next: data.watch.next },
+      { done: true, reason: "not_found", next: null });
+    assert.match(stderr, /Stack not found or not owned by the current user/);
+  });
+
+  test("CLI text wait on an open stack prints the not-done sentence last", async (t) => {
+    const port = await serve(t, url => url.includes("/queue")
+      ? { entries: [] }
+      : { stacks: [{ id: stackId, trunkBranch: "main", archivedAt: null, layers: [openLayer] }] });
+    const { status, stdout } = await runCli(port, ["stack", "wait", stackId, "--timeout", "0"]);
+    assert.equal(status, 0);
+    assert.equal(stdout.trimEnd().split("\n").at(-1), STACK_WATCH_NOT_DONE_SENTENCE);
+  });
+});
+
+describe("stack-watch", { concurrency: false }, () => {
+  const stackId = "11111111-1111-4111-8111-111111111111";
+
+  function fakeRun(result: Partial<StackWatchLoopResult>, seen: RunStackWatchOptions[] = []) {
+    return async (_cfg: unknown, id: string, opts: RunStackWatchOptions = {}) => {
+      assert.equal(id, stackId);
+      seen.push(opts);
+      return { outcome: "landed", exitCode: 0, envelope: null, ...result } as StackWatchLoopResult;
+    };
+  }
+
+  test("stack watch passes until, every ignore, max, head, and json to the watcher", async () => {
+    const seen: RunStackWatchOptions[] = [];
+    await cmdStackWatch([stackId, "--until", "landed", "--ignore", "Seam", "--ignore=Draft", "--max", "90",
+      "--head", "ABCDEF1", "--json"], { loadConfig: async () => ({}), runStackWatch: fakeRun({}, seen) });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]!.until, "landed");
+    assert.deepEqual(seen[0]!.ignore, ["Seam", "Draft"]);
+    assert.equal(seen[0]!.maxMs, 90 * 60_000);
+    assert.equal(seen[0]!.json, true);
+    assert.deepEqual(seen[0]!.cursor, { stackId, enrolledHeadSha: "abcdef1" });
+  });
+
+  test("stack watch defaults to until attention with no cursor and no limit", async () => {
+    const seen: RunStackWatchOptions[] = [];
+    await cmdStackWatch([stackId], { loadConfig: async () => ({}), runStackWatch: fakeRun({}, seen) });
+    assert.equal(seen[0]!.until, "attention");
+    assert.deepEqual(seen[0]!.ignore, []);
+    assert.equal(seen[0]!.maxMs, undefined);
+    assert.equal(seen[0]!.cursor, undefined);
+    assert.equal(seen[0]!.json, false);
+  });
+
+  test("stack watch maps attention and repeated failure to exit 3", async () => {
+    for (const outcome of ["attention", "failed"] as const) {
+      await assert.rejects(() => cmdStackWatch([stackId], {
+        loadConfig: async () => ({}), runStackWatch: fakeRun({ outcome, exitCode: 3 }),
+      }), (err: unknown) => err instanceof CommandError && err.exitCode === 3 && err.code === "stack_attention");
+    }
+  });
+
+  test("stack watch maps --max expiry to exit 5", async () => {
+    await assert.rejects(() => cmdStackWatch([stackId, "--max", "1"], {
+      loadConfig: async () => ({}), runStackWatch: fakeRun({ outcome: "timeout", exitCode: 5 }),
+    }), (err: unknown) => err instanceof CommandError && err.exitCode === REVIEW_EXIT.timeout && err.code === "review_timeout");
+  });
+
+  test("cmdStack routes watch and validates arguments", async () => {
+    for (const args of [[], [stackId, "extra"], [stackId, "--other"], [stackId, "--until"], [stackId, "--until", "forever"],
+      [stackId, "--ignore"], [stackId, "--ignore", " "], [stackId, "--max", "0"], [stackId, "--max", "NaN"],
+      [stackId, "--head", "not-a-sha"], ["not-a-stack-id"]]) {
+      await assert.rejects(() => cmdStack(["watch", ...args]), /usage: mergestorm stack watch/);
+    }
+  });
+
+  test("CLI stack watch prints one MS-WATCH ATTENTION line and exits 3 on a conflicted layer", async (t) => {
+    const head = "a".repeat(40);
+    const server = createServer((request, response) => {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify(request.url!.includes("/queue") ? { entries: [] } : { stacks: [{
+        id: stackId, trunkBranch: "main", archivedAt: null, layers: [{
+          branch: "feat/a", parentBranch: "main", prNumber: 7, position: 1, state: "conflict", headSha: head,
+          ciStatus: "success", reviewStatus: "none", checks: null, vortexStatus: null, cycloneStatus: null,
+          conflictDetail: null, lastRestackedSha: null, mergeable: false, mergeableState: "dirty", mergeableHeadSha: head,
+        }],
+      }] }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => server.close());
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const child = spawn(process.execPath, ["--import", "tsx/esm", new URL("../cli.ts", import.meta.url).pathname,
+      "stack", "watch", stackId], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, MERGESTORM_API_KEY: "test", MERGESTORM_API_URL: `http://127.0.0.1:${address.port}` },
+    });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const status = await new Promise<number | null>((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
+    assert.equal(status, 3, stderr);
+    assert.equal(stdout, `MS-WATCH ATTENTION pr=7 head=${head} blocker="Conflict" repair=restack_conflict\n`);
+    assert.match(stderr, /needs attention; it is not landed/);
+  });
+
+  test("CLI stack watch --json writes exactly one JSON document to stdout and the marker to stderr", async (t) => {
+    const server = createServer((request, response) => {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify(request.url!.includes("/queue") ? { entries: [] } : { stacks: [] }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => server.close());
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const child = spawn(process.execPath, ["--import", "tsx/esm", new URL("../cli.ts", import.meta.url).pathname,
+      "stack", "watch", stackId, "--json"], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, MERGESTORM_API_KEY: "test", MERGESTORM_API_URL: `http://127.0.0.1:${address.port}` },
+    });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const status = await new Promise<number | null>((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
+    assert.equal(status, 3, stderr);
+    const document = JSON.parse(stdout);
+    assert.equal(document.stackId, stackId);
+    assert.equal(document.watch.done, true);
+    assert.equal(document.watch.reason, "not_found");
+    assert.doesNotMatch(stdout, /MS-WATCH/);
+    assert.doesNotMatch(stderr, /MS-WATCH LANDED/);
+    assert.match(stderr, /landing is unconfirmed/);
+    assert.match(stderr, new RegExp(`^MS-WATCH ATTENTION stack=${stackId} reason=not_found$`, "m"));
+  });
 });

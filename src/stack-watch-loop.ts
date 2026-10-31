@@ -12,18 +12,18 @@ import {
   type StackWatchEnvelope,
 } from "./stack-watch.js";
 
-export const STACK_WATCH_MARKER = "MS-WATCH";
+const STACK_WATCH_MARKER = "MS-WATCH";
 export const STACK_WATCH_EXIT = { landed: 0, attention: 3, timeout: 5 } as const;
 export const STACK_WATCH_SLICE_MS = 300_000;
-export const STACK_WATCH_RECHECK_MS = 30_000;
-export const STACK_WATCH_FAILED_RETRY_MS = 15_000;
-export const STACK_WATCH_RATE_LIMIT_WAIT_MS = 30_000;
-export const STACK_WATCH_TRANSIENT_WINDOW_MS = 15 * 60_000;
-export const STACK_WATCH_TRANSIENT_MAX_WAIT_MS = 60_000;
+const STACK_WATCH_RECHECK_MS = 30_000;
+const STACK_WATCH_FAILED_RETRY_MS = 15_000;
+const STACK_WATCH_RATE_LIMIT_WAIT_MS = 30_000;
+const STACK_WATCH_TRANSIENT_WINDOW_MS = 15 * 60_000;
+const STACK_WATCH_TRANSIENT_MAX_WAIT_MS = 60_000;
 
 const TRANSIENT_WATCH_FAILURE = /HTTP (?:408|429|5\d\d)|snapshot missing|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|connection/i;
 
-export function isTransientWatchFailure(err: unknown): boolean {
+function isTransientWatchFailure(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (err instanceof LandedQueueReadError) return err.status === 408 || err.status === 429 || (err.status >= 500 && err.status <= 599);
   if (isTransientReviewPollError(err)) return true;
@@ -33,7 +33,7 @@ export function isTransientWatchFailure(err: unknown): boolean {
 
 export type StackWatchUntil = "attention" | "landed";
 
-export type StackWatchOutcome = "attention" | "landed" | "failed" | "timeout" | "aborted";
+type StackWatchOutcome = "attention" | "landed" | "failed" | "timeout" | "aborted";
 
 export type RunStackWatchOptions = {
   until?: StackWatchUntil;
@@ -58,21 +58,21 @@ export type StackWatchLoopResult = {
 
 const ELAPSED_MINUTES = /\b\d+m\b/g;
 
-export function blockerWithoutElapsedMinutes(blocker: string | null | undefined): string {
+function blockerWithoutElapsedMinutes(blocker: string | null | undefined): string {
   return (blocker ?? "").replace(ELAPSED_MINUTES, "Nm");
 }
 
-export function stackWatchAttentionKey(envelope: Pick<StackWatchEnvelope, "prNumber" | "headSha" | "blocker">): string {
+function stackWatchAttentionKey(envelope: Pick<StackWatchEnvelope, "prNumber" | "headSha" | "blocker">): string {
   return `${envelope.prNumber ?? ""}|${envelope.headSha ?? ""}|${blockerWithoutElapsedMinutes(envelope.blocker)}`;
 }
 
-export function stackWatchAttentionLine(envelope: StackWatchEnvelope): string {
+function stackWatchAttentionLine(envelope: StackWatchEnvelope): string {
   const restart = envelope.cursor.bounceId
     ? ` restart=${JSON.stringify(stackWatchBackgroundCommand(envelope.stackId, envelope.cursor))}` : "";
   return `${STACK_WATCH_MARKER} ATTENTION pr=${envelope.prNumber ?? "none"} head=${envelope.headSha ?? "none"} blocker=${JSON.stringify(envelope.blocker ?? "")} repair=${envelope.repair?.kind ?? "none"}${restart}`;
 }
 
-export function stackWatchLandedLine(envelope: StackWatchEnvelope): string {
+function stackWatchLandedLine(envelope: StackWatchEnvelope): string {
   return `${STACK_WATCH_MARKER} LANDED stack=${envelope.stackId} reason=${envelope.watch.reason}`;
 }
 
@@ -80,7 +80,7 @@ export function stackWatchFailedLine(stackId: string, message: string): string {
   return `${STACK_WATCH_MARKER} ATTENTION failed stack=${stackId} error=${JSON.stringify(message)}`;
 }
 
-export function stackWatchTimeoutLine(stackId: string, maxMs: number): string {
+function stackWatchTimeoutLine(stackId: string, maxMs: number): string {
   return `${STACK_WATCH_MARKER} TIMEOUT stack=${stackId} after=${Math.round(maxMs / 60_000)}m`;
 }
 

@@ -1,5 +1,5 @@
 /** Mergestorm CLI requires Node 22+ (matches package.json engines). */
-export const MIN_NODE_MAJOR = 22;
+const MIN_NODE_MAJOR = 22;
 
 /** Parse major version from a Node version string (e.g. "22.22.3" → 22). */
 export function nodeMajor(version = process.versions.node): number {

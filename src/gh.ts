@@ -9,7 +9,7 @@ export type GhRunner = (args: string[], input?: string) => GhResult;
 
 export type GithubApi = "graphql" | "rest";
 
-export const GITHUB_API_ENV = "MERGESTORM_GITHUB_API";
+const GITHUB_API_ENV = "MERGESTORM_GITHUB_API";
 
 export function githubApiFromEnv(env: NodeJS.ProcessEnv = process.env): GithubApi {
   return env[GITHUB_API_ENV]?.trim().toLowerCase() === "rest" ? "rest" : "graphql";
@@ -128,7 +128,7 @@ function findOpenPrNumberViaGraphql(
   return firstPrNumber(res.stdout);
 }
 
-export function findOpenPrNumberViaRest(
+function findOpenPrNumberViaRest(
   owner: string,
   repo: string,
   headBranch: string,
@@ -194,7 +194,7 @@ type GraphqlSpawn = (
   options: { cwd: string; encoding: "utf8"; input: string },
 ) => GraphqlSpawnResult;
 
-export const CREATE_PR_BATCH_SIZE = 5;
+const CREATE_PR_BATCH_SIZE = 5;
 
 export function ghGraphql(
   request: GraphqlRequest,
@@ -339,7 +339,7 @@ function restErrorText(res: { stderr: string; stdout?: string }): string {
   return res.stderr;
 }
 
-export function createPrsViaRest(
+function createPrsViaRest(
   owner: string,
   repo: string,
   prs: readonly NewPr[],

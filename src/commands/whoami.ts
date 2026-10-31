@@ -1,9 +1,8 @@
-import { getMe } from "../api.js";
-import { apiBase, configPath, loadConfig, resolveApiKey } from "../config.js";
+import { accountLabel, getMe } from "../api.js";
+import { apiBase, configPath, listAccounts, loadConfig, resolveApiKey, settleAccountName } from "../config.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
 import { present } from "../ui/present.js";
-import { canBrowse, openTabsBrowser } from "./browse.js";
 
 export async function cmdWhoami(
   args: string[],
@@ -15,15 +14,17 @@ export async function cmdWhoami(
   if (!key) {
     throw new CommandError("Not logged in. Run `mergestorm login` (agents: `mergestorm login --start`, then `--finish`).");
   }
-  if (!asJson && canBrowse()) {
-    await openTabsBrowser("status");
-    return;
-  }
   const me = await getMe(cfg);
   if (!me) {
     throw new CommandError("Live account details unavailable. Could not verify account with /me.");
   }
+  const account = (await settleAccountName(cfg, me)) ?? accountLabel(me.account);
+  const accounts = (await listAccounts()).map((a) => a.name);
   const payload = {
+    account,
+    accounts,
+    github_login: me.account?.github_login ?? null,
+    email: me.account?.email ?? null,
     key_prefix: me.key.prefix,
     key_name: me.key.name ?? null,
     plan_key: me.plan_key ?? null,
@@ -41,9 +42,14 @@ export async function cmdWhoami(
     console.log(text);
     return;
   }
-  const lines = [
+  const lines = [`  Account  ${account ? ansi.bold(account) : "unknown (API too old to say)"}`];
+  lines.push(
     `  Key      ${ansi.bold(String(payload.key_prefix))}${payload.key_name ? ` (${payload.key_name})` : ""}`,
-  ];
+  );
+  const others = accounts.filter((name) => name !== account);
+  if (others.length > 0) {
+    lines.push(`  Others   ${others.join(", ")} ${ansi.dim("· mergestorm account use <name>")}`);
+  }
   if (payload.plan_key) {
     lines.push(`  Plan     ${payload.plan_label_key ?? payload.plan_key}`);
   }

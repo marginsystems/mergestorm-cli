@@ -10,7 +10,7 @@ import { CommandError, REVIEW_EXIT } from "../errors.js";
 import { stackWatchObligation, type StackWatchObligation } from "../stack-watch-obligation.js";
 import { parseAdoptTarget, withWatch } from "./stack.js";
 
-export const DISMISS_USAGE = [
+const DISMISS_USAGE = [
   "usage: mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id>",
   "         (--finding <id> [--finding <id>…] | --all) --reason <text> [--evidence <url>] [--json]",
   "       mergestorm dismiss <owner/repo>#<n> --head <sha> --review <id> --preview [--json]",
@@ -78,7 +78,7 @@ export function parseDismissArgs(args: string[]): ParsedDismissArgs {
   };
 }
 
-export function dismissWatch(result: PrFindingDismissResult): StackWatchObligation | null {
+function dismissWatch(result: PrFindingDismissResult): StackWatchObligation | null {
   if (!result.stack_id) return null;
   return stackWatchObligation({ stackId: result.stack_id, terminal: null, unread: true, freshCursor: true });
 }

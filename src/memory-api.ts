@@ -47,7 +47,7 @@ export function isMemoryScope(value: unknown): value is MemoryScope {
   return typeof value === "string" && (MEMORY_SCOPES as readonly string[]).includes(value);
 }
 
-const KNOWN_CODES = new Set<CommandErrorCode>(["invalid_input", "not_found", "memory_off", "memory_full", "memory_unavailable", "payload_too_large"]);
+const KNOWN_CODES = new Set<CommandErrorCode>(["invalid_input", "not_found", "memory_off", "memory_full", "memory_similar", "memory_unavailable", "payload_too_large"]);
 
 function memoryFailure(status: number, body: unknown, retryAfterSeconds: number | undefined, action: string): CommandError {
   const row = (body && typeof body === "object" ? body : {}) as { error?: unknown; message?: unknown };
@@ -81,8 +81,8 @@ export function searchMemories(input: { query: string; repo?: string; limit?: nu
   return call(cfg, `/api/v1/memories/search${query({ query: input.query, repo: input.repo, limit: input.limit, chat_id: input.chatId })}`, {}, [200], "Could not search memories");
 }
 
-export function saveMemory(input: { text: string; kind: MemoryKind; repo?: string | null; chatId?: string | null }, cfg?: Config): Promise<MemorySaved> {
-  const json = { text: input.text, kind: input.kind, ...(input.repo ? { repo: input.repo } : {}), ...(input.chatId ? { chat_id: input.chatId } : {}) };
+export function saveMemory(input: { text: string; kind: MemoryKind; repo?: string | null; chatId?: string | null; keepBoth?: boolean }, cfg?: Config): Promise<MemorySaved> {
+  const json = { text: input.text, kind: input.kind, ...(input.repo ? { repo: input.repo } : {}), ...(input.chatId ? { chat_id: input.chatId } : {}), ...(input.keepBoth ? { keep_both: true } : {}) };
   return call(cfg, "/api/v1/memories", { method: "POST", json }, [200, 201], "Could not save the memory");
 }
 

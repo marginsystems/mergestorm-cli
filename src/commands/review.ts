@@ -46,7 +46,7 @@ export const VORTEX_ROUTER_CAPS = { standard: 3, max: 5 } as const;
 /**
  * Pinnable L0 lanes only. Keep this list byte-identical to
  * `pinnableVortexSpecialistIds(VORTEX_SPECIALIST_IDS)` in review-findings
- * (`cli-lockstep.test.ts`). Do not add `governance` (round-gated) or `seam`
+ * (`index.test.ts`). Do not add `governance` (round-gated) or `seam`
  * (phase-gated). Those L1 lanes are not local pins.
  */
 export const VORTEX_SPECIALIST_IDS = [

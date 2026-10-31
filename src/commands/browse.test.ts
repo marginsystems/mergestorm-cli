@@ -24,6 +24,7 @@ afterEach(() => {
 
 test("buildStatusTabLines puts credits in the body, not a reachability bullet", () => {
   const lines = buildStatusTabLines({
+    account: "mark",
     keyPrefix: "msk_live_abcd",
     keyName: "laptop",
     plan: "maelstrom",

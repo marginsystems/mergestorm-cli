@@ -3,14 +3,18 @@ import { platform } from "node:os";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  accountNameFromMe,
   apiBase,
+  configFor,
   configPath,
-  loadConfig,
   mergestormHome,
-  saveConfig,
+  provisionalAccountName,
+  readStore,
+  saveAccount,
   type Config,
+  type NamedMe,
 } from "../config.js";
-import { devicePost, getMe, type MeResponse } from "../api.js";
+import { accountLabel, devicePost, getMe, revokeOwnKey, type AccountIdentity, type MeResponse } from "../api.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
 import { present } from "../ui/present.js";
@@ -54,6 +58,39 @@ export async function validateApiKey(cfg: Config): Promise<MeResponse> {
   }
 }
 
+async function loginConfig(): Promise<Config> {
+  const store = await readStore();
+  return configFor(store, store.activeAccount);
+}
+
+export function loggedInLine(account: AccountIdentity | null | undefined): string {
+  const label = accountLabel(account);
+  return label ? `Logged in as ${label}.` : "Logged in.";
+}
+
+async function storeLogin(
+  cfg: Config,
+  me: NamedMe | null,
+  opts: { minted: boolean },
+): Promise<string> {
+  const apiKey = cfg.apiKey ?? "";
+  const name = accountNameFromMe(me) ?? provisionalAccountName(apiKey);
+  const before = await readStore();
+  const replaced = Object.hasOwn(before.accounts, name) ? configFor(before, name) : undefined;
+  try {
+    await saveAccount(name, { apiKey, apiBase: cfg.apiBase }, { activate: true });
+  } catch (err) {
+    if (opts.minted && err instanceof CommandError && err.code === "account_limit") {
+      await revokeOwnKey(cfg, { timeoutMs: 8_000 });
+    }
+    throw err;
+  }
+  if (replaced?.apiKey && replaced.apiKey !== apiKey) {
+    await revokeOwnKey({ ...replaced, ignoreEnv: true }, { timeoutMs: 8_000 });
+  }
+  return name;
+}
+
 async function loginWithKey(): Promise<void> {
   // Always use muted secret input on TTY so the key never lands in
   // question()/history echo.
@@ -63,12 +100,12 @@ async function loginWithKey(): Promise<void> {
   if (!key.startsWith("msk_live_")) {
     throw new CommandError("Key should start with msk_live_");
   }
-  const cfg = await loadConfig();
-  cfg.apiKey = key;
-  const me = await validateApiKey(cfg);
-  await saveConfig(cfg);
+  const cfg = await loginConfig();
+  const candidate: Config = { apiKey: key, apiBase: apiBase(cfg), ignoreEnv: true };
+  const me = await validateApiKey(candidate);
+  const name = await storeLogin(candidate, me, { minted: false });
   const prefix = me.key?.prefix?.trim() || "msk_live_…";
-  await present("Login", [`  Verified ${prefix}… · saved to ${configPath()}`]);
+  await present("Login", [`  Logged in as ${name}. Verified ${prefix}… · saved to ${configPath()}`]);
 }
 
 type DeviceStart = {
@@ -191,12 +228,20 @@ async function pollDeviceLogin(
       );
     }
     if (poll.status === 200 && poll.body?.api_key) {
-      const next = await loadConfig();
-      next.apiKey = poll.body.api_key as string;
-      next.apiBase = pending.apiBase;
-      await saveConfig(next);
+      const minted: Config = { apiKey: poll.body.api_key as string, apiBase: pending.apiBase, ignoreEnv: true };
       await clearPendingLogin(pending.deviceCode);
-      await present("Login", [`  Logged in. Key saved to ${configPath()}`]);
+      let me: NamedMe | null = accountLabel(poll.body?.account as AccountIdentity | undefined)
+        ? { account: poll.body.account as AccountIdentity }
+        : null;
+      if (!me) {
+        try {
+          me = await getMe(minted, { timeoutMs: 8_000 });
+        } catch {
+          me = null;
+        }
+      }
+      const name = await storeLogin(minted, me, { minted: true });
+      await present("Login", [`  Logged in as ${name}. Key saved to ${configPath()}`]);
       return;
     }
     const err = poll.body?.error;
@@ -235,7 +280,7 @@ async function pollDeviceLogin(
 }
 
 async function loginStart(): Promise<void> {
-  const cfg = await loadConfig();
+  const cfg = await loginConfig();
   const base = apiBase(cfg);
   const pending = pendingFromStart(base, await startDeviceLogin(base));
   await savePendingLogin(pending);
@@ -285,7 +330,7 @@ export async function cmdLogin(
     return;
   }
 
-  const cfg = await loadConfig();
+  const cfg = await loginConfig();
   const base = apiBase(cfg);
   const pending = pendingFromStart(base, await startDeviceLogin(base));
 

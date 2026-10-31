@@ -1,6 +1,6 @@
 import { getMe, type MeResponse } from "../api.js";
 import { CommandError } from "../errors.js";
-import { keyDisplay, loadConfig, resolveApiKey } from "../config.js";
+import { keyDisplay, loadConfig, resolveApiKey, settleAccountName } from "../config.js";
 import { cliVersion } from "../version.js";
 import { ansi } from "./ansi.js";
 import {
@@ -243,6 +243,12 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.64": [
     "Memory commands and Overdrive merge batches",
   ],
+  "0.3.65": [
+    "Up to 3 accounts: `account use`, `--account <name>`",
+  ],
+  "0.3.66": [
+    "`issue wait`; submit needs an approved issue",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */
@@ -251,13 +257,14 @@ export type BannerState = {
   me: MeResponse | null;
   key: string | undefined;
   keyInvalid: boolean;
+  account?: string | null;
 };
 
 /** Full welcome, mid pane, or Claude-style short chrome that still shows the mark. */
 export type BannerDensity = "full" | "compact" | "mini" | "nano";
 
 /** `true` = compact. Strings pick the short-pane densities. */
-export type BannerVariant = boolean | "mini" | "nano";
+type BannerVariant = boolean | "mini" | "nano";
 
 /** Handle returned by {@link printBannerHeader}; `rows` reflows for a resize. */
 export type BannerHandle = {
@@ -281,7 +288,7 @@ function statusLine(state: BannerState): string {
   if (state.keyInvalid) {
     return `${ansi.dim("○")} API key invalid or revoked · type ${ansi.brightGreen("login")} to sign in again`;
   }
-  const display = state.me?.key.prefix ?? keyDisplay(state.key) ?? "msk_live_…";
+  const display = state.account ?? state.me?.key.prefix ?? keyDisplay(state.key) ?? "msk_live_…";
   if (!state.me) {
     return `${ansi.brightGreen("●")} ${ansi.bold(display)} ${ansi.dim("· account details unavailable")}`;
   }
@@ -426,7 +433,8 @@ export async function printBannerHeader(opts?: {
     }
   }
 
-  const state: BannerState = { version: cliVersion(), me, key, keyInvalid };
+  const account = me ? await settleAccountName(cfg, me) : cfg.account;
+  const state: BannerState = { version: cliVersion(), me, key, keyInvalid, account: account ?? null };
   if (opts?.paint !== false) {
     for (const line of buildBannerRows(state)) {
       console.log(line);

@@ -218,7 +218,7 @@ export async function devicePost(
   return { status: res.status, body: parsed };
 }
 
-export type SurgeUsage = {
+type SurgeUsage = {
   includedMinutes: number;
   usedMinutes: number;
   walletMinutes: number;
@@ -226,7 +226,17 @@ export type SurgeUsage = {
   pricePerMinuteUsd: number;
 };
 
+export type AccountIdentity = { github_login: string | null; email: string | null };
+
+export function accountLabel(account: AccountIdentity | null | undefined): string | null {
+  const login = account?.github_login?.trim();
+  if (login) return login;
+  const email = account?.email?.trim();
+  return email || null;
+}
+
 export type MeResponse = {
+  account?: AccountIdentity;
   key: { prefix: string; name: string; created_at: string; last_used_at: string | null };
   plan_key: string;
   plan_label_key?: string;
@@ -384,13 +394,14 @@ export const REPO_SETTINGS_SWITCH_KEYS = [
   "auto_land_default",
   "merge_queue_batch_enabled",
   "merge_queue_overdrive",
+  "issue_review_enabled",
 ] as const;
 
 export const REPO_SETTINGS_KEYS = [...REPO_SETTINGS_SWITCH_KEYS, "merge_queue_batch_size", "merge_queue_lands_alone_paths"] as const;
 
 export type RepoSettingsKey = (typeof REPO_SETTINGS_KEYS)[number];
 
-export type RepoSettingsValues = Record<(typeof REPO_SETTINGS_SWITCH_KEYS)[number], boolean | null> & {
+type RepoSettingsValues = Record<(typeof REPO_SETTINGS_SWITCH_KEYS)[number], boolean | null> & {
   merge_queue_batch_size: number | null;
   merge_queue_lands_alone_paths: string[] | null;
 };
@@ -535,6 +546,22 @@ export async function getMe(
       throw err;
     }
     return null;
+  }
+}
+
+export async function revokeOwnKey(
+  cfg: Config,
+  opts?: { timeoutMs?: number },
+): Promise<boolean> {
+  try {
+    const { status } = await apiFetch(cfg, "/api/v1/me/key", {
+      method: "DELETE",
+      timeoutMs: opts?.timeoutMs,
+    });
+    return status === 200;
+  } catch (err) {
+    if (err instanceof CommandError) return err.code === "auth_invalid";
+    return false;
   }
 }
 
@@ -774,6 +801,8 @@ export async function adoptStack(
       { retryAfterSeconds },
     );
   }
+  const issueRefusal = issueNotApprovedRefusal(status, body, owner, repo);
+  if (issueRefusal) throw issueRefusal;
   if (status !== 200) {
     const error =
       body && typeof body === "object" && "error" in body && typeof body.error === "string"
@@ -819,6 +848,7 @@ const INFRASTRUCTURE_REFUSAL_CODES = [
   "cyclone_not_connected",
   "cyclone_not_installed",
   "cyclone_permission_missing",
+  "surge_other_account",
 ] as const;
 
 function refusalReason(body: unknown): string | undefined {
@@ -826,10 +856,10 @@ function refusalReason(body: unknown): string | undefined {
   return typeof reason === "string" && plainServerText(reason).trim() ? plainServerText(reason).trim() : undefined;
 }
 
-export const SURGE_REFUSAL_FALLBACK =
+const SURGE_REFUSAL_FALLBACK =
   "Mergestorm Surge is not installed or not ready on this repository. Install it from Agents.";
 
-export function surgeRefusal(body: unknown): CommandError | null {
+function surgeRefusal(body: unknown): CommandError | null {
   if (!body || typeof body !== "object") return null;
   const refusal = body as { error?: unknown; message?: unknown; installUrl?: unknown };
   const reason = refusalReason(body);
@@ -846,7 +876,7 @@ export function surgeRefusal(body: unknown): CommandError | null {
   );
 }
 
-export const GITHUB_UNREADABLE_MESSAGE = "GitHub could not be read just now; try again.";
+const GITHUB_UNREADABLE_MESSAGE = "GitHub could not be read just now; try again.";
 
 function serverMessage(message: unknown): string | null {
   if (typeof message !== "string") return null;
@@ -888,9 +918,9 @@ export async function ensureUpperPark(
   };
 }
 
-export const SURGE_INSTALL_URL = "https://github.com/apps/mergestorm-surge/installations/new";
+const SURGE_INSTALL_URL = "https://github.com/apps/mergestorm-surge/installations/new";
 
-export function surgeNotInstalledMessage(owner: string, repo: string, installUrl = SURGE_INSTALL_URL): string {
+function surgeNotInstalledMessage(owner: string, repo: string, installUrl = SURGE_INSTALL_URL): string {
   return (
     `Opening PRs needs either the GitHub CLI (gh auth login) or Mergestorm Surge installed on ` +
     `${owner}/${repo} (${installUrl}).`
@@ -915,6 +945,8 @@ function stackPullFailure(
   };
   const surge = surgeRefusal(body);
   if (surge) return surge;
+  const issueRefusal = issueNotApprovedRefusal(status, body, owner, repo);
+  if (issueRefusal) return issueRefusal;
   const text = `${String(rejection.error ?? "")} ${String(rejection.message ?? "")}`;
   if (
     rejection.error === "cyclone_not_installed" ||
@@ -1029,7 +1061,7 @@ export type StackPublicationRequest = {
   autoLand?: boolean;
 };
 
-export type StackPublicationStack = { id: string; autoPatchOverride: boolean | null; autoLand: boolean };
+type StackPublicationStack = { id: string; autoPatchOverride: boolean | null; autoLand: boolean };
 
 export type StackPublicationStatus = {
   state: "absent" | "pushed" | "opened" | "registered";
@@ -1055,7 +1087,7 @@ export type StackPublication = {
   stack: StackPublicationStack;
 };
 
-export const STACK_PUBLICATION_TIMEOUT_MS = 180_000;
+const STACK_PUBLICATION_TIMEOUT_MS = 180_000;
 
 const PUBLICATION_ERROR_CODES: readonly CommandErrorCode[] = [
   "head_changed",
@@ -1140,6 +1172,220 @@ export async function openStackIssue(
     throw stackPullFailure(status, body, input.owner, input.repo, `Failed to open the issue on ${input.owner}/${input.repo}`);
   }
   return { number: row.number, url: typeof row.url === "string" ? row.url : "", created: row.created === true };
+}
+
+export const ISSUE_REVIEW_STATES = ["approved", "needs_answers", "pending", "unreviewed", "capped", "off"] as const;
+
+export type IssueReviewState = (typeof ISSUE_REVIEW_STATES)[number];
+
+export type IssueReviewPoint = { kind: string; text: string };
+
+export type IssueReviewStatus = {
+  owner: string;
+  repo: string;
+  number: number;
+  enabled: boolean;
+  state: IssueReviewState;
+  approvedBy: "vortex" | "human" | null;
+  round: number | null;
+  maxRounds: number;
+  verdict: "ready" | "ready_with_notes" | "needs_answers" | null;
+  summary: string | null;
+  points: IssueReviewPoint[];
+  commentUrl: string | null;
+  next: string;
+};
+
+export type IssueReviewTarget = { owner: string; repo: string; number: number };
+
+export const ISSUE_REVIEW_POLL_INTERVAL_MS = 10_000;
+export const ISSUE_REVIEW_DEFAULT_TIMEOUT_MS = 900_000;
+const ISSUE_REVIEW_MAX_POINTS = 8;
+const ISSUE_REVIEW_DEFAULT_MAX_ROUNDS = 4;
+
+function issueReviewText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const plain = plainServerText(value).trim();
+  return plain ? plain : null;
+}
+
+export function parseIssueReviewStatus(body: unknown, target: IssueReviewTarget): IssueReviewStatus | null {
+  if (!body || typeof body !== "object") return null;
+  const row = body as Record<string, unknown>;
+  const state = ISSUE_REVIEW_STATES.find((known) => known === row.state);
+  if (!state) return null;
+  const points = Array.isArray(row.points)
+    ? row.points
+      .flatMap((point): IssueReviewPoint[] => {
+        const text = issueReviewText((point as { text?: unknown } | null)?.text);
+        if (!text) return [];
+        return [{ kind: issueReviewText((point as { kind?: unknown }).kind) ?? "note", text }];
+      })
+      .slice(0, ISSUE_REVIEW_MAX_POINTS)
+    : [];
+  const verdict = row.verdict === "ready" || row.verdict === "ready_with_notes" || row.verdict === "needs_answers" ? row.verdict : null;
+  return {
+    owner: typeof row.owner === "string" && row.owner ? row.owner : target.owner,
+    repo: typeof row.repo === "string" && row.repo ? row.repo : target.repo,
+    number: isPositiveInteger(row.number) ? row.number : target.number,
+    enabled: row.enabled === true,
+    state,
+    approvedBy: row.approvedBy === "vortex" || row.approvedBy === "human" ? row.approvedBy : null,
+    round: isPositiveInteger(row.round) ? row.round : null,
+    maxRounds: isPositiveInteger(row.maxRounds) ? row.maxRounds : ISSUE_REVIEW_DEFAULT_MAX_ROUNDS,
+    verdict,
+    summary: issueReviewText(row.summary),
+    points,
+    commentUrl: issueReviewText(row.commentUrl),
+    next: issueReviewText(row.next) ?? "",
+  };
+}
+
+export async function getIssueReview(
+  cfg: Config,
+  target: IssueReviewTarget,
+  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<IssueReviewStatus | null> {
+  const query = new URLSearchParams({ owner: target.owner, repo: target.repo }).toString();
+  const { status, body, retryAfterSeconds } = await apiFetch(
+    cfg,
+    `/api/v1/stacks/issues/${encodeURIComponent(String(target.number))}/review?${query}`,
+    opts,
+  );
+  if (status === 404) return null;
+  if (status === 429) {
+    throw new CommandError(
+      rateLimitedMessage(retryAfterSeconds),
+      REVIEW_EXIT.rate_limited,
+      "rate_limited",
+      retryAfterSeconds !== undefined ? { retryAfterSeconds } : undefined,
+    );
+  }
+  const parsed = status === 200 ? parseIssueReviewStatus(body, target) : null;
+  if (!parsed) {
+    const message = serverMessage((body as { message?: unknown } | null)?.message);
+    throw new CommandError(
+      message ?? `Failed to read the issue review of ${target.owner}/${target.repo}#${target.number} (HTTP ${status})`,
+      1,
+      status >= 500 ? "issue_review_unavailable" : undefined,
+    );
+  }
+  return parsed;
+}
+
+export class IssueReviewTimeoutError extends CommandError {
+  readonly lastStatus: IssueReviewStatus;
+
+  constructor(lastStatus: IssueReviewStatus) {
+    super(
+      `Timed out waiting for the Vortex review of ${lastStatus.owner}/${lastStatus.repo}#${lastStatus.number}. Run \`mergestorm issue wait ${lastStatus.number}\` again.`,
+      REVIEW_EXIT.timeout,
+      "review_timeout",
+    );
+    this.name = "IssueReviewTimeoutError";
+    this.lastStatus = lastStatus;
+  }
+}
+
+export type PollIssueReviewOptions = {
+  timeoutMs?: number;
+  intervalMs?: number;
+  now?: () => number;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  signal?: AbortSignal;
+  onTick?: (status: IssueReviewStatus | null) => void;
+};
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abortError = () => Object.assign(new Error("Aborted"), { name: "AbortError" });
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function isTransientIssueReviewError(err: unknown): boolean {
+  if (!(err instanceof Error) || err.name === "AbortError") return false;
+  if (err instanceof CommandError) {
+    return err.code === "api_timeout" || err.code === "issue_review_unavailable" || err.code === "rate_limited";
+  }
+  return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network/i.test(err.message);
+}
+
+export async function pollIssueReview(
+  cfg: Config,
+  target: IssueReviewTarget,
+  opts: PollIssueReviewOptions = {},
+): Promise<IssueReviewStatus | null> {
+  const timeoutMs = opts.timeoutMs ?? ISSUE_REVIEW_DEFAULT_TIMEOUT_MS;
+  const intervalMs = opts.intervalMs ?? ISSUE_REVIEW_POLL_INTERVAL_MS;
+  const now = opts.now ?? Date.now;
+  const wait = opts.sleep ?? abortableSleep;
+  const deadline = now() + timeoutMs;
+  let last: IssueReviewStatus | null = null;
+  let failure: unknown = null;
+  for (;;) {
+    try {
+      const status = await getIssueReview(cfg, target, { signal: opts.signal });
+      if (!status || status.state !== "pending") return status;
+      last = status;
+      opts.onTick?.(status);
+    } catch (err) {
+      if (!isTransientIssueReviewError(err) || now() >= deadline) throw err;
+      failure = err;
+      opts.onTick?.(null);
+    }
+    const remaining = deadline - now();
+    if (remaining <= 0) {
+      if (last) throw new IssueReviewTimeoutError(last);
+      throw failure;
+    }
+    await wait(Math.min(intervalMs, remaining), opts.signal);
+  }
+}
+
+export function issueReviewLines(status: IssueReviewStatus): string[] {
+  const round = status.round ? ` (round ${status.round} of ${status.maxRounds})` : "";
+  const lines = [`${status.owner}/${status.repo}#${status.number}: ${status.state}${round}`];
+  if (status.summary) lines.push(`  ${status.summary}`);
+  status.points.forEach((point, i) => lines.push(`  ${i + 1}. [${point.kind}] ${point.text}`));
+  if (status.commentUrl) lines.push(`  Review: ${status.commentUrl}`);
+  if (status.next) lines.push(`  Next: ${status.next}`);
+  return lines;
+}
+
+export function issueNotApprovedError(issues: IssueReviewStatus[], message?: string | null): CommandError {
+  const lines = [message?.trim() || "Vortex has not approved the linked issue yet; refusing to open the pull request."];
+  for (const issue of issues) {
+    lines.push(...issueReviewLines(issue));
+    lines.push(`  Reply in a comment on #${issue.number}, then run \`mergestorm issue wait ${issue.number}\`.`);
+  }
+  return new CommandError(lines.join("\n"), REVIEW_EXIT.failed, "issue_not_approved");
+}
+
+export function issueNotApprovedRefusal(status: number, body: unknown, owner: string, repo: string): CommandError | null {
+  if (status !== 409 || !body || typeof body !== "object") return null;
+  const refusal = body as { error?: unknown; message?: unknown; issues?: unknown };
+  if (refusal.error !== "issue_not_approved") return null;
+  const issues = Array.isArray(refusal.issues)
+    ? refusal.issues.flatMap((issue): IssueReviewStatus[] => {
+      const n = (issue as { number?: unknown } | null)?.number;
+      const parsed = parseIssueReviewStatus(issue, { owner, repo, number: isPositiveInteger(n) ? n : 0 });
+      return parsed ? [parsed] : [];
+    })
+    : [];
+  return issueNotApprovedError(issues, serverMessage(refusal.message));
 }
 
 async function stackMutation(

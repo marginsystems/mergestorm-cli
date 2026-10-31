@@ -6,9 +6,15 @@ import { CommandError } from "./errors.js";
 import { git } from "./git.js";
 
 /** Classify git "not a repo" failures once at the boundary; callers match on code. */
+export function isNotARepoGitError(detail: string): boolean {
+  return /not a git repository|gitfile does not point to a valid repository/i.test(detail);
+}
+
+const classifierEnv: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C" };
+
 function rethrowIfNotARepo(err: unknown): never {
   const detail = err instanceof Error ? err.message : String(err);
-  if (/not a git repository/i.test(detail)) {
+  if (isNotARepoGitError(detail)) {
     throw new CommandError(detail, 1, "not_a_repo");
   }
   throw err;
@@ -16,7 +22,7 @@ function rethrowIfNotARepo(err: unknown): never {
 
 export function gitTopLevel(cwd = process.cwd()): string {
   try {
-    return realpathSync(git(["rev-parse", "--show-toplevel"], cwd).trim());
+    return realpathSync(git(["rev-parse", "--show-toplevel"], cwd, classifierEnv).trim());
   } catch (err) {
     rethrowIfNotARepo(err);
   }
@@ -29,7 +35,7 @@ export function gitTopLevel(cwd = process.cwd()): string {
 export function stableRepoId(cwd = process.cwd()): string {
   let raw: string;
   try {
-    raw = git(["rev-parse", "--git-dir"], cwd).trim();
+    raw = git(["rev-parse", "--git-dir"], cwd, classifierEnv).trim();
   } catch (err) {
     rethrowIfNotARepo(err);
   }
@@ -44,7 +50,7 @@ export function cliStacksRoot(): string {
   return path.join(mergestormHome(), "stacks");
 }
 
-export function repoStateDir(
+function repoStateDir(
   cwd = process.cwd(),
   stacksRoot = cliStacksRoot(),
 ): string {

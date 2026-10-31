@@ -37,6 +37,7 @@ const SETTINGS_BODY = {
   merge_queue_batch_size: 4,
   merge_queue_lands_alone_paths: ["**/migrations/**", "db/migrate/**", ".github/workflows/**"],
   merge_queue_overdrive: false,
+  issue_review_enabled: false,
 };
 
 // --- parseSettingsArgs --------------------------------------------------------
@@ -85,6 +86,8 @@ test("parseSettingsArgs maps --merge-queue-batch and a batch size from 2 through
   assert.deepEqual(parseSettingsArgs(["--merge-queue-batch-size", "10"]).patch, { merge_queue_batch_size: 10 });
   assert.deepEqual(parseSettingsArgs(["--merge-queue-overdrive", "on"]).patch, { merge_queue_overdrive: true });
   assert.deepEqual(parseSettingsArgs(["--merge-queue-overdrive=off"]).patch, { merge_queue_overdrive: false });
+  assert.deepEqual(parseSettingsArgs(["--issue-review", "on"]).patch, { issue_review_enabled: true });
+  assert.deepEqual(parseSettingsArgs(["--issue-review=off"]).patch, { issue_review_enabled: false });
   for (const args of [
     ["--merge-queue-batch-size"], ["--merge-queue-batch-size", "1"], ["--merge-queue-batch-size", "11"],
     ["--merge-queue-batch-size", "on"], ["--merge-queue-batch-size", "3.5"], ["--merge-queue-batch-size="],
@@ -521,8 +524,19 @@ test("parseSettingsArgs with --repo sets or clears that repository's merge queue
   });
   assert.throws(
     () => parseSettingsArgs(["--repo", "acme/app", "--auto-fix-ci", "on"]),
-    /--merge-queue-lands-alone and --merge-queue-overdrive can be set\./,
+    /--merge-queue-lands-alone, --merge-queue-overdrive and --issue-review can be set\./,
   );
+});
+
+test("parseSettingsArgs with --repo sets or clears that repository's issue reviews", () => {
+  assert.deepEqual(parseSettingsArgs(["--repo", "acme/app", "--issue-review", "on"]).repo, {
+    owner: "acme",
+    repo: "app",
+    patch: { issue_review_enabled: true },
+  });
+  assert.deepEqual(parseSettingsArgs(["--repo=acme/app", "--issue-review=off"]).repo?.patch, { issue_review_enabled: false });
+  assert.deepEqual(parseSettingsArgs(["--repo=acme/app", "--issue-review=inherit"]).repo?.patch, { issue_review_enabled: null });
+  assert.throws(() => parseSettingsArgs(["--repo", "acme/app", "--issue-review", "maybe"]), /takes on, off or inherit with --repo/);
 });
 
 test("inherit is not a value for an account setting", () => {

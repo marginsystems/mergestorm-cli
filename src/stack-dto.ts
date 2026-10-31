@@ -175,6 +175,8 @@ export type StackAgentsBusy = {
 
 export const STACK_AGENT_QUEUED_STALE_MS = 15 * 60 * 1000;
 
+export const STACK_AGENT_PATCHING_STALE_MS = 60 * 60 * 1000;
+
 export const AUTO_RESOLVE_ENQUEUE_GRACE_MS = 2 * 60_000;
 
 function agentShaMayBeHead(sha: string | null | undefined, head: string | null | undefined): boolean {
@@ -182,6 +184,20 @@ function agentShaMayBeHead(sha: string | null | undefined, head: string | null |
   const right = head?.trim().toLowerCase();
   if (!left || !right) return false;
   return left.startsWith(right) || right.startsWith(left);
+}
+
+export function stalledCycloneRun(
+  layer: Pick<StackLayerDto, "agentRuns">,
+  nowMs: number = Date.now(),
+): StackAgentRun | null {
+  const patching = (layer.agentRuns ?? [])
+    .filter((run) => !run.finishedAt && run.agent === "cyclone" && run.status === "patching")
+    .map((run) => ({ run, startedMs: Date.parse(run.startedAt ?? "") }));
+  if (!patching.length) return null;
+  if (!patching.every(({ startedMs }) => Number.isFinite(startedMs) && nowMs - startedMs > STACK_AGENT_PATCHING_STALE_MS)) {
+    return null;
+  }
+  return patching.reduce((newest, entry) => (entry.startedMs > newest.startedMs ? entry : newest)).run;
 }
 
 export function deriveStackAgentsBusy(
@@ -207,8 +223,9 @@ export function deriveStackAgentsBusy(
     const sinceMs = Date.parse(since ?? "");
     return Number.isFinite(sinceMs) && nowMs - sinceMs <= AUTO_RESOLVE_ENQUEUE_GRACE_MS;
   };
-  const cyclone = opts.cycloneClaimed === true || layer.cycloneStatus === "patching" ||
-    runs.some((run) => run.agent === "cyclone" && run.status === "patching") ||
+  const stalled = stalledCycloneRun(layer, nowMs) !== null;
+  const cyclone = (!stalled && (opts.cycloneClaimed === true || layer.cycloneStatus === "patching" ||
+    runs.some((run) => run.agent === "cyclone" && run.status === "patching"))) ||
     runs.some((run) => run.agent === "cyclone" && agentShaMayBeHead(run.sha, headSha) && queuedFresh(run)) ||
     withinGrace(layer.cycloneConflictPendingSince) ||
     withinGrace(layer.cycloneCiPendingSince);
@@ -334,6 +351,7 @@ export type StackLayerDto = {
   headSha?: string | null;
   /** Head SHA that produced mergeable / mergeableState. */
   mergeableHeadSha?: string | null;
+  staleBaseMergeable?: boolean;
   /** GitHub PR draft flag from enrich; the auto-land watcher never enqueues a draft. */
   draft?: boolean | null;
   /**

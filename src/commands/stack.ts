@@ -11,14 +11,19 @@ import {
   ensureUpperPark,
   findStackPull,
   getEnrichedStack,
+  getIssueReview,
+  getSettings,
   getStackPublication,
+  issueNotApprovedError,
   landNextStack,
+  listRepoSettings,
   listMergeQueueEntries,
   listStacks,
   openStackPull,
   claimStackPulls,
   restackStack,
   setStackPolicy,
+  type IssueReviewStatus,
   type MergeQueueEntryDto,
   type StackDto,
   type StackPolicyPatch,
@@ -50,7 +55,7 @@ import {
   tipCommitSubject,
   worktreeDirty,
 } from "../git-stack.js";
-import { buildPrBodyFromCommit } from "../pr-body.js";
+import { buildPrBodyFromCommit, linkedIssueNumbers } from "../pr-body.js";
 import {
   publishBranchServerSide,
   assertExplicitStacking,
@@ -85,7 +90,7 @@ import { canBrowse } from "./browse.js";
 import { isTransientReviewPollError } from "./review-client.js";
 import { openHelpBrowser } from "./help.js";
 
-export function stackHeldLine(held: StackHeldBlocker | null | undefined): string[] {
+function stackHeldLine(held: StackHeldBlocker | null | undefined): string[] {
   if (!held) return [];
   const agents = held.waitingOn.map((agent) => agent === "cyclone" ? "Cyclone" : "Vortex").join(" and ");
   return [`Held: #${held.prNumber} ${held.blocker}. Plan the fix; act once ${agents} ${held.waitingOn.length > 1 ? "are" : "is"} idle and the watch returns attention.`];
@@ -98,7 +103,7 @@ export function stackRepairLine(repair: StackRepairHint | null | undefined): str
   return [`Repair #${repair.prNumber} ${repair.kind}${files}: ${repair.steps}${note}`];
 }
 
-export function stackWatchTextLines(watch: StackWatchObligation | null | undefined): string[] {
+function stackWatchTextLines(watch: StackWatchObligation | null | undefined): string[] {
   if (!watch) return [];
   if (watch.done) return [watch.message];
   const next = watch.next;
@@ -932,6 +937,85 @@ export async function cmdStackCreate(
 }
 
 /** Injectable seams for unit tests (STRUCT-04). Production callers omit deps. */
+export async function issueReviewsEnabledFor(
+  cfg: Awaited<ReturnType<typeof loadConfig>>,
+  owner: string,
+  repo: string,
+): Promise<boolean> {
+  const repos = await listRepoSettings(cfg, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
+  const row = repos.find((r) => r.owner.toLowerCase() === owner.toLowerCase() && r.repo.toLowerCase() === repo.toLowerCase());
+  if (typeof row?.issue_review_enabled === "boolean") return row.issue_review_enabled;
+  const settings = await getSettings(cfg, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
+  if (!settings) throw new CommandError("Could not read the account settings");
+  return (settings as { issue_review_enabled?: unknown }).issue_review_enabled === true;
+}
+
+export type IssueGateLayer = { branch: string; texts: string[] };
+
+export type IssueGateDeps = {
+  getIssueReview?: typeof getIssueReview;
+  issueReviewsEnabled?: typeof issueReviewsEnabledFor;
+};
+
+export async function assertLinkedIssuesApproved(
+  input: {
+    cfg: Awaited<ReturnType<typeof loadConfig>>;
+    owner: string;
+    repo: string;
+    layers: readonly IssueGateLayer[];
+    warn: (line: string) => void;
+  },
+  deps: IssueGateDeps = {},
+): Promise<void> {
+  const { cfg, owner, repo, layers, warn } = input;
+  if (layers.length === 0) return;
+  const getIssueReviewFn = deps.getIssueReview ?? getIssueReview;
+  const unverified = (err: unknown) => {
+    if (err instanceof CommandError && (err.code === "auth_invalid" || err.code === "missing_api_key" || err.code === "rate_limited")) return err;
+    return new CommandError(
+      `Could not verify the Vortex reviews of the linked issues (${err instanceof Error ? err.message : String(err)}); ` +
+        "refusing to submit. Retry when the API is reachable.",
+    );
+  };
+  const linked = layers.map((layer) => ({ branch: layer.branch, numbers: linkedIssueNumbers({ owner, repo }, ...layer.texts) }));
+  const statuses: IssueReviewStatus[] = [];
+  for (const number of [...new Set(linked.flatMap((layer) => layer.numbers))].sort((a, b) => a - b)) {
+    let status: IssueReviewStatus | null;
+    try {
+      status = await getIssueReviewFn(cfg, { owner, repo, number }, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
+    } catch (err) {
+      throw unverified(err);
+    }
+    if (!status) {
+      warn(ansi.dim("  This Mergestorm server does not check issue reviews yet; submitting without the issue gate."));
+      continue;
+    }
+    statuses.push(status);
+  }
+  const unlinked = linked.filter((layer) => layer.numbers.length === 0);
+  if (unlinked.length > 0) {
+    let enabled: boolean;
+    try {
+      enabled = await (deps.issueReviewsEnabled ?? issueReviewsEnabledFor)(cfg, owner, repo);
+    } catch (err) {
+      throw unverified(err);
+    }
+    if (enabled) {
+      throw new CommandError(
+        [
+          `Issue reviews are on for ${owner}/${repo}, and ${unlinked.map((layer) => layer.branch).join(", ")} links no issue.`,
+          "Open one with `mergestorm issue create --title <problem> --wait`, answer the Vortex review until it is approved,",
+          "then add `Fixes #N` to the tip commit message and submit again.",
+        ].join("\n"),
+        REVIEW_EXIT.failed,
+        "issue_not_approved",
+      );
+    }
+  }
+  const blocking = statuses.filter((status) => status.state !== "approved" && status.state !== "off");
+  if (blocking.length > 0) throw issueNotApprovedError(blocking);
+}
+
 export type StackSubmitDeps = {
   cwd?: string;
   gitTopLevel?: (cwd?: string) => string;
@@ -959,7 +1043,7 @@ export type StackSubmitDeps = {
   adoptStack?: typeof adoptStack;
   ensureUpperPark?: typeof ensureUpperPark;
   env?: NodeJS.ProcessEnv;
-};
+} & IssueGateDeps;
 
 export async function cmdStackSubmit(
   args: string[],
@@ -1107,6 +1191,25 @@ export async function cmdStackSubmit(
   for (const plan of plans) {
     existingPrs.set(plan.branch, await opener.findOpen(plan.branch));
   }
+
+  await assertLinkedIssuesApproved(
+    {
+      cfg: await loadConfigFn(),
+      owner,
+      repo,
+      layers: plans
+        .filter((plan) => existingPrs.get(plan.branch) == null)
+        .map((plan) => {
+          if (!branchExistsFn(plan.branch, cwd)) {
+            throw new CommandError(`Stack layer branch missing locally: ${plan.branch}`);
+          }
+          const message = tipCommitMessageFn(plan.branch, cwd);
+          return { branch: plan.branch, texts: [message, buildPrBodyFn(message)] };
+        }),
+      warn: progress,
+    },
+    deps,
+  );
 
   const newHeads = plans
     .filter((plan) => existingPrs.get(plan.branch) == null)

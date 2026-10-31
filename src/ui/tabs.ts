@@ -13,7 +13,7 @@ import { dropdownViewport } from "./prompt.js";
 
 export type TabId = "status" | "usage" | "jobs" | "config";
 
-export const TAB_ORDER: readonly TabId[] = ["status", "usage", "jobs", "config"];
+const TAB_ORDER: readonly TabId[] = ["status", "usage", "jobs", "config"];
 
 const TAB_LABELS: Record<TabId, string> = {
   status: "Status",
@@ -69,7 +69,7 @@ export type TabsData = {
   color?: boolean;
 };
 
-export type TabsDetail = { jobId: string; rows: string[] };
+type TabsDetail = { jobId: string; rows: string[] };
 
 export type TabsState = {
   tab: TabId;

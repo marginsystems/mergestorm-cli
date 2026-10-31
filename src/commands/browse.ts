@@ -10,7 +10,7 @@ import {
   type SettingsResponse,
 } from "../api.js";
 import { BEARER_BOOLEAN_SETTINGS_KEYS, BEARER_SETTINGS_LABELS } from "../automation-catalog.js";
-import { apiBase, keyDisplay, loadConfig, resolveApiKey } from "../config.js";
+import { apiBase, keyDisplay, loadConfig, resolveApiKey, settleAccountName } from "../config.js";
 import { CommandError } from "../errors.js";
 import { ansi } from "../ui/ansi.js";
 import { humanSummary } from "../ui/human-summary.js";
@@ -45,6 +45,7 @@ export function toPanelJob(job: JobListItem): UsagePanelJob {
 }
 
 export type StatusTabInput = {
+  account?: string | null;
   keyPrefix: string;
   keyName: string | null;
   plan: string | null;
@@ -60,7 +61,7 @@ export type StatusTabInput = {
 };
 
 /** Short chrome note — lives on the hint row, not in the Status body. */
-export function statusReachabilityNote(
+function statusReachabilityNote(
   input: Pick<StatusTabInput, "reachable" | "keyInvalid">,
 ): string {
   if (input.keyInvalid) return "key revoked";
@@ -86,9 +87,9 @@ function creditsValue(input: StatusTabInput): string {
 
 /** Status tab body: whoami + credits from `/me`. Reachability is the footer. */
 export function buildStatusTabLines(input: StatusTabInput): string[] {
-  const lines = [
-    field("Key", `${ansi.bold(input.keyPrefix)}${input.keyName ? ` (${input.keyName})` : ""}`),
-  ];
+  const lines: string[] = [];
+  if (input.account) lines.push(field("Account", ansi.bold(input.account)));
+  lines.push(field("Key", `${ansi.bold(input.keyPrefix)}${input.keyName ? ` (${input.keyName})` : ""}`));
   if (input.plan) lines.push(field("Plan", input.plan));
   lines.push(field("API", input.apiBase));
   lines.push(field("Credits", creditsValue(input)));
@@ -150,10 +151,10 @@ export function formatJobDetailLines(row: ReviewJobRow): string[] {
 }
 
 /** Human labels for the Config tab and the static `settings` printout. */
-export const SETTINGS_LABELS = BEARER_SETTINGS_LABELS;
+const SETTINGS_LABELS = BEARER_SETTINGS_LABELS;
 
-export const STACKS_READY_LABEL = "Stacks, merge queue, Auto land";
-export const STACKS_READY_WORDS = {
+const STACKS_READY_LABEL = "Stacks, merge queue, Auto land";
+const STACKS_READY_WORDS = {
   on: "ready",
   off: "not ready (install Mergestorm Surge)",
 } as const;
@@ -250,6 +251,7 @@ export async function openTabsBrowser(initial: TabId): Promise<void> {
 
   const data: TabsData = {
     statusLines: buildStatusTabLines({
+      account: me ? await settleAccountName(cfg, me) : cfg.account,
       keyPrefix: me?.key.prefix ?? keyDisplay(key) ?? "msk_live_…",
       keyName: me?.key.name ?? null,
       plan: me ? (me.plan_label_key ?? me.plan_key) : null,

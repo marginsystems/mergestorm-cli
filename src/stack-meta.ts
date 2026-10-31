@@ -25,7 +25,7 @@ export type StackLayerMeta = {
   parentBranch: string;
 };
 
-export type LocalStack = {
+type LocalStack = {
   layers: StackLayerMeta[];
   autoEnqueueWhenReady?: boolean;
   /** Per-open override carried from `stack create` to `stack submit`; absent = account flag. */
@@ -178,7 +178,7 @@ export function emptyStackMeta(trunk: string): StackMeta {
   };
 }
 
-export function activeStack(meta: StackMeta): LocalStack {
+function activeStack(meta: StackMeta): LocalStack {
   const stack = meta.stacks[meta.active];
   if (!stack) {
     throw new Error(

@@ -41,6 +41,9 @@ test("each call hits its memories route with the API key", async () => {
   assert.deepEqual(await saveMemory({ text: "Use pnpm", kind: "rule", repo: "acme/web", chatId: CHAT }, CFG), { id: ID, merged: false });
   assert.deepEqual(calls[0]!.body, { text: "Use pnpm", kind: "rule", repo: "acme/web", chat_id: CHAT });
   assert.equal(calls[0]!.method, "POST");
+  calls = respond(201, { id: ID, merged: false });
+  await saveMemory({ text: "Use pnpm", kind: "rule", keepBoth: true }, CFG);
+  assert.deepEqual(calls[0]!.body, { text: "Use pnpm", kind: "rule", keep_both: true });
 
   calls = respond(200, { id: ID, text: "Use npm" });
   await updateMemory(ID, { text: "Use npm" }, CFG);
@@ -60,6 +63,9 @@ test("each call hits its memories route with the API key", async () => {
 test("server refusals become command errors with their code", async () => {
   respond(409, { error: "memory_off", message: "Memory is off, so nothing was saved." });
   await assert.rejects(saveMemory({ text: "x", kind: "fact" }, CFG), (err) => err instanceof CommandError && err.code === "memory_off" && /Memory is off/.test(err.message));
+
+  respond(409, { error: "memory_similar", message: "Not saved. This is close to memory m1.", similar: { id: ID, text: "y", kind: "fact" } });
+  await assert.rejects(saveMemory({ text: "x", kind: "fact" }, CFG), (err) => err instanceof CommandError && err.code === "memory_similar" && /close to memory/.test(err.message));
 
   respond(404, { error: "not_found", message: "There is no memory with that id." });
   await assert.rejects(deleteMemory(ID, CFG), (err) => err instanceof CommandError && err.code === "not_found" && /no memory with that id/.test(err.message));

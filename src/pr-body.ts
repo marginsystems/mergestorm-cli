@@ -57,6 +57,21 @@ export function buildPrBodyFromCommit(fullMessage: string): string {
   return parts.join("\n") + "\n";
 }
 
+const LINKED_ISSUE_RE = /(?<![\w/#.-])(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s*:?\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)\b/gi;
+
+export function linkedIssueNumbers(repo: { owner: string; repo: string }, ...texts: string[]): number[] {
+  const numbers = new Set<number>();
+  const same = `${repo.owner}/${repo.repo}`.toLowerCase();
+  for (const text of texts) {
+    for (const match of text.matchAll(LINKED_ISSUE_RE)) {
+      if (match[1] && `${match[1]}/${match[2]}`.toLowerCase() !== same) continue;
+      const n = Number(match[3]);
+      if (Number.isSafeInteger(n) && n > 0) numbers.add(n);
+    }
+  }
+  return [...numbers].sort((a, b) => a - b);
+}
+
 function uniqueTrailers(trailers: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];

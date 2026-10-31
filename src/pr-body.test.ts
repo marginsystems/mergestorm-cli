@@ -1,6 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildPrBodyFromCommit } from "./pr-body.js";
+import { buildPrBodyFromCommit, linkedIssueNumbers } from "./pr-body.js";
+
+test("linkedIssueNumbers reads same-repo closing keywords from every text, once each, in order", () => {
+  assert.deepEqual(
+    linkedIssueNumbers(
+      { owner: "acme", repo: "widgets" },
+      "Fix the gate\n\nFixes #12\ncloses #3",
+      "## Summary\n- Resolves #12 too\n- Fix: #40 and resolved #7",
+    ),
+    [3, 7, 12, 40],
+  );
+});
+
+test("linkedIssueNumbers ignores mentions, other repositories and words that only contain a keyword", () => {
+  assert.deepEqual(
+    linkedIssueNumbers(
+      { owner: "acme", repo: "widgets" },
+      "See #5\nFixes acme/other#6\nFixes https://github.com/acme/widgets/issues/8\nprefixes #9\nPart of #10",
+    ),
+    [],
+  );
+});
 
 test("subject-only commit", () => {
   const body = buildPrBodyFromCommit("feat(cli): add thing\n");

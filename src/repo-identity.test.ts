@@ -7,6 +7,7 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   gitTopLevel,
+  isNotARepoGitError,
   stableRepoId,
   stackMetaPath,
 } from "./repo-identity.js";
@@ -63,4 +64,10 @@ test("independent clones do not collide", async () => {
     await rm(one.root, { recursive: true, force: true });
     await rm(two.root, { recursive: true, force: true });
   }
+});
+
+test("both git wordings for a missing repository count as not a repository", () => {
+  assert.equal(isNotARepoGitError("fatal: not a git repository (or any of the parent directories): .git"), true);
+  assert.equal(isNotARepoGitError("fatal: gitfile does not point to a valid repository: /tmp/x/linked/.git"), true);
+  assert.equal(isNotARepoGitError("fatal: bad revision 'HEAD'"), false);
 });

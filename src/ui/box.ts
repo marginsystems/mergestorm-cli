@@ -7,7 +7,7 @@ import { padVisible, sliceVisible, visibleWidth } from "./width.js";
 export { padVisible, sliceVisible, visibleWidth };
 
 /** Below this width, boxed chrome wraps on real TTYs — prefer plain output. */
-export const MIN_BOXED_COLUMNS = 48;
+const MIN_BOXED_COLUMNS = 48;
 
 /**
  * Usable terminal columns (TTY), with a sensible fallback for pipes/tests.

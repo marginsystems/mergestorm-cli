@@ -17,10 +17,10 @@ function wrap(code: string, text: string): string {
  * Brand ink. xterm-256 77 (#5FAF5F) ù muted green that Terminal.app
  * actually paints. 24-bit `38;2;61;ù` was read as palette 61 (purple).
  */
-export const BRAND_GREEN = { hex: "#5FAF5F", index: 77 } as const;
+const BRAND_GREEN = { hex: "#5FAF5F", index: 77 } as const;
 export const BRAND_GREEN_SGR = `38;5;${BRAND_GREEN.index}`;
 /** Full-cell fill. Glyphs like ? leave a hairline; a space with this bg does not. */
-export const BRAND_FILL_SGR = `${BRAND_GREEN_SGR};48;5;${BRAND_GREEN.index}`;
+const BRAND_FILL_SGR = `${BRAND_GREEN_SGR};48;5;${BRAND_GREEN.index}`;
 
 function brandGreen(text: string, bold = false): string {
   if (!computeEnabled()) return text;

@@ -26,7 +26,7 @@ function registeredParentHit(
   return null;
 }
 
-export const MG_PARK_PREFIX = "mg-park-";
+const MG_PARK_PREFIX = "mg-park-";
 
 export function isMgParkBranch(branch: string): boolean {
   return branch.trim().toLowerCase().startsWith(MG_PARK_PREFIX);

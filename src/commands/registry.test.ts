@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { loadConfig, saveAccount, useAccount } from "../config.js";
+import { CommandError } from "../errors.js";
 import {
   COMMAND_REGISTRY,
   dispatchCommand,
@@ -43,6 +48,9 @@ test("formatUsageBody lists every registry usage line", () => {
   const body = formatUsageBody();
   assert.match(body, /Interactive shell/);
   assert.match(body, /MERGESTORM_API_KEY/);
+  assert.match(body, /MERGESTORM_ACCOUNT/);
+  assert.match(body, /--account <name>/);
+  assert.match(body, /mergestorm account use <name>/);
   for (const c of COMMAND_REGISTRY) {
     for (const line of c.usage) {
       assert.ok(body.includes(line), `usage missing: ${line}`);
@@ -52,4 +60,49 @@ test("formatUsageBody lists every registry usage line", () => {
 
 test("dispatchCommand returns false for unknown names", async () => {
   assert.equal(await dispatchCommand("definitely-not-a-command", [], { mode: "oneshot" }), false);
+});
+
+test("dispatchCommand runs a command as the --account named anywhere in its args, then restores the active account", async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "mg-registry-"));
+  const previousHome = process.env.MERGESTORM_HOME;
+  const previousAccount = process.env.MERGESTORM_ACCOUNT;
+  process.env.MERGESTORM_HOME = root;
+  delete process.env.MERGESTORM_ACCOUNT;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.MERGESTORM_HOME;
+    else process.env.MERGESTORM_HOME = previousHome;
+    if (previousAccount === undefined) delete process.env.MERGESTORM_ACCOUNT;
+    else process.env.MERGESTORM_ACCOUNT = previousAccount;
+    rmSync(root, { recursive: true, force: true });
+  });
+  await saveAccount("a", { apiKey: "msk_live_a1" });
+  await saveAccount("b", { apiKey: "msk_live_b1" });
+  await useAccount("a");
+  const seen: { args: string[]; account: string | undefined }[] = [];
+  COMMAND_REGISTRY.push({
+    name: "probe-account",
+    summary: "test",
+    usage: [],
+    async run(args) {
+      seen.push({ args, account: (await loadConfig()).account });
+    },
+  });
+  t.after(() => {
+    COMMAND_REGISTRY.splice(COMMAND_REGISTRY.findIndex((c) => c.name === "probe-account"), 1);
+  });
+  assert.equal(await dispatchCommand("probe-account", ["x", "--account", "b", "--json"], { mode: "shell" }), true);
+  assert.equal(await dispatchCommand("probe-account", ["--account=b"], { mode: "oneshot" }), true);
+  assert.equal(await dispatchCommand("probe-account", ["y"], { mode: "oneshot", account: "b" }), true);
+  assert.equal(await dispatchCommand("probe-account", [], { mode: "oneshot" }), true);
+  assert.deepEqual(seen, [
+    { args: ["x", "--json"], account: "b" },
+    { args: [], account: "b" },
+    { args: ["y"], account: "b" },
+    { args: [], account: "a" },
+  ]);
+  await assert.rejects(
+    () => dispatchCommand("probe-account", ["--account", "zz"], { mode: "oneshot" }),
+    (err: unknown) => err instanceof CommandError && /No account named "zz". Accounts: a, b./.test(err.message),
+  );
+  assert.equal((await loadConfig()).account, "a");
 });

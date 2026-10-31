@@ -14,13 +14,13 @@ import { parseGithubOriginRepo } from "./git.js";
 import { currentBranch, discoverTrunk, tipCommitMessage, tipCommitSubject } from "./git-stack.js";
 import { buildPrBodyFromCommit } from "./pr-body.js";
 
-export const SERVER_PUBLISH_MAX_COMMITS = 20;
-export const SERVER_PUBLISH_MAX_CHANGES = 500;
+const SERVER_PUBLISH_MAX_COMMITS = 20;
+const SERVER_PUBLISH_MAX_CHANGES = 500;
 export const SERVER_PUBLISH_MAX_FILE_BYTES = 2 * 1024 * 1024;
-export const SERVER_PUBLISH_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
-export const SERVER_PUBLISH_MAX_COMMIT_BYTES = 1024 * 1024;
-export const SERVER_PUBLISH_FILE_MODES = ["100644", "100755", "120000"] as const;
-export const SERVER_PUBLISH_HISTORY_SCAN = 500;
+const SERVER_PUBLISH_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
+const SERVER_PUBLISH_MAX_COMMIT_BYTES = 1024 * 1024;
+const SERVER_PUBLISH_FILE_MODES = ["100644", "100755", "120000"] as const;
+const SERVER_PUBLISH_HISTORY_SCAN = 500;
 
 type FileMode = (typeof SERVER_PUBLISH_FILE_MODES)[number];
 
@@ -75,7 +75,7 @@ function parseIdentity(line: string, sha: string): StackPublicationIdentity {
   return { name: match[1]!.trim() ? match[1]! : match[2]!, email: match[2]!, date };
 }
 
-export async function readCommitHeader(
+async function readCommitHeader(
   read: GitRead,
   sha: string,
   cwd: string,
@@ -114,7 +114,7 @@ export async function readCommitHeader(
   return { tree, parents, author: parseIdentity(author, sha), committer: parseIdentity(committer, sha), message };
 }
 
-export async function readCommitChanges(
+async function readCommitChanges(
   read: GitRead,
   parent: string,
   sha: string,
@@ -379,7 +379,7 @@ export function assertExplicitStacking(input: {
   );
 }
 
-export function workingBranchTarget(input: WorkingBranchInput): { cwd: string; owner: string; repo: string; branch: string } {
+function workingBranchTarget(input: WorkingBranchInput): { cwd: string; owner: string; repo: string; branch: string } {
   const cwd = input.cwd ?? process.cwd();
   const origin = input.owner && input.repo ? { owner: input.owner, repo: input.repo } : parseGithubOriginRepo(cwd);
   if (!origin) {

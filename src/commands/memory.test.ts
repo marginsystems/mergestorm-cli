@@ -66,7 +66,9 @@ test("memory add needs a kind and sends the Breeze chat id", async () => {
   };
   await assert.rejects(run(["add", "Use", "pnpm"], { saveMemory }), (err) => err instanceof CommandError && err.code === "usage");
   assert.deepEqual(await run(["add", "Use", "pnpm", "--kind", "rule", "--repo", "acme/web"], { saveMemory }, CHAT), [`Saved to memory as ${ID}.`]);
-  assert.deepEqual(sent, [{ text: "Use pnpm", kind: "rule", repo: "acme/web", chatId: CHAT }]);
+  assert.deepEqual(await run(["add", "Use", "pnpm", "--kind", "rule", "--keep-both"], { saveMemory }, CHAT), [`Saved to memory as ${ID}.`]);
+  assert.deepEqual(sent, [{ text: "Use pnpm", kind: "rule", repo: "acme/web", chatId: CHAT }, { text: "Use pnpm", kind: "rule", chatId: CHAT, keepBoth: true }]);
+  await assert.rejects(run(["list", "--keep-both"], {}), (err) => err instanceof CommandError && err.code === "usage");
 });
 
 test("memory search joins the query and says when memory is off", async () => {

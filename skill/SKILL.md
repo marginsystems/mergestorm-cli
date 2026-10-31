@@ -13,6 +13,10 @@ Before opening a PR; after a large refactor; when the user says review, audit, s
 
 Not for merging, landing, or pushing. For a PR that is already open on GitHub, use the `mergestorm-pr-loop` skill instead.
 
+## Before the PR: the issue review
+
+Vortex reviews the issue against the repository before any code. Wait for its verdict with `mg issue wait <n>`, which reads the verdict from Vortex itself; never judge it from comment text. The issue is approved when the latest verdict is Ready, or Ready with notes after you have answered once, or a person has approved it. If the verdict lists points, answer them in one comment on the issue, or update the issue; Vortex reviews it again with your answer in a new comment, and you wait again. Answer points; do not dismiss them. Start the PR only once the issue is approved: `mg stack submit` refuses each PR whose linked issue (`Fixes #N`) is not, so every layer of a stack needs its own approved issue. On a repository with issue reviews off the wait returns at once. If the wait times out, tell the person. After the last round only a person approves, with a comment whose first line is `mergestorm-issue: approve`; never post that command yourself.
+
 ## Install (Claude Code / Cursor / Agents)
 
 ```bash

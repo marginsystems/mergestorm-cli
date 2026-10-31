@@ -23,6 +23,8 @@ export type CommandErrorCode =
   | "reserved_branch"
   | "supabase_unconfigured"
   | "cyclone_not_connected"
+  | "account_limit"
+  | "surge_other_account"
   | "cyclone_permission_missing"
   | "busy"
   | "adopt_failed"
@@ -40,7 +42,11 @@ export type CommandErrorCode =
   | "invalid_input"
   | "memory_off"
   | "memory_full"
-  | "memory_unavailable";
+  | "memory_similar"
+  | "memory_unavailable"
+  | "web_unavailable"
+  | "issue_not_approved"
+  | "issue_review_unavailable";
 
 /** Stable one-shot exit codes for machine callers of `mergestorm review`. */
 export const REVIEW_EXIT = {

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { stdin as input, stdout as output } from "node:process";
+import { splitAccountFlag, withAccount } from "./config.js";
 import { CommandError } from "./errors.js";
 import {
   dispatchCommand,
@@ -26,12 +27,12 @@ ${formatUsageBody()}
 `);
 }
 
-async function runCommand(cmd: string, args: string[]): Promise<void> {
+async function runCommand(cmd: string, args: string[], account: string | undefined): Promise<void> {
   if (cmd === "help" || cmd === "?") {
     usage();
     return;
   }
-  const ok = await dispatchCommand(cmd, args, { mode: "oneshot" });
+  const ok = await dispatchCommand(cmd, args, { mode: "oneshot", account });
   if (!ok) {
     usage();
     throw new CommandError(`unknown command: ${cmd}`);
@@ -39,29 +40,30 @@ async function runCommand(cmd: string, args: string[]): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const [, , cmd, ...args] = process.argv;
+  try {
+    const { account, args: argv } = splitAccountFlag(process.argv.slice(2));
+    const [cmd, ...args] = argv;
 
-  if (!cmd) {
-    if (input.isTTY && output.isTTY) {
-      await runShell();
+    if (!cmd) {
+      if (input.isTTY && output.isTTY) {
+        await withAccount(account, () => runShell());
+        return;
+      }
+      usage();
       return;
     }
-    usage();
-    return;
-  }
 
-  if (cmd === "-h" || cmd === "--help" || cmd === "help" || cmd === "?") {
-    usage();
-    return;
-  }
+    if (cmd === "-h" || cmd === "--help" || cmd === "help" || cmd === "?") {
+      usage();
+      return;
+    }
 
-  if (cmd === "-v" || cmd === "--version" || cmd === "version") {
-    console.log(cliVersion());
-    return;
-  }
+    if (cmd === "-v" || cmd === "--version" || cmd === "version") {
+      console.log(cliVersion());
+      return;
+    }
 
-  try {
-    await runCommand(cmd, args);
+    await runCommand(cmd, args, account);
   } catch (err) {
     if (err instanceof CommandError) {
       console.error(err.message);
