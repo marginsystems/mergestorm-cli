@@ -63,11 +63,6 @@ async function loginConfig(): Promise<Config> {
   return configFor(store, store.activeAccount);
 }
 
-export function loggedInLine(account: AccountIdentity | null | undefined): string {
-  const label = accountLabel(account);
-  return label ? `Logged in as ${label}.` : "Logged in.";
-}
-
 async function storeLogin(
   cfg: Config,
   me: NamedMe | null,

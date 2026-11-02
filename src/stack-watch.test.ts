@@ -2051,6 +2051,8 @@ for (const [reason, words] of [
   ["missing_head", "GitHub returned no head commit for this PR"],
   ["github_unreadable", "Mergestorm cannot read this PR from GitHub"],
   ["parked_base", "this PR's base is a parked branch (mg-park-*) and has not been moved back"],
+  ["land_pr_push_unreviewed", "someone other than Stacks pushed to the stack trunk, and the land PR has no clean Vortex review at that push or at its head"],
+  ["land_pr_head_unexplained", "GitHub's activity list for the stack trunk does not show the push that made the land PR head"],
   ["some_new_token", "some new token"],
 ] as const) {
   test(`Auto land waiting 45 minutes on ${reason} is attention in plain words with a repair`, async () => {

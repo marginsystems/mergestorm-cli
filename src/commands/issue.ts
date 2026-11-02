@@ -153,6 +153,8 @@ function asAuthExit(err: unknown): unknown {
 
 function approvedLine(status: IssueReviewStatus): string {
   if (status.state === "off") return `Issue reviews are off for ${status.owner}/${status.repo}; #${status.number} needs no approval.`;
+  if (status.state === "unreviewed") return `Issue reviews for ${status.owner}/${status.repo} run on mention; #${status.number} needs no approval.`;
+  if (status.approvedBy === null) return `The Vortex review of ${status.owner}/${status.repo}#${status.number} failed, so it does not hold the pull request back.`;
   const by = status.approvedBy === "human" ? "a person" : "Vortex";
   return `${status.owner}/${status.repo}#${status.number} is approved by ${by}.`;
 }
@@ -184,7 +186,7 @@ export async function waitForIssueReview(
     );
   }
   if (opts.json) printJson(status);
-  if (status.state === "approved" || status.state === "off") {
+  if (status.state === "approved" || status.state === "off" || (status.mode === "mention" && status.state === "unreviewed")) {
     if (!opts.json) {
       console.log(approvedLine(status));
       if (status.next) console.log(status.next);

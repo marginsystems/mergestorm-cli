@@ -395,6 +395,7 @@ export const REPO_SETTINGS_SWITCH_KEYS = [
   "merge_queue_batch_enabled",
   "merge_queue_overdrive",
   "issue_review_enabled",
+  "issue_auto_review_enabled",
 ] as const;
 
 export const REPO_SETTINGS_KEYS = [...REPO_SETTINGS_SWITCH_KEYS, "merge_queue_batch_size", "merge_queue_lands_alone_paths"] as const;
@@ -1178,13 +1179,20 @@ export const ISSUE_REVIEW_STATES = ["approved", "needs_answers", "pending", "unr
 
 export type IssueReviewState = (typeof ISSUE_REVIEW_STATES)[number];
 
-export type IssueReviewPoint = { kind: string; text: string };
+export type IssueReviewPoint = { kind: string; text: string; blocking?: boolean };
+
+export const ISSUE_REVIEW_MODES = ["off", "mention", "auto"] as const;
+
+export type IssueReviewMode = (typeof ISSUE_REVIEW_MODES)[number];
+
+export const ISSUE_REVIEW_TAG = "@mergestorm-vortex";
 
 export type IssueReviewStatus = {
   owner: string;
   repo: string;
   number: number;
   enabled: boolean;
+  mode: IssueReviewMode;
   state: IssueReviewState;
   approvedBy: "vortex" | "human" | null;
   round: number | null;
@@ -1201,7 +1209,7 @@ export type IssueReviewTarget = { owner: string; repo: string; number: number };
 export const ISSUE_REVIEW_POLL_INTERVAL_MS = 10_000;
 export const ISSUE_REVIEW_DEFAULT_TIMEOUT_MS = 900_000;
 const ISSUE_REVIEW_MAX_POINTS = 8;
-const ISSUE_REVIEW_DEFAULT_MAX_ROUNDS = 4;
+const ISSUE_REVIEW_DEFAULT_MAX_ROUNDS = 2;
 
 function issueReviewText(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -1219,7 +1227,7 @@ export function parseIssueReviewStatus(body: unknown, target: IssueReviewTarget)
       .flatMap((point): IssueReviewPoint[] => {
         const text = issueReviewText((point as { text?: unknown } | null)?.text);
         if (!text) return [];
-        return [{ kind: issueReviewText((point as { kind?: unknown }).kind) ?? "note", text }];
+        return [{ kind: issueReviewText((point as { kind?: unknown }).kind) ?? "note", text, blocking: (point as { blocking?: unknown }).blocking !== false }];
       })
       .slice(0, ISSUE_REVIEW_MAX_POINTS)
     : [];
@@ -1229,6 +1237,7 @@ export function parseIssueReviewStatus(body: unknown, target: IssueReviewTarget)
     repo: typeof row.repo === "string" && row.repo ? row.repo : target.repo,
     number: isPositiveInteger(row.number) ? row.number : target.number,
     enabled: row.enabled === true,
+    mode: ISSUE_REVIEW_MODES.find((known) => known === row.mode) ?? (row.enabled === true ? "auto" : "off"),
     state,
     approvedBy: row.approvedBy === "vortex" || row.approvedBy === "human" ? row.approvedBy : null,
     round: isPositiveInteger(row.round) ? row.round : null,
@@ -1252,7 +1261,11 @@ export async function getIssueReview(
     `/api/v1/stacks/issues/${encodeURIComponent(String(target.number))}/review?${query}`,
     opts,
   );
-  if (status === 404) return null;
+  if (status === 404) {
+    const message = serverMessage((body as { message?: unknown } | null)?.message);
+    if (!message) return null;
+    throw new CommandError(`${message} Connect it in Mergestorm, then try again.`, 1, "not_found");
+  }
   if (status === 429) {
     throw new CommandError(
       rateLimitedMessage(retryAfterSeconds),
@@ -1271,6 +1284,39 @@ export async function getIssueReview(
     );
   }
   return parsed;
+}
+
+export async function getIssueReviewMode(
+  cfg: Config,
+  target: { owner: string; repo: string },
+  opts: { timeoutMs?: number } = {},
+): Promise<IssueReviewMode | null> {
+  const query = new URLSearchParams({ owner: target.owner, repo: target.repo }).toString();
+  const { status, body, retryAfterSeconds } = await apiFetch(cfg, `/api/v1/stacks/issues/review-mode?${query}`, opts);
+  if (status === 404) return null;
+  if (status === 429) {
+    throw new CommandError(
+      rateLimitedMessage(retryAfterSeconds),
+      REVIEW_EXIT.rate_limited,
+      "rate_limited",
+      retryAfterSeconds !== undefined ? { retryAfterSeconds } : undefined,
+    );
+  }
+  const mode = status === 200 ? ISSUE_REVIEW_MODES.find((known) => known === (body as { mode?: unknown } | null)?.mode) : undefined;
+  if (!mode) {
+    const message = serverMessage((body as { message?: unknown } | null)?.message);
+    throw new CommandError(message ?? `Failed to read the issue review mode of ${target.owner}/${target.repo} (HTTP ${status})`);
+  }
+  return mode;
+}
+
+export function issueReviewSettled(status: IssueReviewStatus): boolean {
+  if (status.state === "pending") return false;
+  return !(status.state === "unreviewed" && status.mode === "auto");
+}
+
+export function issueReviewBlocksPr(status: IssueReviewStatus): boolean {
+  return status.mode === "auto" && status.state !== "approved" && status.state !== "off";
 }
 
 export class IssueReviewTimeoutError extends CommandError {
@@ -1338,7 +1384,7 @@ export async function pollIssueReview(
   for (;;) {
     try {
       const status = await getIssueReview(cfg, target, { signal: opts.signal });
-      if (!status || status.state !== "pending") return status;
+      if (!status || issueReviewSettled(status)) return status;
       last = status;
       opts.onTick?.(status);
     } catch (err) {
@@ -1359,7 +1405,7 @@ export function issueReviewLines(status: IssueReviewStatus): string[] {
   const round = status.round ? ` (round ${status.round} of ${status.maxRounds})` : "";
   const lines = [`${status.owner}/${status.repo}#${status.number}: ${status.state}${round}`];
   if (status.summary) lines.push(`  ${status.summary}`);
-  status.points.forEach((point, i) => lines.push(`  ${i + 1}. [${point.kind}] ${point.text}`));
+  status.points.forEach((point, i) => lines.push(`  ${i + 1}. [${point.blocking === false ? "note: " : ""}${point.kind}] ${point.text}`));
   if (status.commentUrl) lines.push(`  Review: ${status.commentUrl}`);
   if (status.next) lines.push(`  Next: ${status.next}`);
   return lines;
@@ -1369,10 +1415,13 @@ export function issueNotApprovedError(issues: IssueReviewStatus[], message?: str
   const lines = [message?.trim() || "Vortex has not approved the linked issue yet; refusing to open the pull request."];
   for (const issue of issues) {
     lines.push(...issueReviewLines(issue));
-    lines.push(`  Reply in a comment on #${issue.number}, then run \`mergestorm issue wait ${issue.number}\`.`);
+    const reply = issue.state === "needs_answers" ? `Reply once in a comment on #${issue.number}, accepting each blocking point's suggested fix or saying why not; then run` : "Run";
+    lines.push(`  ${reply} \`mergestorm issue wait ${issue.number}\`.`);
   }
-  return new CommandError(lines.join("\n"), REVIEW_EXIT.failed, "issue_not_approved");
+  return new CommandError(lines.join("\n"), REVIEW_EXIT.failed, "issue_not_approved", issues.length === 0 ? { reason: NO_LINKED_ISSUE } : undefined);
 }
+
+export const NO_LINKED_ISSUE = "no_linked_issue";
 
 export function issueNotApprovedRefusal(status: number, body: unknown, owner: string, repo: string): CommandError | null {
   if (status !== 409 || !body || typeof body !== "object") return null;

@@ -249,6 +249,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.66": [
     "`issue wait`; submit needs an approved issue",
   ],
+  "0.3.67": [
+    "Issue review: reply once, then one re-check",
+  ],
 };
 
 /** Everything the welcome panel needs, captured once so redraws stay sync. */

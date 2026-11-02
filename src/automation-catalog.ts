@@ -11,6 +11,7 @@ export const BEARER_SETTINGS = [
   { key: "vortex_skip_all_clear_comments", flag: "--vortex-skip-all-clear", label: "Vortex skip All-clear comments" },
   { key: "vortex_seam_specialist_enabled", flag: "--vortex-seam", label: "Vortex seam specialist" },
   { key: "issue_review_enabled", flag: "--issue-review", label: "Vortex issue reviews" },
+  { key: "issue_auto_review_enabled", flag: "--issue-auto-review", label: "Vortex issue auto review" },
   { key: "auto_land_default", flag: "--auto-land", label: "Auto land (new stacks)" },
   { key: "auto_land_settle_seconds", flag: "--auto-land-settle", label: "Auto land settle (seconds)", kind: "seconds", min: 15, max: 300 },
   { key: "merge_queue_batch_enabled", flag: "--merge-queue-batch", label: "Merge queue batching" },

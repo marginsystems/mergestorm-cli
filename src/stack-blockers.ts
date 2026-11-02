@@ -747,6 +747,8 @@ const AUTO_LAND_WAIT_WORDS: Readonly<Record<string, string>> = {
   missing_head: "GitHub returned no head commit for this PR",
   pr_draft: "this PR is a draft",
   trunk_in_land_target_without_land_pr: "the stack's commits are already in the land target, but no merged land PR was found",
+  land_pr_push_unreviewed: "someone other than Stacks pushed to the stack trunk, and the land PR has no clean Vortex review at that push or at its head",
+  land_pr_head_unexplained: "GitHub's activity list for the stack trunk does not show the push that made the land PR head",
   conflict_unchanged: "the merge queue bounced this PR for a conflict, and neither the PR nor its base has changed since",
   land_pr_unavailable: "the land PR cannot be opened or found",
   github_unreadable: "Mergestorm cannot read this PR from GitHub",

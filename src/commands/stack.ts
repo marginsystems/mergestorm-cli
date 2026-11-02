@@ -12,9 +12,13 @@ import {
   findStackPull,
   getEnrichedStack,
   getIssueReview,
+  getIssueReviewMode,
+  issueReviewBlocksPr,
   getSettings,
+  type IssueReviewMode,
   getStackPublication,
   issueNotApprovedError,
+  NO_LINKED_ISSUE,
   landNextStack,
   listRepoSettings,
   listMergeQueueEntries,
@@ -937,24 +941,29 @@ export async function cmdStackCreate(
 }
 
 /** Injectable seams for unit tests (STRUCT-04). Production callers omit deps. */
-export async function issueReviewsEnabledFor(
+export async function issueReviewModeFor(
   cfg: Awaited<ReturnType<typeof loadConfig>>,
   owner: string,
   repo: string,
-): Promise<boolean> {
+): Promise<IssueReviewMode> {
+  const served = await getIssueReviewMode(cfg, { owner, repo }, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
+  if (served) return served;
   const repos = await listRepoSettings(cfg, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
   const row = repos.find((r) => r.owner.toLowerCase() === owner.toLowerCase() && r.repo.toLowerCase() === repo.toLowerCase());
-  if (typeof row?.issue_review_enabled === "boolean") return row.issue_review_enabled;
   const settings = await getSettings(cfg, { timeoutMs: STACK_GUARD_TIMEOUT_MS });
   if (!settings) throw new CommandError("Could not read the account settings");
-  return (settings as { issue_review_enabled?: unknown }).issue_review_enabled === true;
+  const account = settings as { issue_review_enabled?: unknown; issue_auto_review_enabled?: unknown };
+  const on = typeof row?.issue_review_enabled === "boolean" ? row.issue_review_enabled : account.issue_review_enabled === true;
+  if (!on) return "off";
+  const auto = typeof row?.issue_auto_review_enabled === "boolean" ? row.issue_auto_review_enabled : account.issue_auto_review_enabled !== false;
+  return auto ? "auto" : "mention";
 }
 
 export type IssueGateLayer = { branch: string; texts: string[] };
 
 export type IssueGateDeps = {
   getIssueReview?: typeof getIssueReview;
-  issueReviewsEnabled?: typeof issueReviewsEnabledFor;
+  issueReviewMode?: typeof issueReviewModeFor;
 };
 
 export async function assertLinkedIssuesApproved(
@@ -994,25 +1003,26 @@ export async function assertLinkedIssuesApproved(
   }
   const unlinked = linked.filter((layer) => layer.numbers.length === 0);
   if (unlinked.length > 0) {
-    let enabled: boolean;
+    let mode: IssueReviewMode;
     try {
-      enabled = await (deps.issueReviewsEnabled ?? issueReviewsEnabledFor)(cfg, owner, repo);
+      mode = await (deps.issueReviewMode ?? issueReviewModeFor)(cfg, owner, repo);
     } catch (err) {
       throw unverified(err);
     }
-    if (enabled) {
+    if (mode === "auto") {
       throw new CommandError(
         [
           `Issue reviews are on for ${owner}/${repo}, and ${unlinked.map((layer) => layer.branch).join(", ")} links no issue.`,
-          "Open one with `mergestorm issue create --title <problem> --wait`, answer the Vortex review until it is approved,",
+          "Open one with `mergestorm issue create --title <problem> --wait`, reply once to any blocking points in the Vortex review,",
           "then add `Fixes #N` to the tip commit message and submit again.",
         ].join("\n"),
         REVIEW_EXIT.failed,
         "issue_not_approved",
+        { reason: NO_LINKED_ISSUE },
       );
     }
   }
-  const blocking = statuses.filter((status) => status.state !== "approved" && status.state !== "off");
+  const blocking = statuses.filter(issueReviewBlocksPr);
   if (blocking.length > 0) throw issueNotApprovedError(blocking);
 }
 
@@ -2038,6 +2048,7 @@ async function cmdStackLand(args: string[]): Promise<void> {
     ]);
     return;
   }
+  const cascadeFailed = (body as { cascadeFailed?: string }).cascadeFailed;
   await present("Stack", [
     ansi.brightGreen(
       `  Landed` +
@@ -2045,6 +2056,9 @@ async function cmdStackLand(args: string[]): Promise<void> {
         (branch ? ` (${branch})` : "") +
         ` on ${id}`,
     ),
+    ...(cascadeFailed
+      ? [ansi.yellow(`  The layers above it were not updated: ${cascadeFailed}`)]
+      : []),
   ]);
 }
 

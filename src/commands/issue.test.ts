@@ -108,6 +108,7 @@ function review(overrides: Partial<IssueReviewStatus> = {}): IssueReviewStatus {
     repo: "widgets",
     number: 12,
     enabled: true,
+    mode: "auto",
     state: "needs_answers",
     approvedBy: null,
     round: 1,
@@ -159,10 +160,36 @@ test("issue wait polls the origin repository's issue and exits 0 once it is appr
   ]);
 });
 
+test("issue wait exits 0 when the review failed, and says it does not hold the pull request back", async () => {
+  const failed = review({ state: "approved", approvedBy: null, verdict: null, points: [], next: "Open the PR with Fixes #12 in its body." });
+  const lines = await capture(() => cmdIssue(["wait", "12"], { ...WAIT_DEPS, pollIssueReview: async () => failed }));
+  assert.deepEqual(lines, [
+    "Waiting for the Vortex review of acme/widgets#12 …",
+    "The Vortex review of acme/widgets#12 failed, so it does not hold the pull request back.",
+    "Open the PR with Fixes #12 in its body.",
+  ]);
+});
+
 test("issue wait exits 0 when issue reviews are off and prints the endpoint JSON with --json", async () => {
   const body = review({ enabled: false, state: "off", verdict: null, points: [], commentUrl: null, round: null });
   const lines = await capture(() => cmdIssue(["wait", "12", "--json"], { ...WAIT_DEPS, pollIssueReview: async () => body }));
   assert.deepEqual(JSON.parse(lines.join("\n")), body);
+});
+
+test("issue wait in mention mode exits 0 for an issue no one has tagged Vortex on, and still fails on a blocking round", async () => {
+  const unreviewed = review({ mode: "mention", state: "unreviewed", verdict: null, points: [], commentUrl: null, round: null, next: "Tag @mergestorm-vortex to review it." });
+  const lines = await capture(() => cmdIssue(["wait", "12"], { ...WAIT_DEPS, pollIssueReview: async () => unreviewed }));
+  assert.deepEqual(lines.slice(1), ["Issue reviews for acme/widgets run on mention; #12 needs no approval.", "Tag @mergestorm-vortex to review it."]);
+  let thrown: unknown;
+  await capture(async () => {
+    try {
+      await cmdIssue(["wait", "12"], { ...WAIT_DEPS, pollIssueReview: async () => review({ mode: "mention" }) });
+    } catch (err) {
+      thrown = err;
+    }
+  });
+  assert.ok(thrown instanceof CommandError);
+  assert.equal(thrown.code, "issue_not_approved");
 });
 
 test("issue wait lists the points to answer and exits with the findings code for every unapproved state", async () => {
@@ -186,7 +213,9 @@ test("issue wait lists the points to answer and exits with the findings code for
         "  1. [question] Which repo?",
         "  Review: https://github.com/acme/widgets/issues/12#issuecomment-1",
         "  Next: Answer the point in a comment on #12.",
-        "  Reply in a comment on #12, then run `mergestorm issue wait 12`.",
+        state === "needs_answers"
+          ? "  Reply once in a comment on #12, accepting each blocking point's suggested fix or saying why not; then run `mergestorm issue wait 12`."
+          : "  Run `mergestorm issue wait 12`.",
       ].join("\n"),
     );
   }

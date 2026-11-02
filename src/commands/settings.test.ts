@@ -38,6 +38,7 @@ const SETTINGS_BODY = {
   merge_queue_lands_alone_paths: ["**/migrations/**", "db/migrate/**", ".github/workflows/**"],
   merge_queue_overdrive: false,
   issue_review_enabled: false,
+  issue_auto_review_enabled: true,
 };
 
 // --- parseSettingsArgs --------------------------------------------------------
@@ -524,7 +525,7 @@ test("parseSettingsArgs with --repo sets or clears that repository's merge queue
   });
   assert.throws(
     () => parseSettingsArgs(["--repo", "acme/app", "--auto-fix-ci", "on"]),
-    /--merge-queue-lands-alone, --merge-queue-overdrive and --issue-review can be set\./,
+    /--merge-queue-lands-alone, --merge-queue-overdrive, --issue-review and --issue-auto-review can be set\./,
   );
 });
 

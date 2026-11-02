@@ -21,8 +21,12 @@ import {
   patchSettings,
   setStackPolicy,
   getIssueReview,
+  getIssueReviewMode,
+  parseIssueReviewStatus,
   pollIssueReview,
   IssueReviewTimeoutError,
+  issueNotApprovedRefusal,
+  NO_LINKED_ISSUE,
 } from "./api.js";
 import type { Config } from "./config.js";
 import { CommandError } from "./errors.js";
@@ -865,19 +869,27 @@ test("apiFetch names the Breeze chat from MERGESTORM_CHAT_ID, unless the config 
 
 const ISSUE_TARGET = { owner: "acme", repo: "widgets", number: 12 };
 
+test("parseIssueReviewStatus reads the mode and treats a response without one as auto while reviews are on", () => {
+  assert.equal(parseIssueReviewStatus({ state: "unreviewed", enabled: true, mode: "mention" }, ISSUE_TARGET)?.mode, "mention");
+  assert.equal(parseIssueReviewStatus({ state: "unreviewed", enabled: true }, ISSUE_TARGET)?.mode, "auto");
+  assert.equal(parseIssueReviewStatus({ state: "off", enabled: false }, ISSUE_TARGET)?.mode, "off");
+  assert.equal(parseIssueReviewStatus({ state: "unreviewed", enabled: true, mode: "sometimes" }, ISSUE_TARGET)?.mode, "auto");
+});
+
 function issueReviewBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     owner: "acme",
     repo: "widgets",
     number: 12,
     enabled: true,
+    mode: "auto",
     state: "needs_answers",
     approvedBy: null,
     round: 2,
     maxRounds: 4,
     verdict: "needs_answers",
     summary: "Two questions first.",
-    points: [{ kind: "question", text: "Which repo?" }, { kind: "risk", text: "Rollback?" }],
+    points: [{ kind: "question", text: "Which repo?", blocking: true }, { kind: "risk", text: "Rollback?", blocking: false }],
     commentUrl: "https://github.com/acme/widgets/issues/12#issuecomment-1",
     next: "Answer both points in a comment on #12.",
     ...overrides,
@@ -895,9 +907,32 @@ test("getIssueReview reads the review state of the issue in that repository", as
   assert.deepEqual(urls, ["https://api.example.test/api/v1/stacks/issues/12/review?owner=acme&repo=widgets"]);
 });
 
+test("getIssueReviewMode reads the repository mode and returns null when the server has no answer for it", async () => {
+  const urls: string[] = [];
+  originalFetch ??= globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    urls.push(String(input));
+    return new Response(JSON.stringify({ owner: "acme", repo: "widgets", mode: "mention" }), { status: 200 });
+  };
+  assert.equal(await getIssueReviewMode(cfg, { owner: "acme", repo: "widgets" }), "mention");
+  assert.deepEqual(urls, ["https://api.example.test/api/v1/stacks/issues/review-mode?owner=acme&repo=widgets"]);
+  mockFetch(404, { error: "not_found" });
+  assert.equal(await getIssueReviewMode(cfg, { owner: "acme", repo: "widgets" }), null);
+  mockFetch(200, { mode: "sometimes" });
+  await assert.rejects(() => getIssueReviewMode(cfg, { owner: "acme", repo: "widgets" }), /Failed to read the issue review mode/);
+});
+
 test("getIssueReview returns null when the server predates issue reviews", async () => {
   mockFetch(404, { error: "not_found" });
   assert.equal(await getIssueReview(cfg, ISSUE_TARGET), null);
+});
+
+test("getIssueReview refuses when the server says the repository is not connected", async () => {
+  mockFetch(404, { error: "not_found", message: "acme/widgets is not connected to this Mergestorm account." });
+  await assert.rejects(
+    () => getIssueReview(cfg, ISSUE_TARGET),
+    (err) => err instanceof CommandError && err.code === "not_found" && /acme\/widgets is not connected to this Mergestorm account\. Connect it in Mergestorm/.test(err.message),
+  );
 });
 
 test("getIssueReview refuses an unknown state and keeps the server message and rate limits", async () => {
@@ -973,10 +1008,10 @@ test("adoptStack and openStackPull turn a 409 issue_not_approved into the blocki
     "acme/widgets#12: needs_answers (round 2 of 4)",
     "  Two questions first.",
     "  1. [question] Which repo?",
-    "  2. [risk] Rollback?",
+    "  2. [note: risk] Rollback?",
     "  Review: https://github.com/acme/widgets/issues/12#issuecomment-1",
     "  Next: Answer both points in a comment on #12.",
-    "  Reply in a comment on #12, then run `mergestorm issue wait 12`.",
+    "  Reply once in a comment on #12, accepting each blocking point's suggested fix or saying why not; then run `mergestorm issue wait 12`.",
   ].join("\n");
   mockFetch(409, refusal);
   await assert.rejects(
@@ -988,4 +1023,32 @@ test("adoptStack and openStackPull turn a 409 issue_not_approved into the blocki
     () => openStackPull(cfg, PULL_INPUT),
     (err) => err instanceof CommandError && err.code === "issue_not_approved" && err.message === expected,
   );
+});
+
+test("pollIssueReview keeps waiting on an auto-mode issue Vortex has not reviewed yet, until its round finishes", async () => {
+  const responses = [
+    issueReviewBody({ state: "unreviewed", mode: "auto", round: null, verdict: null, points: [] }),
+    issueReviewBody({ state: "pending", round: 1, verdict: null, points: [] }),
+    issueReviewBody({ state: "needs_answers", round: 1 }),
+  ];
+  originalFetch ??= globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(responses.shift()!), { status: 200 });
+  let clock = 0;
+  const sleeps: number[] = [];
+  const status = await pollIssueReview(cfg, ISSUE_TARGET, {
+    now: () => clock,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      clock += ms;
+    },
+  });
+  assert.equal(status?.state, "needs_answers");
+  assert.deepEqual(sleeps, [10_000, 10_000]);
+});
+
+test("issueNotApprovedRefusal marks a refusal with no linked issue so no reply instructions follow it", () => {
+  const unlinked = issueNotApprovedRefusal(409, { error: "issue_not_approved", message: "add Fixes #N", issues: [] }, "acme", "widgets");
+  assert.equal(unlinked?.reason, NO_LINKED_ISSUE);
+  const named = issueNotApprovedRefusal(409, { error: "issue_not_approved", message: "#12 is pending", issues: [{ number: 12, state: "pending" }] }, "acme", "widgets");
+  assert.equal(named?.reason, undefined);
 });

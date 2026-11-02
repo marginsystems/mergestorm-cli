@@ -105,7 +105,7 @@ function makeSubmitHarness(overrides: Partial<StackSubmitDeps> = {}): SubmitHarn
       events.push(`claim:${input.heads.join(",")}`);
     },
     listStacks: async () => [],
-    issueReviewsEnabled: async () => false,
+    issueReviewMode: async () => "off" as const,
     adoptStack: async (owner, repo, prNumber, cfg, policy) => {
       events.push(`adopt:${prNumber}`);
       adoptCalls += 1;
@@ -738,6 +738,7 @@ function issueStatus(number: number, overrides: Partial<IssueReviewStatus> = {})
     repo: "widgets",
     number,
     enabled: true,
+    mode: "auto",
     state: "approved",
     approvedBy: "vortex",
     round: 1,
@@ -760,7 +761,7 @@ test("cmdStackSubmit opens the PR once every issue a new layer links is approved
       asked.push(target.number);
       return issueStatus(target.number, target.number === 13 ? { state: "off", enabled: false } : {});
     },
-    issueReviewsEnabled: async () => {
+    issueReviewMode: async () => {
       throw new Error("settings must not be read when every layer links an issue");
     },
   });
@@ -793,7 +794,7 @@ test("cmdStackSubmit refuses a layer whose linked issue is not approved and push
       "  1. [question] Which repo?",
       "  Review: https://github.com/acme/widgets/issues/12#issuecomment-1",
       "  Next: Answer the point in a comment on #12.",
-      "  Reply in a comment on #12, then run `mergestorm issue wait 12`.",
+      "  Reply once in a comment on #12, accepting each blocking point's suggested fix or saying why not; then run `mergestorm issue wait 12`.",
     ].join("\n"),
   );
   assert.deepEqual(h.pushCalls, []);
@@ -801,7 +802,7 @@ test("cmdStackSubmit refuses a layer whose linked issue is not approved and push
 });
 
 test("cmdStackSubmit with issue reviews on refuses a new layer that links no issue", async () => {
-  const h = makeSubmitHarness({ issueReviewsEnabled: async () => true });
+  const h = makeSubmitHarness({ issueReviewMode: async () => "auto" as const });
   const out = await captureStackOutput(() => cmdStackSubmit([], h.deps));
   assert.ok(out.error instanceof CommandError);
   assert.equal(out.error.code, "issue_not_approved");
@@ -810,13 +811,25 @@ test("cmdStackSubmit with issue reviews on refuses a new layer that links no iss
   assert.deepEqual(h.pushCalls, []);
 });
 
+test("cmdStackSubmit in mention mode opens PRs whose linked issue is not approved and PRs that link no issue", async () => {
+  const linked = makeSubmitHarness({
+    tipCommitMessage: () => "A\n\nFixes #12\n",
+    getIssueReview: async (_cfg, target) => issueStatus(target.number, { mode: "mention", state: "needs_answers", approvedBy: null, verdict: "needs_answers" }),
+  });
+  await cmdStackSubmit([], linked.deps);
+  assert.equal(linked.createPrCalls, 1);
+  const unlinked = makeSubmitHarness({ issueReviewMode: async () => "mention" as const });
+  await cmdStackSubmit([], unlinked.deps);
+  assert.equal(unlinked.createPrCalls, 1);
+});
+
 test("cmdStackSubmit does not gate a layer whose PR is already open", async () => {
   const h = makeSubmitHarness({
     findOpenPrNumber: () => 99,
     getIssueReview: async () => {
       throw new Error("an open PR must not be gated");
     },
-    issueReviewsEnabled: async () => {
+    issueReviewMode: async () => {
       throw new Error("an open PR must not be gated");
     },
   });
@@ -831,6 +844,16 @@ test("cmdStackSubmit passes with a warning on a server without issue reviews and
   assert.ok(passed.stdout.some((line) => line.includes("does not check issue reviews yet")));
   assert.equal(older.createPrCalls, 1);
 
+  const notConnected = makeSubmitHarness({
+    tipCommitMessage: () => "A\n\nFixes #12\n",
+    getIssueReview: async () => {
+      throw new CommandError("acme/widgets is not connected to this Mergestorm account. Connect it in Mergestorm, then try again.", 1, "not_found");
+    },
+  });
+  const refused = await captureStackOutput(() => cmdStackSubmit([], notConnected.deps));
+  assert.match(String((refused.error as Error | null)?.message), /Could not verify the Vortex reviews of the linked issues \(acme\/widgets is not connected/);
+  assert.deepEqual(notConnected.pushCalls, []);
+
   const unreachable = makeSubmitHarness({
     tipCommitMessage: () => "A\n\nFixes #12\n",
     getIssueReview: async () => {
@@ -843,7 +866,7 @@ test("cmdStackSubmit passes with a warning on a server without issue reviews and
   assert.deepEqual(unreachable.pushCalls, []);
 
   const noSettings = makeSubmitHarness({
-    issueReviewsEnabled: async () => {
+    issueReviewMode: async () => {
       throw new Error("fetch failed");
     },
   });
@@ -2065,7 +2088,7 @@ test("stack submit --server-side and stack publish reach GitHub only through Mer
         listStacks: async () => [],
         findStackPull: async () => null,
         claimStackPulls: async () => {},
-        issueReviewsEnabled: async () => false,
+        issueReviewMode: async () => "off" as const,
         publishBranchServerSide: publish,
       }),
     );
@@ -2402,6 +2425,28 @@ describe("stack-watch", { concurrency: false }, () => {
       [stackId, "--head", "not-a-sha"], ["not-a-stack-id"]]) {
       await assert.rejects(() => cmdStack(["watch", ...args]), /usage: mergestorm stack watch/);
     }
+  });
+
+  test("CLI stack land says the layers above were not updated when the cascade failed after the merge", async (t) => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ mergedPrNumber: 41, mergedBranch: "feat/l1", cascadeFailed: "cascade read failed" }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => server.close());
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const child = spawn(process.execPath, ["--import", "tsx/esm", new URL("../cli.ts", import.meta.url).pathname,
+      "stack", "land", stackId], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, MERGESTORM_API_KEY: "test", MERGESTORM_API_URL: `http://127.0.0.1:${address.port}` },
+    });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const status = await new Promise<number | null>((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
+    assert.equal(status, 0, stderr);
+    assert.match(stdout, /Landed #41 \(feat\/l1\)/);
+    assert.match(stdout, /The layers above it were not updated: cascade read failed/);
   });
 
   test("CLI stack watch prints one MS-WATCH ATTENTION line and exits 3 on a conflicted layer", async (t) => {

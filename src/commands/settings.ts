@@ -43,6 +43,7 @@ const REPO_FLAG_LABELS: Readonly<Record<RepoSettingsKey, string>> = {
   merge_queue_lands_alone_paths: "Merge queue lands-alone paths",
   merge_queue_overdrive: "Merge queue overdrive",
   issue_review_enabled: "Vortex issue reviews",
+  issue_auto_review_enabled: "Vortex issue auto review",
 };
 
 function parsePathsFlagValue(flag: string, value: string | undefined, defaults: readonly string[]): string[] {
@@ -101,7 +102,7 @@ function parseRepoSettingsArgs(slug: string, args: string[]): SettingsArgs {
     }
     if (!(REPO_SETTINGS_KEYS as readonly string[]).includes(key)) {
       throw new CommandError(
-        `${flag} is an account setting. With --repo only --auto-patch, --auto-review, --auto-land, --merge-queue-batch, --merge-queue-batch-size, --merge-queue-lands-alone, --merge-queue-overdrive and --issue-review can be set.`,
+        `${flag} is an account setting. With --repo only --auto-patch, --auto-review, --auto-land, --merge-queue-batch, --merge-queue-batch-size, --merge-queue-lands-alone, --merge-queue-overdrive, --issue-review and --issue-auto-review can be set.`,
         2,
         "usage",
       );

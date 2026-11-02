@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import type { Config } from "../config.js";
 import { CommandError } from "../errors.js";
-import { cmdLogin, loggedInLine, pendingLoginPath, validateApiKey } from "./login.js";
+import { cmdLogin, pendingLoginPath, validateApiKey } from "./login.js";
 
 const cfg: Config = {
   apiKey: "msk_live_candidate_key",
@@ -414,13 +414,6 @@ test("a device token that already names the account is stored under it without c
   assert.equal(config?.activeAccount, "marginsystems");
   assert.equal(config?.apiKey, "msk_live_minted");
   assert.ok(printed.some((line) => line.includes("Logged in as marginsystems.")), printed.join("\n"));
-});
-
-test("loggedInLine falls back to the email, then to a plain Logged in", () => {
-  assert.equal(loggedInLine({ github_login: "marginsystems", email: "mark@example.com" }), "Logged in as marginsystems.");
-  assert.equal(loggedInLine({ github_login: null, email: "mark@example.com" }), "Logged in as mark@example.com.");
-  assert.equal(loggedInLine({ github_login: null, email: null }), "Logged in.");
-  assert.equal(loggedInLine(undefined), "Logged in.");
 });
 
 test("login --finish with nothing started says to run --start and calls nothing", async (t) => {

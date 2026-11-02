@@ -48,6 +48,7 @@ export {
   ISSUE_REVIEW_POLL_INTERVAL_MS,
   ISSUE_REVIEW_STATES,
   IssueReviewTimeoutError,
+  NO_LINKED_ISSUE,
   issueNotApprovedError,
   issueNotApprovedRefusal,
   issueReviewLines,
