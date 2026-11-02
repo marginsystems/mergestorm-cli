@@ -142,12 +142,15 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "  Opens the issue as the Surge App; needs write access on GitHub, uses existing labels only",
       "  The same title again returns the open issue it already made when it is among the newest 100 open issues; an older one, or two calls at once, can still create a duplicate",
       "  --wait then waits for the Vortex issue review, like issue wait",
-      "mergestorm issue wait <n> [--repo <owner/repo>] [--timeout <s>] [--json]",
-      "  Waits for the Vortex issue review (default 900s); exits 0 once approved or when issue reviews are off",
-      "  Exits 4 with the points to answer: reply in a comment on the issue, wait again, and open the PR only after approval",
+      "mergestorm issue wait <n> [--after-round <r>] [--repo <owner/repo>] [--timeout <s>] [--json]",
+      "  Waits for the next Vortex verdict (default 900s); exits 0 once approved or when issue reviews are off",
+      "  Exits 4 with the points to answer: answer in one comment on the issue, then run the printed wait --after-round R once",
+      "  Exits 8 when no round started 10 minutes after an answer (MS-ISSUE STALLED line with the reason); never poll GitHub",
+      "mergestorm issue watch <n> [--after-round <r>] [--max <minutes>] [--repo <owner/repo>] [--json]",
+      "  Background form, like stack watch: silent while waiting, then one MS-ISSUE READY / POINTS / STALLED line",
     ],
-    async run(args) {
-      await cmdIssue(args);
+    async run(args, ctx) {
+      await cmdIssue(args, { signal: ctx.signal });
     },
   },
   {

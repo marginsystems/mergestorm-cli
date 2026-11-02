@@ -732,6 +732,11 @@ test("cmdStackSubmit happy path pushes, creates PR, adopts, clears local state",
   assert.equal(h.saved[0]!.stacks[0]!.layers.length, 0);
 });
 
+function waitFor(state: IssueReviewStatus["state"], round: number | null): IssueReviewStatus["wait"] {
+  const status = state === "needs_answers" ? "points" : state === "pending" || state === "unreviewed" ? "round_running" : "approved";
+  return { status, reason: state, verdictRound: round, verdictAt: null, answeredAt: null, retryAt: null, minutes: null };
+}
+
 function issueStatus(number: number, overrides: Partial<IssueReviewStatus> = {}): IssueReviewStatus {
   return {
     owner: "acme",
@@ -748,6 +753,7 @@ function issueStatus(number: number, overrides: Partial<IssueReviewStatus> = {})
     points: [],
     commentUrl: null,
     next: "",
+    wait: waitFor(overrides.state ?? "approved", overrides.round === undefined ? 1 : overrides.round),
     ...overrides,
   };
 }
@@ -794,7 +800,7 @@ test("cmdStackSubmit refuses a layer whose linked issue is not approved and push
       "  1. [question] Which repo?",
       "  Review: https://github.com/acme/widgets/issues/12#issuecomment-1",
       "  Next: Answer the point in a comment on #12.",
-      "  Reply once in a comment on #12, accepting each blocking point's suggested fix or saying why not; then run `mergestorm issue wait 12`.",
+      "  Reply once in a comment on #12, accepting each blocking point's suggested fix or saying why not; then run `mergestorm issue wait 12 --repo acme/widgets --after-round 1` once.",
     ].join("\n"),
   );
   assert.deepEqual(h.pushCalls, []);

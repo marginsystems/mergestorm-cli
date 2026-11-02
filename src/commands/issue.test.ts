@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { IssueReviewTimeoutError, type IssueReviewStatus } from "../api.js";
 import { CommandError, REVIEW_EXIT } from "../errors.js";
-import { cmdIssue, parseIssueCreateArgs, parseIssueWaitArgs } from "./issue.js";
+import { cmdIssue, parseIssueCreateArgs, parseIssueWaitArgs, parseIssueWatchArgs } from "./issue.js";
 
 const CFG = { apiKey: "msk_live_test", apiBase: "https://api.example.test" };
 
@@ -102,6 +102,11 @@ test("issue create --help prints the usage and opens nothing", async () => {
   }
 });
 
+function waitFor(state: IssueReviewStatus["state"], round: number | null): IssueReviewStatus["wait"] {
+  const status = state === "needs_answers" ? "points" : state === "pending" || state === "unreviewed" ? "round_running" : "approved";
+  return { status, reason: state, verdictRound: round, verdictAt: null, answeredAt: null, retryAt: null, minutes: null };
+}
+
 function review(overrides: Partial<IssueReviewStatus> = {}): IssueReviewStatus {
   return {
     owner: "acme",
@@ -118,6 +123,7 @@ function review(overrides: Partial<IssueReviewStatus> = {}): IssueReviewStatus {
     points: [{ kind: "question", text: "Which repo?" }],
     commentUrl: "https://github.com/acme/widgets/issues/12#issuecomment-1",
     next: "Answer the point in a comment on #12.",
+    wait: waitFor(overrides.state ?? "needs_answers", overrides.round === undefined ? 1 : overrides.round),
     ...overrides,
   };
 }
@@ -135,7 +141,15 @@ test("parseIssueWaitArgs reads the number, repo, timeout and json, and refuses a
     json: true,
   });
   assert.deepEqual(parseIssueWaitArgs(["7"]), { number: 7, timeoutMs: 900_000, json: false });
-  for (const args of [[], ["x"], ["0"], ["7", "8"], ["7", "--timeout", "0"], ["7", "--wait"]]) {
+  assert.deepEqual(parseIssueWaitArgs(["7", "--after-round", "2"]), { number: 7, timeoutMs: 900_000, json: false, afterRound: 2 });
+  assert.deepEqual(parseIssueWaitArgs(["7", "--after-round", "2", "--waiting-since", "1793944800000"]), {
+    number: 7,
+    timeoutMs: 900_000,
+    json: false,
+    afterRound: 2,
+    waitingSince: 1793944800000,
+  });
+  for (const args of [[], ["x"], ["0"], ["7", "8"], ["7", "--timeout", "0"], ["7", "--wait"], ["7", "--after-round"], ["7", "--after-round", "0"], ["7", "--after-round", "x"], ["7", "--waiting-since"], ["7", "--waiting-since", "soon"], ["7", "--waiting-since", "0"]]) {
     assert.throws(() => parseIssueWaitArgs(args), (err) => err instanceof CommandError && err.code === "usage", args.join(" "));
   }
   assert.throws(() => parseIssueCreateArgs(["--title", "T", "--timeout", "5"]), /--timeout requires --wait/);
@@ -154,7 +168,7 @@ test("issue wait polls the origin repository's issue and exits 0 once it is appr
   );
   assert.deepEqual(polled, [{ cfg: CFG, target: { owner: "acme", repo: "widgets", number: 12 }, timeoutMs: 60_000 }]);
   assert.deepEqual(lines, [
-    "Waiting for the Vortex review of acme/widgets#12 …",
+    "Waiting for the next Vortex verdict on acme/widgets#12 …",
     "acme/widgets#12 is approved by a person.",
     "Open the pull request with Fixes #12.",
   ]);
@@ -164,7 +178,7 @@ test("issue wait exits 0 when the review failed, and says it does not hold the p
   const failed = review({ state: "approved", approvedBy: null, verdict: null, points: [], next: "Open the PR with Fixes #12 in its body." });
   const lines = await capture(() => cmdIssue(["wait", "12"], { ...WAIT_DEPS, pollIssueReview: async () => failed }));
   assert.deepEqual(lines, [
-    "Waiting for the Vortex review of acme/widgets#12 …",
+    "Waiting for the next Vortex verdict on acme/widgets#12 …",
     "The Vortex review of acme/widgets#12 failed, so it does not hold the pull request back.",
     "Open the PR with Fixes #12 in its body.",
   ]);
@@ -197,7 +211,7 @@ test("issue wait lists the points to answer and exits with the findings code for
     let thrown: unknown;
     await capture(async () => {
       try {
-        await cmdIssue(["wait", "12"], { ...WAIT_DEPS, pollIssueReview: async () => review({ state }) });
+        await cmdIssue(["wait", "12"], { ...WAIT_DEPS, pollIssueReview: async () => review({ state, wait: waitFor("needs_answers", 1) }) });
       } catch (err) {
         thrown = err;
       }
@@ -214,8 +228,8 @@ test("issue wait lists the points to answer and exits with the findings code for
         "  Review: https://github.com/acme/widgets/issues/12#issuecomment-1",
         "  Next: Answer the point in a comment on #12.",
         state === "needs_answers"
-          ? "  Reply once in a comment on #12, accepting each blocking point's suggested fix or saying why not; then run `mergestorm issue wait 12`."
-          : "  Run `mergestorm issue wait 12`.",
+          ? "  Reply once in a comment on #12, accepting each blocking point's suggested fix or saying why not; then run `mergestorm issue wait 12 --repo acme/widgets --after-round 1` once."
+          : "  Run `mergestorm issue wait 12 --repo acme/widgets --after-round 1` once.",
       ].join("\n"),
     );
   }
@@ -234,6 +248,46 @@ test("issue wait --json prints the JSON and still exits with the findings code",
   assert.ok(thrown instanceof CommandError && thrown.exitCode === REVIEW_EXIT.failed);
 });
 
+test("issue wait passes the round cursor and wait start through and prints the next command with it", async () => {
+  const cursors: unknown[] = [];
+  let thrown: unknown;
+  const lines = await capture(async () => {
+    try {
+      await cmdIssue(["wait", "12", "--after-round", "1", "--waiting-since", "1793944800000"], {
+        ...WAIT_DEPS,
+        pollIssueReview: async (_cfg, _target, opts) => {
+          cursors.push(opts?.afterRound, opts?.waitingSince);
+          return review({ round: 2 });
+        },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+  });
+  assert.deepEqual(cursors, [1, 1793944800000]);
+  assert.equal(lines[0], "Waiting for the next Vortex verdict on acme/widgets#12 after round 1 …");
+  assert.ok(thrown instanceof CommandError && thrown.exitCode === REVIEW_EXIT.failed);
+  assert.match(thrown.message, /`mergestorm issue wait 12 --repo acme\/widgets --after-round 2` once\./);
+});
+
+test("issue wait exits with the stalled code and one MS-ISSUE STALLED line when no round started", async () => {
+  const stalled = review({
+    state: "pending",
+    wait: { status: "stalled", reason: "unchanged", verdictRound: 1, verdictAt: null, answeredAt: "2026-11-02T06:24:54Z", retryAt: null, minutes: 14 },
+  });
+  let thrown: unknown;
+  const lines = await capture(async () => {
+    try {
+      await cmdIssue(["wait", "12", "--after-round", "1"], { ...WAIT_DEPS, pollIssueReview: async () => stalled });
+    } catch (err) {
+      thrown = err;
+    }
+  });
+  assert.ok(thrown instanceof CommandError && thrown.exitCode === REVIEW_EXIT.stalled && thrown.code === "issue_review_stalled");
+  assert.match(thrown.message, /^MS-ISSUE STALLED issue=12 round=1 minutes=14 reason=unchanged\n/);
+  assert.match(lines.join("\n"), /Stalled: no new round on #12 after 14 min \(reason: unchanged\)/);
+});
+
 test("issue wait keeps the timeout and auth exit codes and names a server without issue reviews", async () => {
   await assert.rejects(
     () => capture(() => cmdIssue(["wait", "12"], { ...WAIT_DEPS, pollIssueReview: async () => { throw new IssueReviewTimeoutError(review({ state: "pending" })); } })),
@@ -247,6 +301,39 @@ test("issue wait keeps the timeout and auth exit codes and names a server withou
     () => capture(() => cmdIssue(["wait", "12"], { ...WAIT_DEPS, pollIssueReview: async () => null })),
     (err) => err instanceof CommandError && err.code === "issue_review_unavailable",
   );
+});
+
+test("issue watch parses its cursor and --max, and refuses --timeout", () => {
+  assert.deepEqual(parseIssueWatchArgs(["12", "--after-round", "1", "--max", "30"]), { number: 12, json: false, afterRound: 1, maxMs: 1_800_000 });
+  assert.deepEqual(parseIssueWatchArgs(["#7", "--json"]), { number: 7, json: true });
+  for (const args of [[], ["12", "--max", "0"], ["12", "--timeout", "5"], ["12", "--after-round", "x"]]) {
+    assert.throws(() => parseIssueWatchArgs(args), (err) => err instanceof CommandError && err.code === "usage", args.join(" "));
+  }
+});
+
+test("issue watch exits 0 on READY and with the watch exit code otherwise", async () => {
+  await capture(() => cmdIssue(["watch", "12"], { ...WAIT_DEPS, runIssueWatch: async () => ({ outcome: "ready", exitCode: 0, status: null }) }));
+  await assert.rejects(
+    () => capture(() => cmdIssue(["watch", "12"], { ...WAIT_DEPS, runIssueWatch: async () => ({ outcome: "stalled", exitCode: 3, status: null }) })),
+    (err) => err instanceof CommandError && err.exitCode === 3 && err.code === "issue_review_stalled",
+  );
+  await assert.rejects(
+    () => capture(() => cmdIssue(["watch", "12", "--max", "1"], { ...WAIT_DEPS, runIssueWatch: async () => ({ outcome: "timeout", exitCode: 5, status: null }) })),
+    (err) => err instanceof CommandError && err.exitCode === 5,
+  );
+});
+
+test("issue watch prints an ATTENTION failed line when it cannot start", async () => {
+  let thrown: unknown;
+  const lines = await capture(async () => {
+    try {
+      await cmdIssue(["watch", "12", "--max", "-1"], WAIT_DEPS);
+    } catch (err) {
+      thrown = err;
+    }
+  });
+  assert.ok(thrown instanceof CommandError && thrown.exitCode === REVIEW_EXIT.usage);
+  assert.match(lines[0]!, /^MS-ISSUE ATTENTION failed issue=12 error=/);
 });
 
 test("issue create --wait waits for the review of the issue it opened", async () => {

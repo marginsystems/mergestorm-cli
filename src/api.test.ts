@@ -24,6 +24,7 @@ import {
   getIssueReviewMode,
   parseIssueReviewStatus,
   pollIssueReview,
+  issueReviewWaitAfter,
   IssueReviewTimeoutError,
   issueNotApprovedRefusal,
   NO_LINKED_ISSUE,
@@ -903,7 +904,10 @@ test("getIssueReview reads the review state of the issue in that repository", as
     urls.push(String(input));
     return new Response(JSON.stringify(issueReviewBody()), { status: 200 });
   };
-  assert.deepEqual(await getIssueReview(cfg, ISSUE_TARGET), issueReviewBody());
+  assert.deepEqual(await getIssueReview(cfg, ISSUE_TARGET), {
+    ...issueReviewBody(),
+    wait: { status: "points", reason: "needs_answers", verdictRound: 2, verdictAt: null, answeredAt: null, retryAt: null, minutes: null },
+  });
   assert.deepEqual(urls, ["https://api.example.test/api/v1/stacks/issues/12/review?owner=acme&repo=widgets"]);
 });
 
@@ -1011,7 +1015,7 @@ test("adoptStack and openStackPull turn a 409 issue_not_approved into the blocki
     "  2. [note: risk] Rollback?",
     "  Review: https://github.com/acme/widgets/issues/12#issuecomment-1",
     "  Next: Answer both points in a comment on #12.",
-    "  Reply once in a comment on #12, accepting each blocking point's suggested fix or saying why not; then run `mergestorm issue wait 12`.",
+    "  Reply once in a comment on #12, accepting each blocking point's suggested fix or saying why not; then run `mergestorm issue wait 12 --repo acme/widgets --after-round 2` once.",
   ].join("\n");
   mockFetch(409, refusal);
   await assert.rejects(
@@ -1044,6 +1048,131 @@ test("pollIssueReview keeps waiting on an auto-mode issue Vortex has not reviewe
   });
   assert.equal(status?.state, "needs_answers");
   assert.deepEqual(sleeps, [10_000, 10_000]);
+});
+
+function waitBody(status: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { status, reason: status, verdictRound: 2, verdictAt: "2026-11-02T06:22:32Z", answeredAt: null, retryAt: null, minutes: null, ...extra };
+}
+
+function scriptedIssueReviews(bodies: Record<string, unknown>[]): () => number {
+  let reads = 0;
+  originalFetch ??= globalThis.fetch;
+  globalThis.fetch = async () => {
+    const body = bodies[Math.min(reads, bodies.length - 1)]!;
+    reads++;
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  return () => reads;
+}
+
+function fakeClock(): { now: () => number; sleep: (ms: number) => Promise<void> } {
+  let clock = 0;
+  return { now: () => clock, sleep: async (ms) => { clock += ms; } };
+}
+
+test("pollIssueReview never returns the stale verdict once the server has seen an answer", async () => {
+  const reads = scriptedIssueReviews([
+    issueReviewBody({ state: "pending", wait: waitBody("answered_waiting_for_round", { answeredAt: "2026-11-02T06:24:54Z" }) }),
+    issueReviewBody({ state: "pending", round: 3, verdict: "needs_answers", wait: waitBody("round_running", { verdictRound: 2 }) }),
+    issueReviewBody({ state: "approved", approvedBy: "vortex", round: 3, verdict: "ready", points: [], wait: waitBody("approved", { verdictRound: 3 }) }),
+  ]);
+  const status = await pollIssueReview(cfg, ISSUE_TARGET, fakeClock());
+  assert.equal(status?.state, "approved");
+  assert.equal(status?.wait.status, "approved");
+  assert.equal(reads(), 3);
+});
+
+test("pollIssueReview with a round cursor keeps waiting past the verdict it already saw and wakes on the next round", async () => {
+  const reads = scriptedIssueReviews([
+    issueReviewBody({ wait: waitBody("points") }),
+    issueReviewBody({ wait: waitBody("points") }),
+    issueReviewBody({ round: 3, wait: waitBody("points", { verdictRound: 3 }) }),
+  ]);
+  const status = await pollIssueReview(cfg, ISSUE_TARGET, { afterRound: 2, ...fakeClock() });
+  assert.equal(status?.round, 3);
+  assert.equal(status?.wait.status, "points");
+  assert.equal(status?.wait.verdictRound, 3);
+  assert.equal(reads(), 3);
+  scriptedIssueReviews([issueReviewBody({ wait: waitBody("points") })]);
+  assert.equal((await pollIssueReview(cfg, ISSUE_TARGET, { afterRound: 1, sleep: async () => assert.fail("no sleep") }))?.wait.status, "points");
+});
+
+test("pollIssueReview carries the wait start through a timed-out retry so short waits still reach the no-answer stall", async () => {
+  const verdictAt = Date.parse("2026-11-02T06:00:00Z");
+  const start = verdictAt + 30 * 60_000;
+  scriptedIssueReviews([issueReviewBody({ wait: waitBody("points", { verdictAt: "2026-11-02T06:00:00Z" }) })]);
+  let clock = start;
+  const sleep = async (ms: number) => {
+    clock += ms;
+  };
+  let retry = "";
+  await assert.rejects(
+    () => pollIssueReview(cfg, ISSUE_TARGET, { afterRound: 2, timeoutMs: 60_000, now: () => clock, sleep }),
+    (err) => {
+      if (!(err instanceof IssueReviewTimeoutError)) return false;
+      retry = err.message;
+      return true;
+    },
+  );
+  assert.match(retry, new RegExp(`mergestorm issue wait 12 --repo acme/widgets --after-round 2 --waiting-since ${start}`));
+  const stalled = await pollIssueReview(cfg, ISSUE_TARGET, { afterRound: 2, waitingSince: start, timeoutMs: 60_000, now: () => clock, sleep });
+  assert.equal(stalled?.wait.status, "stalled");
+  assert.equal(stalled?.wait.reason, "no_answer_seen");
+});
+
+test("pollIssueReview reports a stall when no round follows the cursor, and the server's own stall at once", async () => {
+  scriptedIssueReviews([issueReviewBody({ wait: waitBody("points", { verdictAt: null }) })]);
+  const stalled = await pollIssueReview(cfg, ISSUE_TARGET, { afterRound: 2, timeoutMs: 3_600_000, ...fakeClock() });
+  assert.equal(stalled?.wait.status, "stalled");
+  assert.equal(stalled?.wait.reason, "no_answer_seen");
+  assert.equal(stalled?.wait.minutes, 10);
+  scriptedIssueReviews([issueReviewBody({ state: "pending", wait: waitBody("stalled", { reason: "commenter_not_allowed", minutes: 12 }) })]);
+  const server = await pollIssueReview(cfg, ISSUE_TARGET, { afterRound: 2, sleep: async () => assert.fail("no sleep") });
+  assert.equal(server?.wait.status, "stalled");
+  assert.equal(server?.wait.reason, "commenter_not_allowed");
+});
+
+test("the no-answer stall clock starts at the verdict, so a fresh wait on an old verdict stalls after a short grace", () => {
+  const verdictAt = Date.parse("2026-11-02T06:22:32Z");
+  const status = parseIssueReviewStatus(issueReviewBody({ wait: waitBody("points") }), ISSUE_TARGET)!;
+  const at = (minutesAfterVerdict: number, waitedMs: number) =>
+    issueReviewWaitAfter(status, { afterRound: 2, waitedMs, nowMs: verdictAt + minutesAfterVerdict * 60_000 });
+  assert.equal(at(30, 60_000).status, "answered_waiting_for_round");
+  const late = at(30, 2 * 60_000);
+  assert.equal(late.status, "stalled");
+  assert.equal(late.minutes, 30);
+  assert.equal(at(5, 5 * 60_000).status, "answered_waiting_for_round");
+});
+
+test("an older server's unreviewed auto issue gets the same first-round stall", () => {
+  const legacy = parseIssueReviewStatus(issueReviewBody({ state: "unreviewed", round: null, verdict: null }), ISSUE_TARGET)!;
+  assert.equal(legacy.wait.status, "stalled");
+  assert.equal(issueReviewWaitAfter(legacy, { waitedMs: 60_000 }).status, "round_running");
+  assert.equal(issueReviewWaitAfter(legacy, { waitedMs: 10 * 60_000 }).status, "stalled");
+});
+
+test("pollIssueReview gives a new issue time for its first round before calling it stalled", async () => {
+  const reads = scriptedIssueReviews([
+    issueReviewBody({ state: "unreviewed", round: null, verdict: null, points: [], wait: waitBody("stalled", { reason: "no_review_started", verdictRound: null }) }),
+    issueReviewBody({ state: "needs_answers", round: 1, wait: waitBody("points", { verdictRound: 1 }) }),
+  ]);
+  const status = await pollIssueReview(cfg, ISSUE_TARGET, fakeClock());
+  assert.equal(status?.wait.status, "points");
+  assert.equal(reads(), 2);
+});
+
+test("pollIssueReview reports the round cap as an approval", async () => {
+  scriptedIssueReviews([issueReviewBody({ state: "approved", approvedBy: "vortex", wait: waitBody("approved", { reason: "round_cap" }) })]);
+  const status = await pollIssueReview(cfg, ISSUE_TARGET, { afterRound: 2, sleep: async () => assert.fail("no sleep") });
+  assert.equal(status?.wait.status, "approved");
+  assert.equal(status?.wait.reason, "round_cap");
+});
+
+test("an older server without a wait object still reads, and a cursor still holds its stale verdict back", () => {
+  const legacy = parseIssueReviewStatus(issueReviewBody(), ISSUE_TARGET)!;
+  assert.deepEqual(legacy.wait, { status: "points", reason: "needs_answers", verdictRound: 2, verdictAt: null, answeredAt: null, retryAt: null, minutes: null });
+  assert.equal(issueReviewWaitAfter(legacy, { afterRound: 2, waitedMs: 0 }).status, "answered_waiting_for_round");
+  assert.equal(issueReviewWaitAfter(legacy, { afterRound: 1, waitedMs: 0 }).status, "points");
 });
 
 test("issueNotApprovedRefusal marks a refusal with no linked issue so no reply instructions follow it", () => {

@@ -249,6 +249,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.66": [
     "`issue wait`; submit needs an approved issue",
   ],
+  "0.3.68": [
+    "`issue watch`; waits skip stale verdicts",
+  ],
   "0.3.67": [
     "Issue review: reply once, then one re-check",
   ],

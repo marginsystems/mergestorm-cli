@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.67`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.68`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.67                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.68                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
 │     ▝▀▀▘      review a diff · usage for tabs · /help for all commands        │
-│       ▀       New in v0.3.67: Issue review: reply once, then one re-check    │
+│       ▀       New in v0.3.68: `issue watch`; waits skip stale verdicts       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -97,7 +97,8 @@ mergestorm whoami [--json]      Active account, key prefix, plan, API base, conf
 mergestorm skill install --claude|--cursor|--agents  Copy the Mergestorm skills into this repo
 mergestorm thread <slug>        Jobs in a review thread
 mergestorm issue create --title <t>  Open a GitHub issue through Mergestorm, no `gh` (`--body`, `--body-file`, `--label`, `--repo`, `--wait`)
-mergestorm issue wait <n>       Wait for the Vortex issue review; exits 0 once approved, 4 with points to answer
+mergestorm issue wait <n>       Wait for the next Vortex verdict; exits 0 once approved, 4 with points, 8 stalled (`--after-round R`)
+mergestorm issue watch <n>      Background issue wait: silent, then one MS-ISSUE READY / POINTS / STALLED line
 mergestorm stack create [name]  New local stack layer (optional `--onto` / `--trunk` / `--extend`)
 mergestorm stack submit         Push layers, open PRs (`gh`), register via adopt (optional `--extend`, `--server-side`)
 mergestorm stack publish        Publish the current branch through Mergestorm with no GitHub credentials (`--base <branch> --extend` to stack, `--status` to read it)
@@ -174,7 +175,7 @@ mg stack publish --status               # absent | pushed | opened | registered
 ```
 
 - **Issues too.** `mg issue create` opens the issue a PR needs through the same Surge App, with existing labels only. Running it again with the same title returns the issue it already opened. Put `Fixes #<n>` in the commit message; `stack submit` carries it into the PR body.
-- **Issue reviews first.** On a repository with Vortex issue reviews on, Vortex reviews each new issue before any PR. `mg issue wait <n>` (or `mg issue create --wait`) waits for that review: it exits 0 once the issue is approved, or exits 4 with the numbered points to answer. Reply once in a comment on the issue, accepting each blocking point's suggested fix or saying why not, and wait again; Vortex re-checks only the blocking points, once, and approves the issue. Notes never block; the PR review checks them against the code. A person can approve early with an issue comment whose first line is `mergestorm-issue: approve`. `stack submit` refuses to open a PR whose tip commit links an issue that is not approved yet, or links no issue at all while issue reviews are on.
+- **Issue reviews first.** On a repository with Vortex issue reviews on, Vortex reviews each new issue before any PR. `mg issue wait <n>` (or `mg issue create --wait`) waits for that review: it exits 0 once the issue is approved, or exits 4 with the numbered points to answer. Reply once in a comment on the issue, accepting each blocking point's suggested fix or saying why not, then run the printed `mg issue wait <n> --after-round <r>` once: it never hands back the verdict you already saw, and exits 8 with `MS-ISSUE STALLED … reason=…` if no round starts within 10 minutes. `mg issue watch <n>` is the same wait as a silent background command, like `mg stack watch`. Never poll GitHub with `gh` or sleep loops while you wait. Vortex re-checks only the blocking points, once, and approves the issue. Notes never block; the PR review checks them against the code. A person can approve early with an issue comment whose first line is `mergestorm-issue: approve`. `stack submit` refuses to open a PR whose tip commit links an issue that is not approved yet, or links no issue at all while issue reviews are on.
 - **Exact contents.** Every commit travels with its Git tree SHA and the whole content of each changed file, so binaries, deletions, renames, executable bits and symlinks arrive unchanged. Mergestorm moves the branch only when GitHub builds the same tree, and `mg` checks the returned tree against your local branch.
 - **Never overwrites surprises.** `mg` looks at the branch on GitHub first. If its files match one of your local commits, only the commits after that one are appended. If they match none (someone else pushed, or you rebased), `mg` stops with `head_changed`; `--replace-head <sha>` replaces exactly that head and nothing else. Mergestorm refuses `main`, `master`, the default branch, protected branches and its own `mg-stack-*`, `mg-park-*` and `mq-batch-*` branches.
 - **Safe to run again.** After a timeout or an error, run the same command again. It finds the branch, pull request and stack it already made and finishes the missing step; it does not create duplicates.

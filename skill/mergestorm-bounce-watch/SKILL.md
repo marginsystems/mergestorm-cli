@@ -1,11 +1,11 @@
 ---
 name: mergestorm-bounce-watch
-description: Watch stacks explicitly named by the human while Auto land is on, patch the current blocker after a bounce, and turn Auto land back on once a bounce that disarmed it is handled. Use for an ongoing stack watch, without taking over Cyclone or landing the stack.
+description: Watch stacks explicitly named by the human while Auto land is on, patch the current blocker after a bounce, and turn Auto land back on once a bounce that disarmed it is handled. Use for an ongoing stack watch, without taking over Cyclone or landing the stack, and for waiting on a Vortex issue review round without polling GitHub.
 ---
 
 # Mergestorm bounce watch
 
-Use only these shipped Mergestorm MCP tools (plus `cyclone_start` and `cyclone_job` for the hosted handoff below): `stack_wait`, `stack_status`, `queue_status`, and `stack_set` with `auto_land: true` only at enrollment on the human's request or as "Re-arm after a bounce" allows. Use local checkout, test, and Git operations to make the patch, and, where the `mg` CLI is installed, the `mg stack watch` command to wait in the background. Auto land owns landing.
+Use only these shipped Mergestorm MCP tools (plus `cyclone_start` and `cyclone_job` for the hosted handoff below): `stack_wait`, `stack_status`, `queue_status`, `issue_review_wait`, and `stack_set` with `auto_land: true` only at enrollment on the human's request or as "Re-arm after a bounce" allows. Use local checkout, test, and Git operations to make the patch, and, where the `mg` CLI is installed, the `mg stack watch` command to wait in the background. Auto land owns landing. "Issue review waits" below covers waiting on a Vortex issue review before the PR exists.
 
 A chat agent that reaches Mergestorm only through the hosted MCP tools has no checkout it can push and no `mg`. It hands each fix a commit would make to Cyclone: `cyclone_start` with task `resolve_conflicts` for a merge conflict, `fix_ci` for a failing check, or `fix_findings` for Vortex findings, then `cyclone_job` with its `dispatch_id` until the job is pushed, completed or failed. It waits with `stack_wait` and does not install `mg`.
 
@@ -30,6 +30,18 @@ This section needs the `mg` CLI where you run commands. Without it, skip this se
 3. When the host resumes you on `MS-WATCH ATTENTION pr=`, call `stack_status` once for that stack, then fix the blocker as steps 3 to 7 of "Watch and patch" say, push, and start the watcher again with `--head` set to the SHA you pushed. When the ATTENTION line ends with `restart="mg stack watch <id> --bounce-id <id> --after-finished-at <time>"` (a merge queue bounce), start the watcher again with that command, adding `--head <sha>` after a push; without those flags a bounce you handled without a push (for example by turning Auto land back on) is reported again at once. On `MS-WATCH ATTENTION failed`, the watcher already retried once: tell the human the stack is not landed and is no longer being watched.
 4. When the human has taken one blocker over and asked you to keep watching the stack, pass `--ignore <blocker-substring>`. The watcher stays silent on the first attention whose blocker contains that text until the blocker, its PR, or its head changes. Attention names one blocker at a time, so while the ignored blocker stands, blockers on higher layers stay hidden too; the next blocked layer wakes you only after the ignored blocker, its PR, or its head changes.
 5. `--until landed` keeps the watcher running after an attention: it prints each new attention line once and exits only when the watch is done or a read fails twice. Use it only when your host streams output lines to you while the command runs.
+
+Never wait on a stack by polling GitHub in a loop: no repeated PR check reads, no `gh run watch`, no loop over the GitHub API, no `sleep` loop. The stack wait is the only wait: `mg stack watch` in the background, or `stack_wait` with `watch.next.args` when the CLI is not installed. Reading CI once on an attention wake (step 3's REST calls) is fine. A loop of those reads burns model tokens and the shared GitHub API limit.
+
+## Issue review waits
+
+On a repository with Vortex issue reviews on, Vortex reviews each issue in rounds before its PR opens. Wait for each round with one Mergestorm wait. Waiting costs no model tokens and no GitHub API calls.
+
+- **One wait per round.** After `mg issue create`, run `mg issue wait <n>` once. On points (`issue wait` exit 4), answer every blocking point in ONE comment on the issue, posted by the issue author or a maintainer. Vortex starts the next round about 90 seconds after that comment, and also after a body edit by the author or a maintainer. Then run `mg issue wait <n>` once more. It returns at once with the state Vortex reports and blocks only while a round is pending. This CLI has no round cursor, so if it prints the verdict you already answered, the next round has not started: tell the human and stop; do not re-run it in a loop. Without the CLI, call the `issue_review_wait` MCP tool with the same owner, repo and number; `timeout_s: 0` reads the state once, and the default blocks only while a round is pending.
+- **Never poll.** Do not loop on `gh issue view`, `gh api`, the issue timeline, or `sleep` while a round runs, and do not re-run `issue wait` in a loop. A `pending` state means a round is queued or running: keep waiting.
+- **Stalled.** Vortex reports no stalled state. If no round starts after your reply, `issue wait` returns at once with the verdict you already answered (`needs_answers`). Tell the human or orchestrator once (issue number and round) and end the turn. Do not re-run `issue wait` in a loop and do not start a polling loop.
+- **Ready.** Exit 0 means open the PR with `Fixes #<n>`. That covers an approved issue, issue reviews off, a mention-mode issue that is still `unreviewed` (it needs no approval), a failed review that holds nothing back, and the round cap.
+- **Foreground wait.** `mg issue wait` blocks up to 15 minutes; run it once more on a timeout. Without a host that can resume this task when the wait ends, tell the human that automatic follow-up is unavailable.
 
 ## Attention on any layer
 

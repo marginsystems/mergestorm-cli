@@ -14,6 +14,7 @@ export type CommandErrorCode =
   | "review_quota"
   | "review_failed"
   | "review_timeout"
+  | "issue_review_stalled"
   | "rate_limited"
   | "cyclone_not_installed"
   | "pr_merged"
@@ -57,6 +58,7 @@ export const REVIEW_EXIT = {
   timeout: 5,
   auth: 6,
   rate_limited: 7,
+  stalled: 8,
 } as const;
 
 export type CommandErrorExtras = {

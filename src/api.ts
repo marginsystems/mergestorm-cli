@@ -25,6 +25,8 @@ export type {
 /** Default per-request timeout so a hung API cannot stall the shell/CI forever. */
 export const DEFAULT_API_TIMEOUT_MS = 30_000;
 
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 /** Message prefix of the CommandError thrown when a request exceeds its timeout. */
 export const API_TIMEOUT_PREFIX = "Request timed out after";
 
@@ -94,7 +96,7 @@ function withRequestSignal(
   const ac = new AbortController();
   const timer = setTimeout(() => {
     ac.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
-  }, timeoutMs);
+  }, Math.min(timeoutMs, MAX_TIMER_DELAY_MS));
 
   const onUserAbort = () => {
     ac.abort(userSignal!.reason);
@@ -1202,12 +1204,28 @@ export type IssueReviewStatus = {
   points: IssueReviewPoint[];
   commentUrl: string | null;
   next: string;
+  wait: IssueReviewWait;
+};
+
+export const ISSUE_REVIEW_WAIT_STATUSES = ["answered_waiting_for_round", "round_running", "points", "approved", "stalled"] as const;
+
+export type IssueReviewWaitStatus = (typeof ISSUE_REVIEW_WAIT_STATUSES)[number];
+
+export type IssueReviewWait = {
+  status: IssueReviewWaitStatus;
+  reason: string;
+  verdictRound: number | null;
+  verdictAt: string | null;
+  answeredAt: string | null;
+  retryAt: string | null;
+  minutes: number | null;
 };
 
 export type IssueReviewTarget = { owner: string; repo: string; number: number };
 
 export const ISSUE_REVIEW_POLL_INTERVAL_MS = 10_000;
 export const ISSUE_REVIEW_DEFAULT_TIMEOUT_MS = 900_000;
+export const ISSUE_REVIEW_STALL_MS = 10 * 60_000;
 const ISSUE_REVIEW_MAX_POINTS = 8;
 const ISSUE_REVIEW_DEFAULT_MAX_ROUNDS = 2;
 
@@ -1215,6 +1233,38 @@ function issueReviewText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const plain = plainServerText(value).trim();
   return plain ? plain : null;
+}
+
+function nullableIso(value: unknown): string | null {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function legacyIssueReviewWait(state: IssueReviewState, mode: IssueReviewMode, round: number | null, verdict: IssueReviewStatus["verdict"]): IssueReviewWait {
+  const status: IssueReviewWaitStatus =
+    state === "approved" || state === "off" || (state === "unreviewed" && mode !== "auto")
+      ? "approved"
+      : state === "needs_answers"
+        ? "points"
+        : state === "unreviewed" || state === "capped"
+          ? "stalled"
+          : "round_running";
+  return { status, reason: status === "stalled" && state === "unreviewed" ? "no_review_started" : state, verdictRound: verdict ? round : null, verdictAt: null, answeredAt: null, retryAt: null, minutes: null };
+}
+
+export function parseIssueReviewWait(raw: unknown): IssueReviewWait | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  const status = ISSUE_REVIEW_WAIT_STATUSES.find((known) => known === row.status);
+  if (!status) return null;
+  return {
+    status,
+    reason: issueReviewText(row.reason) ?? status,
+    verdictRound: isPositiveInteger(row.verdictRound) ? row.verdictRound : null,
+    verdictAt: nullableIso(row.verdictAt),
+    answeredAt: nullableIso(row.answeredAt),
+    retryAt: nullableIso(row.retryAt),
+    minutes: typeof row.minutes === "number" && Number.isInteger(row.minutes) && row.minutes >= 0 ? row.minutes : null,
+  };
 }
 
 export function parseIssueReviewStatus(body: unknown, target: IssueReviewTarget): IssueReviewStatus | null {
@@ -1232,22 +1282,48 @@ export function parseIssueReviewStatus(body: unknown, target: IssueReviewTarget)
       .slice(0, ISSUE_REVIEW_MAX_POINTS)
     : [];
   const verdict = row.verdict === "ready" || row.verdict === "ready_with_notes" || row.verdict === "needs_answers" ? row.verdict : null;
+  const mode = ISSUE_REVIEW_MODES.find((known) => known === row.mode) ?? (row.enabled === true ? "auto" : "off");
+  const round = isPositiveInteger(row.round) ? row.round : null;
   return {
     owner: typeof row.owner === "string" && row.owner ? row.owner : target.owner,
     repo: typeof row.repo === "string" && row.repo ? row.repo : target.repo,
     number: isPositiveInteger(row.number) ? row.number : target.number,
     enabled: row.enabled === true,
-    mode: ISSUE_REVIEW_MODES.find((known) => known === row.mode) ?? (row.enabled === true ? "auto" : "off"),
+    mode,
     state,
     approvedBy: row.approvedBy === "vortex" || row.approvedBy === "human" ? row.approvedBy : null,
-    round: isPositiveInteger(row.round) ? row.round : null,
+    round,
     maxRounds: isPositiveInteger(row.maxRounds) ? row.maxRounds : ISSUE_REVIEW_DEFAULT_MAX_ROUNDS,
     verdict,
     summary: issueReviewText(row.summary),
     points,
     commentUrl: issueReviewText(row.commentUrl),
     next: issueReviewText(row.next) ?? "",
+    wait: parseIssueReviewWait(row.wait) ?? legacyIssueReviewWait(state, mode, round, verdict),
   };
+}
+
+export const ISSUE_REVIEW_ANSWER_GRACE_MS = 2 * 60_000;
+
+export type IssueReviewCursor = { afterRound?: number | null; waitedMs: number; nowMs?: number };
+
+export function issueReviewWaitAfter(status: IssueReviewStatus, cursor: IssueReviewCursor): IssueReviewWait {
+  const wait = status.wait;
+  if (wait.status === "stalled" && wait.reason === "no_review_started") {
+    if (cursor.waitedMs < ISSUE_REVIEW_STALL_MS) return { ...wait, status: "round_running", reason: "first_round_not_queued" };
+    return { ...wait, minutes: Math.floor(cursor.waitedMs / 60_000) };
+  }
+  if (wait.status !== "points" || cursor.afterRound == null) return wait;
+  if ((wait.verdictRound ?? status.round ?? 0) > cursor.afterRound) return wait;
+  const verdictAt = Date.parse(wait.verdictAt ?? "");
+  const sinceVerdict = Number.isFinite(verdictAt) && cursor.nowMs !== undefined ? cursor.nowMs - verdictAt : cursor.waitedMs;
+  const minutes = Math.max(0, Math.floor(sinceVerdict / 60_000));
+  if (cursor.waitedMs >= ISSUE_REVIEW_ANSWER_GRACE_MS && sinceVerdict >= ISSUE_REVIEW_STALL_MS) return { ...wait, status: "stalled", reason: "no_answer_seen", minutes };
+  return { ...wait, status: "answered_waiting_for_round", reason: "answer_not_seen", minutes };
+}
+
+export function issueReviewWaitSettled(wait: IssueReviewWait): boolean {
+  return wait.status === "approved" || wait.status === "points" || wait.status === "stalled";
 }
 
 export async function getIssueReview(
@@ -1310,11 +1386,6 @@ export async function getIssueReviewMode(
   return mode;
 }
 
-export function issueReviewSettled(status: IssueReviewStatus): boolean {
-  if (status.state === "pending") return false;
-  return !(status.state === "unreviewed" && status.mode === "auto");
-}
-
 export function issueReviewBlocksPr(status: IssueReviewStatus): boolean {
   return status.mode === "auto" && status.state !== "approved" && status.state !== "off";
 }
@@ -1322,9 +1393,9 @@ export function issueReviewBlocksPr(status: IssueReviewStatus): boolean {
 export class IssueReviewTimeoutError extends CommandError {
   readonly lastStatus: IssueReviewStatus;
 
-  constructor(lastStatus: IssueReviewStatus) {
+  constructor(lastStatus: IssueReviewStatus, waitingSince?: number) {
     super(
-      `Timed out waiting for the Vortex review of ${lastStatus.owner}/${lastStatus.repo}#${lastStatus.number}. Run \`mergestorm issue wait ${lastStatus.number}\` again.`,
+      `Timed out waiting for the Vortex review of ${lastStatus.owner}/${lastStatus.repo}#${lastStatus.number}. Run \`${issueReviewWaitCommand(lastStatus, waitingSince)}\` once more; do not poll GitHub meanwhile.`,
       REVIEW_EXIT.timeout,
       "review_timeout",
     );
@@ -1334,6 +1405,8 @@ export class IssueReviewTimeoutError extends CommandError {
 }
 
 export type PollIssueReviewOptions = {
+  afterRound?: number | null;
+  waitingSince?: number;
   timeoutMs?: number;
   intervalMs?: number;
   now?: () => number;
@@ -1379,31 +1452,72 @@ export async function pollIssueReview(
   const now = opts.now ?? Date.now;
   const wait = opts.sleep ?? abortableSleep;
   const deadline = now() + timeoutMs;
+  const started = Math.min(opts.waitingSince ?? now(), now());
   let last: IssueReviewStatus | null = null;
   let failure: unknown = null;
   for (;;) {
     try {
-      const status = await getIssueReview(cfg, target, { signal: opts.signal });
-      if (!status || issueReviewSettled(status)) return status;
+      const read = await getIssueReview(cfg, target, { signal: opts.signal, timeoutMs: Math.max(1, deadline - now()) });
+      if (!read) return read;
+      const status = { ...read, wait: issueReviewWaitAfter(read, { afterRound: opts.afterRound, waitedMs: now() - started, nowMs: now() }) };
+      if (issueReviewWaitSettled(status.wait)) return status;
       last = status;
       opts.onTick?.(status);
     } catch (err) {
-      if (!isTransientIssueReviewError(err) || now() >= deadline) throw err;
+      if (!isTransientIssueReviewError(err)) throw err;
       failure = err;
       opts.onTick?.(null);
     }
-    const remaining = deadline - now();
-    if (remaining <= 0) {
-      if (last) throw new IssueReviewTimeoutError(last);
+    if (now() >= deadline) {
+      if (last) throw new IssueReviewTimeoutError(last, started);
       throw failure;
     }
-    await wait(Math.min(intervalMs, remaining), opts.signal);
+    await wait(Math.min(intervalMs, deadline - now()), opts.signal);
+  }
+}
+
+export function issueReviewWaitCommand(status: IssueReviewStatus, waitingSince?: number): string {
+  const after = status.wait.verdictRound ?? (status.verdict ? status.round : null);
+  const since = waitingSince !== undefined ? ` --waiting-since ${Math.floor(waitingSince)}` : "";
+  return `mergestorm issue wait ${status.number} --repo ${status.owner}/${status.repo}${after ? ` --after-round ${after}` : ""}${since}`;
+}
+
+export function issueReviewWaitLine(status: IssueReviewStatus): string | null {
+  const wait = status.wait;
+  const issue = `#${status.number}`;
+  const since = wait.minutes !== null ? ` ${wait.minutes} min` : "";
+  switch (wait.status) {
+    case "answered_waiting_for_round":
+      return wait.reason === "answer_not_seen"
+        ? `Waiting for the round after round ${wait.verdictRound ?? status.round}; Vortex has not seen an answer yet.`
+        : `Vortex has the answer on ${issue}; the next round starts${wait.retryAt ? ` at ${wait.retryAt}` : " shortly"}.`;
+    case "round_running":
+      return `Vortex is running a round on ${issue}${since ? ` (started${since} ago)` : ""}.`;
+    case "stalled":
+      return `Stalled: no new round on ${issue}${since ? ` after${since}` : ""} (reason: ${wait.reason}). ${issueReviewStallAdvice(wait.reason, status.mode)}`;
+    default:
+      return null;
+  }
+}
+
+export function issueReviewStallAdvice(reason: string, mode?: IssueReviewMode): string {
+  switch (reason) {
+    case "no_answer_seen":
+      return `Vortex saw no answer after the last verdict. Reply in one comment on the issue${mode === "mention" ? ` that tags ${ISSUE_REVIEW_TAG}` : ""}, then wait once more; do not poll.`;
+    case "commenter_not_allowed":
+      return `The answer came from someone who is neither the issue author nor a maintainer, so it starts no round. Tell the human.`;
+    case "unchanged":
+      return `Vortex found nothing new since its last round. Answer each blocking point in one comment, then wait once more.`;
+    default:
+      return `Tag ${ISSUE_REVIEW_TAG} once in a comment on the issue, or tell the human; do not poll.`;
   }
 }
 
 export function issueReviewLines(status: IssueReviewStatus): string[] {
   const round = status.round ? ` (round ${status.round} of ${status.maxRounds})` : "";
   const lines = [`${status.owner}/${status.repo}#${status.number}: ${status.state}${round}`];
+  const waitLine = issueReviewWaitLine(status);
+  if (waitLine) lines.push(`  ${waitLine}`);
   if (status.summary) lines.push(`  ${status.summary}`);
   status.points.forEach((point, i) => lines.push(`  ${i + 1}. [${point.blocking === false ? "note: " : ""}${point.kind}] ${point.text}`));
   if (status.commentUrl) lines.push(`  Review: ${status.commentUrl}`);
@@ -1416,7 +1530,7 @@ export function issueNotApprovedError(issues: IssueReviewStatus[], message?: str
   for (const issue of issues) {
     lines.push(...issueReviewLines(issue));
     const reply = issue.state === "needs_answers" ? `Reply once in a comment on #${issue.number}, accepting each blocking point's suggested fix or saying why not; then run` : "Run";
-    lines.push(`  ${reply} \`mergestorm issue wait ${issue.number}\`.`);
+    lines.push(`  ${reply} \`${issueReviewWaitCommand(issue)}\` once.`);
   }
   return new CommandError(lines.join("\n"), REVIEW_EXIT.failed, "issue_not_approved", issues.length === 0 ? { reason: NO_LINKED_ISSUE } : undefined);
 }
