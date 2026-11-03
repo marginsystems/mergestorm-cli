@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import {
   ISSUE_REVIEW_ANSWER_GRACE_MS,
   ISSUE_REVIEW_DEFAULT_TIMEOUT_MS,
+  ISSUE_REVIEW_FIRST_ROUND_GRACE_MS,
   ISSUE_REVIEW_STALL_MS,
   ISSUE_REVIEW_TAG,
   IssueReviewTimeoutError,
@@ -30,7 +31,7 @@ const ISSUE_USAGE = [
   "  Without --after-round the wait still blocks once Vortex has seen an answer after the latest verdict.",
   `  Exits 0 when the issue is approved, issue reviews are off, or the repo reviews on mention and none was requested yet.`,
   `  Exits ${REVIEW_EXIT.failed} when the review has points: answer them in ONE new comment on the issue (the author or a maintainer; on a mention-mode repo the comment must tag ${ISSUE_REVIEW_TAG} and Vortex starts the next round at once; on an auto-mode repo Vortex starts it about 90s later, and an edit of the issue body by them starts one too; editing an earlier comment starts nothing), then run the printed \`mergestorm issue wait N --after-round R\` once.`,
-  `  Exits ${REVIEW_EXIT.stalled} when no round started ${ISSUE_REVIEW_STALL_MS / 60_000} minutes after an answer, at once when an answer failed or was skipped without starting a round, when no review has started ${ISSUE_REVIEW_STALL_MS / 60_000} minutes into the wait, or ${ISSUE_REVIEW_STALL_MS / 60_000} minutes after the verdict with no answer seen (once the wait is at least ${ISSUE_REVIEW_ANSWER_GRACE_MS / 60_000} minutes old), with the reason. Tag ${ISSUE_REVIEW_TAG} at most once for that round, or tell the human; do not poll.`,
+  `  Exits ${REVIEW_EXIT.stalled} when no round started ${ISSUE_REVIEW_STALL_MS / 60_000} minutes after an answer, at once when an answer failed or was skipped without starting a round, when no review has started ${ISSUE_REVIEW_FIRST_ROUND_GRACE_MS / 60_000} minutes into the wait, or ${ISSUE_REVIEW_STALL_MS / 60_000} minutes after the verdict with no answer seen (once the wait is at least ${ISSUE_REVIEW_ANSWER_GRACE_MS / 60_000} minutes old), with the reason. Tag ${ISSUE_REVIEW_TAG} at most once for that round, or tell the human; do not poll.`,
   `  Exits ${REVIEW_EXIT.timeout} on timeout: run the same command once more. One wait per round; never poll GitHub with gh or sleep loops.`,
   "       mergestorm issue watch <number> [--after-round <round>] [--max <minutes>] [--repo <owner/repo>] [--json]",
   "  The background form of issue wait, like stack watch: prints nothing and spends no tokens while it waits, then prints one line and exits.",

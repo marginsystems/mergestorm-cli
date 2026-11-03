@@ -1304,13 +1304,14 @@ export function parseIssueReviewStatus(body: unknown, target: IssueReviewTarget)
 }
 
 export const ISSUE_REVIEW_ANSWER_GRACE_MS = 2 * 60_000;
+export const ISSUE_REVIEW_FIRST_ROUND_GRACE_MS = 2 * 60_000;
 
 export type IssueReviewCursor = { afterRound?: number | null; waitedMs: number; nowMs?: number };
 
 export function issueReviewWaitAfter(status: IssueReviewStatus, cursor: IssueReviewCursor): IssueReviewWait {
   const wait = status.wait;
   if (wait.status === "stalled" && wait.reason === "no_review_started") {
-    if (cursor.waitedMs < ISSUE_REVIEW_STALL_MS) return { ...wait, status: "round_running", reason: "first_round_not_queued" };
+    if (cursor.waitedMs < ISSUE_REVIEW_FIRST_ROUND_GRACE_MS) return { ...wait, status: "round_running", reason: "first_round_not_queued" };
     return { ...wait, minutes: Math.floor(cursor.waitedMs / 60_000) };
   }
   if (wait.status !== "points" || cursor.afterRound == null) return wait;
@@ -1502,6 +1503,8 @@ export function issueReviewWaitLine(status: IssueReviewStatus): string | null {
 
 export function issueReviewStallAdvice(reason: string, mode?: IssueReviewMode): string {
   switch (reason) {
+    case "no_review_started":
+      return `No Vortex review has started, and the pull request stays held until the issue is approved. Tag ${ISSUE_REVIEW_TAG} once in a comment on the issue to start one, then wait once more; if no review starts, tell the human.`;
     case "no_answer_seen":
       return `Vortex saw no answer after the last verdict. Reply in one comment on the issue${mode === "mention" ? ` that tags ${ISSUE_REVIEW_TAG}` : ""}, then wait once more; do not poll.`;
     case "commenter_not_allowed":

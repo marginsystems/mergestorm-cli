@@ -25,6 +25,7 @@ import {
   parseIssueReviewStatus,
   pollIssueReview,
   issueReviewWaitAfter,
+  issueReviewStallAdvice,
   IssueReviewTimeoutError,
   issueNotApprovedRefusal,
   NO_LINKED_ISSUE,
@@ -1148,7 +1149,25 @@ test("an older server's unreviewed auto issue gets the same first-round stall", 
   const legacy = parseIssueReviewStatus(issueReviewBody({ state: "unreviewed", round: null, verdict: null }), ISSUE_TARGET)!;
   assert.equal(legacy.wait.status, "stalled");
   assert.equal(issueReviewWaitAfter(legacy, { waitedMs: 60_000 }).status, "round_running");
-  assert.equal(issueReviewWaitAfter(legacy, { waitedMs: 10 * 60_000 }).status, "stalled");
+  assert.equal(issueReviewWaitAfter(legacy, { waitedMs: 2 * 60_000 }).status, "stalled");
+});
+
+test("pollIssueReview reports an issue no review ever starts on as stalled after two minutes, not at its timeout", async () => {
+  const unreviewed = issueReviewBody({ state: "unreviewed", round: null, verdict: null, points: [], wait: waitBody("stalled", { reason: "no_review_started", verdictRound: null }) });
+  const reads = scriptedIssueReviews(Array.from({ length: 20 }, () => unreviewed));
+  const clock = fakeClock();
+  const status = await pollIssueReview(cfg, ISSUE_TARGET, { timeoutMs: 900_000, ...clock });
+  assert.equal(status?.wait.status, "stalled");
+  assert.equal(status?.wait.reason, "no_review_started");
+  assert.equal(status?.wait.minutes, 2);
+  assert.equal(clock.now(), 120_000);
+  assert.equal(reads(), 13);
+});
+
+test("the no-review stall advice says the pull request is held and to tag Vortex once", () => {
+  const advice = issueReviewStallAdvice("no_review_started", "auto");
+  assert.match(advice, /the pull request stays held until the issue is approved\. Tag @mergestorm-vortex once/);
+  assert.doesNotMatch(advice, /open (it|the pull request)/i);
 });
 
 test("pollIssueReview gives a new issue time for its first round before calling it stalled", async () => {
