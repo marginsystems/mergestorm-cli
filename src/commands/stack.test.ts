@@ -1742,12 +1742,12 @@ test("stack status prints the enriched stack as one JSON value", async () => {
   assert.deepEqual(watch.next.args, { stack_id: stack.id, enrolled_head_sha: "abc1234567890", timeout_s: 45 });
 });
 
-test("stack status names a merge conflict held while Vortex reviews, to act on after the agents", async () => {
+test("stack status names a merge conflict held while Cyclone pushes, to act on after the agents", async () => {
   const stack = { ...structuredClone(REGISTERED[0]!), cycloneConflictOff: "account_auto_resolve_off" as const };
   const head = "abc1234567890";
   Object.assign(stack.layers[0]!, {
     headSha: head, mergeableHeadSha: head, mergeable: false, mergeableState: "dirty", parentBranch: "main",
-    vortexStatus: "reviewing", agentRuns: [{ agent: "vortex", status: "reviewing", sha: head }],
+    cycloneStatus: "patching", agentRuns: [{ agent: "cyclone", status: "patching", sha: head }],
   });
   const deps = {
     loadConfig: async () => ({ apiKey: "test", apiBase: "https://api.example.test" }),
@@ -1758,12 +1758,12 @@ test("stack status names a merge conflict held while Vortex reviews, to act on a
   const body = JSON.parse(json.stdout[0]!);
   assert.deepEqual(body.held, {
     prNumber: stack.layers[0]!.prNumber, headSha: head, blocker: "Merge conflicts vs main", bounceKind: null,
-    actAfter: "agents_idle", waitingOn: ["vortex"],
+    actAfter: "agents_idle", waitingOn: ["cyclone"],
   });
   assert.equal(body.repair.kind, "merge_conflict");
   const human = await captureStackOutput(() => cmdStackStatus([stack.id], deps));
   const text = strip(human.stdout.join("\n"));
-  assert.match(text, new RegExp(`Held: #${stack.layers[0]!.prNumber} Merge conflicts vs main\\. Plan the fix; act once Vortex is idle and the watch returns attention\\.`));
+  assert.match(text, new RegExp(`Held: #${stack.layers[0]!.prNumber} Merge conflicts vs main\\. Plan the fix; act once Cyclone is idle and the watch returns attention\\.`));
   assert.ok(text.indexOf("Held:") < text.indexOf("Repair #"));
 });
 

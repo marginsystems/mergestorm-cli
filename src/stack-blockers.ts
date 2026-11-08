@@ -1436,7 +1436,8 @@ export function stackBlockers(stack: StackDto, entries: MergeQueueEntryDto[] = [
   let agents = focus ? layerAgents(focus) : null;
   let busy: StackAgentBusy[] = [];
   if (attention && agents) {
-    for (const agent of ["cyclone", "vortex"] as const) {
+    const conflictWaitsOnPushesOnly = !!classified && AUTO_RESOLVE_REASONS.includes(classified.reason);
+    for (const agent of conflictWaitsOnPushesOnly ? ["cyclone"] as const : ["cyclone", "vortex"] as const) {
       if (agents.busy[agent]) busy.push({ prNumber: attention.prNumber, headSha: attention.headSha, agent, blocker: attention.blocker });
     }
   }

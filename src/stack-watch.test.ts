@@ -1002,17 +1002,16 @@ test("a busy hold never stamps the bounce into the cursor", async () => {
 const dirtyMain = { mergeable: false, mergeableState: "dirty" };
 const vortexBusy = { vortexStatus: "reviewing" as const, vortexReview: reviewing(HEAD),
   agentRuns: [{ agent: "vortex" as const, status: "reviewing", sha: HEAD }] };
+const cycloneBusy = { cycloneStatus: "patching" as const, agentRuns: [{ agent: "cyclone" as const, status: "patching", sha: HEAD }] };
 
-test("a merge conflict while Vortex reviews is in_progress with the blocker named for after the agents", async () => {
-  const h = harness(stack([layer({ ...dirtyMain, ...vortexBusy })]));
+test("a merge conflict while Cyclone pushes and Vortex reviews waits only on Cyclone", async () => {
+  const h = harness(stack([layer({ ...dirtyMain, ...vortexBusy, cycloneStatus: "patching",
+    agentRuns: [...vortexBusy.agentRuns, { agent: "cyclone", status: "patching", sha: HEAD }] })]));
   const result = await heldInProgress(h.options);
   assert.equal(result.blocker, "Merge conflicts vs main");
-  assert.equal(result.prNumber, 42);
-  assert.equal(result.headSha, HEAD);
   assert.equal(result.actAfter, "agents_idle");
-  assert.deepEqual(result.waitingOn, ["vortex"]);
-  assert.deepEqual(result.issues, [{ prNumber: 42, headSha: HEAD, blocker: "Merge conflicts vs main", bounceKind: null }]);
-  assert.deepEqual(result.busy, [{ prNumber: 42, headSha: HEAD, agent: "vortex", blocker: "Merge conflicts vs main" }]);
+  assert.deepEqual(result.waitingOn, ["cyclone"]);
+  assert.deepEqual(result.busy, [{ prNumber: 42, headSha: HEAD, agent: "cyclone", blocker: "Merge conflicts vs main" }]);
   assert.equal(result.repair?.kind, "merge_conflict");
   assert.equal(result.watch.done, false);
 });
@@ -1068,9 +1067,9 @@ test("the summary tells the watcher to act on a held blocker only after the agen
   const held = stackBlockers(stack([layer({ ...dirtyMain, ...vortexBusy, cycloneStatus: "patching",
     agentRuns: [{ agent: "vortex", status: "reviewing", sha: HEAD }, { agent: "cyclone", status: "patching", sha: HEAD }] })]));
   assert.equal(held.attention, null);
-  assert.deepEqual(held.held?.waitingOn, ["cyclone", "vortex"]);
+  assert.deepEqual(held.held?.waitingOn, ["cyclone"]);
   assert.equal(stackBlockersSummary(held.held, held.issues, held.busy, null, held.held?.actAfter ?? null),
-    " · blocked after the agents: #42 Merge conflicts vs main (plan the fix; act once Cyclone patches and Vortex reviews finish and the watch returns attention)");
+    " · blocked after the agents: #42 Merge conflicts vs main (plan the fix; act once Cyclone patches finish and the watch returns attention)");
 });
 
 type UnitMember = NonNullable<StackDto["unit"]>["members"][number];
@@ -2614,7 +2613,7 @@ test("attention, held and issues carry only the published blocker fields", () =>
   const published = ["blocker", "bounceKind", "headSha", "prNumber"];
   const plain = stackBlockers(stack([layer(dirtyMain)]));
   assert.deepEqual(Object.keys(plain.attention ?? {}).sort(), published);
-  const held = stackBlockers(stack([layer({ ...dirtyMain, ...vortexBusy })]));
+  const held = stackBlockers(stack([layer({ ...dirtyMain, ...cycloneBusy })]));
   assert.deepEqual(Object.keys(held.held ?? {}).sort(), ["actAfter", ...published, "waitingOn"].sort());
   for (const issue of held.issues) assert.deepEqual(Object.keys(issue).sort(), published);
 });
@@ -2670,21 +2669,22 @@ test("after Cyclone hands the conflict off at the head, the watch returns attent
   assert.match(result.repair?.kind === "restack_conflict" ? result.repair.note ?? "" : "", /left it for a person \(Cyclone already resolved conflicts on this PR twice today, its daily cap\)/);
 });
 
-test("a conflict handed off at the head stays named in the hold while Vortex is busy", async () => {
+test("a conflict handed off at the head is attention while Vortex is busy", async () => {
   const h = harness(autoResolveOn([layer({ ...dirtyMain, ...vortexBusy, ...conflictHandoff() })]));
-  const result = await heldInProgress(h.options);
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
   assert.equal(result.blocker, "Merge conflicts vs main");
-  assert.equal(result.actAfter, "agents_idle");
   assert.match(result.repair?.kind === "merge_conflict" ? result.repair.note ?? "" : "", /Cyclone could not resolve the conflict and left it for a person/);
 });
 
-test("with auto-resolve off, a conflict is attention and held while an agent is busy, as before", async () => {
+test("with auto-resolve off, a conflict is attention, and held only while Cyclone is pushing", async () => {
   const off = (extra: Partial<StackLayerDto>) => ({ ...stack([layer({ ...dirtyMain, ...extra })]), cycloneConflictOff: "stack_auto_resolve_off" as const });
   const attention = await pollStackWatch(cfg, "stack", harness(off({})).options);
   assert.equal(attention.status, "attention");
   assert.equal(attention.repair?.kind === "merge_conflict" ? attention.repair.steps : "", conflictRepairSteps("feature", "main"));
   assert.equal(attention.repair?.kind === "merge_conflict" ? attention.repair.note : "", "Cyclone will not resolve this conflict by itself: auto-resolve conflicts is off for this stack.");
-  const held = await heldInProgress(harness(off(vortexBusy)).options);
+  assert.equal((await pollStackWatch(cfg, "stack", harness(off(vortexBusy)).options)).status, "attention");
+  const held = await heldInProgress(harness(off(cycloneBusy)).options);
   assert.equal(held.actAfter, "agents_idle");
   assert.equal(held.blocker, "Merge conflicts vs main");
 });

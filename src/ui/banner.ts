@@ -249,6 +249,9 @@ const WHATS_NEW: Record<string, string[]> = {
   "0.3.66": [
     "`issue wait`; submit needs an approved issue",
   ],
+  "0.3.70": [
+    "Watch: merge conflicts show at once",
+  ],
   "0.3.69": [
     "Issue wait: no-review stalls in 2 min",
   ],

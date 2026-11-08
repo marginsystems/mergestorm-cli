@@ -450,3 +450,37 @@ test("a failed restack of a Breeze branch gives the Breeze rebase steps", () => 
   assert.match(repair?.steps ?? "", /git rebase origin\/main/);
   assert.doesNotMatch(repair?.steps ?? "", /git merge/);
 });
+
+test("a conflict is attention while Vortex reviews, because a review pushes nothing (#7010)", () => {
+  const vortexBusy: Partial<StackLayerDto> = { vortexStatus: "reviewing",
+    vortexReview: { status: "reviewing", head_sha: HEAD, pass: 1 } as StackLayerDto["vortexReview"],
+    agentRuns: [{ agent: "vortex", status: "reviewing", sha: HEAD }] };
+  const cases: [Partial<StackLayerDto>, string][] = [
+    [{ mergeable: false, mergeableState: "dirty" }, "Merge conflicts vs main"],
+    [{ state: "conflict" }, "Conflict"],
+  ];
+  for (const [blocked, blocker] of cases) {
+    const result = stackBlockers(stack([layer({ ...blocked, ...vortexBusy })]), []);
+    assert.equal(result.attention?.blocker, blocker, JSON.stringify(blocked));
+    assert.equal(result.held, null);
+    assert.deepEqual(result.busy, []);
+  }
+});
+
+test("a merge conflict on movement-lab#1896 while Vortex re-reviews a Cyclone push is attention, not held", () => {
+  const result = stackBlockers(stack([layer({ prNumber: 1896, branch: "ms/lod-workers",
+    mergeable: false, mergeableState: "dirty", vortexStatus: "reviewing",
+    vortexReview: { status: "reviewing", head_sha: HEAD, pass: 2 } as StackLayerDto["vortexReview"],
+    agentRuns: [{ agent: "vortex", status: "reviewing", sha: HEAD }] })]), []);
+  assert.equal(result.attention?.prNumber, 1896);
+  assert.equal(result.attention?.blocker, "Merge conflicts vs main");
+  assert.equal(result.repair?.kind, "merge_conflict");
+});
+
+test("a Draft PR is still held while Vortex reviews", () => {
+  const result = stackBlockers(stack([layer({ draft: true, vortexStatus: "reviewing",
+    vortexReview: { status: "reviewing", head_sha: HEAD, pass: 1 } as StackLayerDto["vortexReview"],
+    agentRuns: [{ agent: "vortex", status: "reviewing", sha: HEAD }] })]), []);
+  assert.equal(result.attention, null);
+  assert.deepEqual(result.held?.waitingOn, ["vortex"]);
+});
