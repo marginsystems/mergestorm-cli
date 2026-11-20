@@ -24,12 +24,14 @@ import { buildConfigRows, canBrowse, openTabsBrowser } from "./browse.js";
  */
 export const SETTINGS_FLAGS = BEARER_SETTINGS_FLAGS;
 
-type IgnoreBotOperation = { action: "add" | "remove"; login: string } | { action: "clear" };
+type LoginOperation = { action: "add" | "remove"; login: string } | { action: "clear" };
+type LoginsKey = "ignored_bot_logins" | "cyclone_patch_bot_logins";
+type LoginsEdit = { key: LoginsKey; ops: LoginOperation[] };
 type RepoSettingsScope = { owner: string; repo: string; patch: RepoSettingsPatch };
 export type SettingsArgs = {
   json: boolean;
   patch: SettingsPatch;
-  ignoreBots?: IgnoreBotOperation[];
+  loginEdits?: LoginsEdit[];
   repo?: RepoSettingsScope;
   listRepos?: boolean;
 };
@@ -203,7 +205,7 @@ export function parseSettingsArgs(rawArgs: string[]): SettingsArgs {
     return { json: args.includes("--json"), patch: {}, listRepos: true };
   }
   let json = false;
-  const ignoreBots: IgnoreBotOperation[] = [];
+  const loginEdits: LoginsEdit[] = [];
   const patch: SettingsPatch = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -228,9 +230,14 @@ export function parseSettingsArgs(rawArgs: string[]): SettingsArgs {
       continue;
     }
     if ("kind" in row && row.kind === "logins") {
-      if (value === "clear") ignoreBots.push({ action: "clear" });
+      let edit = loginEdits.find((entry) => entry.key === row.key);
+      if (!edit) {
+        edit = { key: row.key, ops: [] };
+        loginEdits.push(edit);
+      }
+      if (value === "clear") edit.ops.push({ action: "clear" });
       else if ((value === "add" || value === "remove") && args[i + 1] && !args[i + 1]!.startsWith("--")) {
-        ignoreBots.push({ action: value, login: canonicalLogin(args[++i]!) });
+        edit.ops.push({ action: value, login: canonicalLogin(args[++i]!) });
       } else {
         throw new CommandError(`${flag} takes add <login>, remove <login>, or clear.`, 2, "usage");
       }
@@ -261,7 +268,7 @@ export function parseSettingsArgs(rawArgs: string[]): SettingsArgs {
     }
     Object.assign(patch, { [key]: value === "on" });
   }
-  return { json, patch, ...(ignoreBots.length ? { ignoreBots } : {}) };
+  return { json, patch, ...(loginEdits.length ? { loginEdits } : {}) };
 }
 
 /** Static printout includes the Config toggles plus enum and login settings. */
@@ -300,8 +307,8 @@ export async function cmdSettings(
     await cmdRepoSettings(parsed, opts);
     return;
   }
-  const { json, patch, ignoreBots } = parsed;
-  const hasPatch = Object.keys(patch).length > 0 || Boolean(ignoreBots?.length);
+  const { json, patch, loginEdits } = parsed;
+  const hasPatch = Object.keys(patch).length > 0 || Boolean(loginEdits?.length);
 
   // Bare `settings` on a TTY: the tabbed browser, opened on Config.
   if (!hasPatch && !json && canBrowse()) {
@@ -310,25 +317,27 @@ export async function cmdSettings(
   }
 
   const cfg = await loadConfig();
-  if (ignoreBots?.length) {
-    // A leading clear needs no read. Otherwise fetch before writing the full list.
-    const current = ignoreBots[0]!.action === "clear" ? null : await getSettings(cfg);
-    if (ignoreBots[0]!.action !== "clear" && !current) {
-      throw new CommandError("Settings are not available; cannot update ignored bot logins.");
+  if (loginEdits?.length) {
+    const needsRead = loginEdits.some((edit) => edit.ops[0]!.action !== "clear");
+    const current = needsRead ? await getSettings(cfg) : null;
+    if (needsRead && !current) {
+      throw new CommandError("Settings are not available; cannot update bot logins.");
     }
-    let logins = [...new Set((current?.ignored_bot_logins ?? []).flatMap((raw) => {
-      try {
-        return [canonicalLogin(raw)];
-      } catch {
-        return [];
+    for (const edit of loginEdits) {
+      let logins = edit.ops[0]!.action === "clear" ? [] : [...new Set((current?.[edit.key] ?? []).flatMap((raw) => {
+        try {
+          return [canonicalLogin(raw)];
+        } catch {
+          return [];
+        }
+      }))];
+      for (const op of edit.ops) {
+        if (op.action === "clear") logins = [];
+        else if (op.action === "remove") logins = logins.filter((login) => login !== op.login);
+        else if (!logins.includes(op.login)) logins.push(op.login);
       }
-    }))];
-    for (const op of ignoreBots) {
-      if (op.action === "clear") logins = [];
-      else if (op.action === "remove") logins = logins.filter((login) => login !== op.login);
-      else if (!logins.includes(op.login)) logins.push(op.login);
+      patch[edit.key] = logins;
     }
-    patch.ignored_bot_logins = logins;
   }
   let settings: SettingsResponse;
   if (hasPatch) {

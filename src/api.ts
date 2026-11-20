@@ -1688,9 +1688,17 @@ async function queueMutation(
   if (status === 409) {
     const refusal = body as { error?: unknown; message?: unknown } | null;
     if (
-      (refusal?.error === "conflict_unchanged" || refusal?.error === "ci_failed") &&
+      (refusal?.error === "conflict_unchanged" ||
+        refusal?.error === "ci_failed" ||
+        refusal?.error === "vortex_not_green") &&
       typeof refusal.message === "string"
     ) {
+      throw new CommandError(refusal.message);
+    }
+  }
+  if (status === 503) {
+    const refusal = body as { error?: unknown; message?: unknown } | null;
+    if (refusal?.error === "review_unreadable" && typeof refusal.message === "string") {
       throw new CommandError(refusal.message);
     }
   }

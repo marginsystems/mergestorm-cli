@@ -178,10 +178,10 @@ test("what's new covers the shipped package version (no empty pane)", () => {
   const rows = buildBannerRows(loggedIn(cliVersion()), 120);
   const text = stripAnsi(rows.join("\n"));
   assert.match(text, new RegExp(`New in v${cliVersion().replace(/\./g, "\\.")}`));
-  assert.match(text, /Watch: merge conflicts show at once/);
+  assert.match(text, /Watch: throttled heads wake you at once/);
 
   const narrowText = stripAnsi(buildBannerRows(loggedIn(cliVersion()), 80).join("\n"));
-  assert.match(narrowText, /Watch: merge conflicts/);
+  assert.match(narrowText, /Watch: throttled heads/);
 });
 
 test("idle banner paints every tornado row verbatim", () => {

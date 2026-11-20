@@ -237,6 +237,36 @@ describe("queue commands", { concurrency: false }, () => {
     );
   });
 
+  test("mg queue add prints the refusal for a head Vortex has not cleared", async () => {
+    configureApi();
+    const message =
+      "Not queued: Vortex's review of #2254 at 7c60668 has 7 open findings. Fix the real ones and push, or record a wrong one with mg dismiss, then enqueue again. Nothing was enqueued.";
+    globalThis.fetch = async () =>
+      Response.json(
+        {
+          error: "vortex_not_green",
+          message,
+          review: { prNumber: 2254, headSha: "7c6066803a23a293fbdd183ff0e596ca73781c73", state: "not_clear", openFindings: 7 },
+        },
+        { status: 409 },
+      );
+    await assert.rejects(
+      () => cmdQueue(["add", stackId]),
+      (err: unknown) => err instanceof CommandError && err.message === message,
+    );
+  });
+
+  test("mg queue add prints the refusal when the Vortex review cannot be read", async () => {
+    configureApi();
+    const message =
+      "Not queued: Mergestorm could not read the Vortex review of #2254, so it cannot check the head being queued is cleared. Nothing was enqueued; try again.";
+    globalThis.fetch = async () => Response.json({ error: "review_unreadable", message }, { status: 503 });
+    await assert.rejects(
+      () => cmdQueue(["add", stackId]),
+      (err: unknown) => err instanceof CommandError && err.message === message,
+    );
+  });
+
   test("mg queue rm surfaces a 409 already_finished cancel", async () => {
     configureApi();
     globalThis.fetch = async (input, init) => {

@@ -22,7 +22,7 @@ import {
   resetStackMeta,
   saveStackMeta,
   selectStackForCreate,
-  setActiveAutoEnqueue,
+  setActivePolicy,
   stackMetaPath,
   type StackMeta,
 } from "./stack-meta.js";
@@ -203,14 +203,14 @@ test("save corrects permissive existing directory and file modes", async () => {
 });
 
 test("multi-stack selection and cleanup preserve independent stacks", () => {
-  let meta = setActiveAutoEnqueue(emptyStackMeta("main"), true);
+  let meta = setActivePolicy(emptyStackMeta("main"), { autoEnqueueWhenReady: true });
   meta = appendLayer(meta, {
     branch: "ms/one",
     parentBranch: "main",
   });
   assert.equal(meta.stacks[0]!.autoEnqueueWhenReady, true);
   meta = selectStackForCreate(meta, "main");
-  meta = setActiveAutoEnqueue(meta, false);
+  meta = setActivePolicy(meta, { autoEnqueueWhenReady: false });
   meta = appendLayer(meta, { branch: "ms/two", parentBranch: "main" });
   assert.equal(meta.stacks.length, 2);
   assert.equal(meta.stacks[1]!.autoEnqueueWhenReady, false);

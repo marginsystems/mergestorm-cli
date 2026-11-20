@@ -14,6 +14,7 @@ const stripAnsi = (s: string): string => s.replace(STRIP_ANSI, "");
 
 const SETTINGS_BODY = {
   ignored_bot_logins: ["renovate"],
+  cyclone_patch_bot_logins: ["mergestorm-vortex"],
   vortex_bot_skip_check: "none" as const,
   vortex_findings_check: "neutral" as const,
   cyclone_patch_failure_check: "failure" as const,
@@ -401,6 +402,7 @@ test("human settings show stored enums and comma-separated or empty lists", () =
   assert.match(text, /Vortex findings check\s+neutral/);
   assert.match(text, /Cyclone patch failure check\s+failure/);
   assert.match(formatSettingsLines({ ...SETTINGS_BODY, ignored_bot_logins: [] }).join("\n"), /Ignored bot logins\s+\(empty\)/);
+  assert.match(text, /Bots Cyclone patches\s+mergestorm-vortex/);
 });
 
 test("human settings mark newer kind rows missing from an older API as unavailable", () => {
@@ -436,6 +438,28 @@ for (const [args, expected, methods] of [
     const text = await captureLog(() => cmdSettings(["--ignore-bot", ...args, "--json"]));
     assert.deepEqual(seen, methods);
     assert.deepEqual(JSON.parse(text).ignored_bot_logins, expected);
+  });
+}
+
+for (const [args, expected, methods] of [
+  [["add", "CodeRabbitAI[bot]"], ["mergestorm-vortex", "coderabbitai"], ["GET", "PATCH"]],
+  [["remove", "mergestorm-vortex[bot]"], [], ["GET", "PATCH"]],
+  [["clear"], [], ["PATCH"]],
+] as const) {
+  test(`cyclone patch bot ${args.join(" ")} patches only cyclone_patch_bot_logins`, async () => {
+    useTestEnv();
+    originalFetch = globalThis.fetch;
+    const seen: string[] = [];
+    globalThis.fetch = async (_input, init) => {
+      const method = init?.method ?? "GET";
+      seen.push(method);
+      if (method === "PATCH") assert.deepEqual(JSON.parse(String(init?.body)), { cyclone_patch_bot_logins: expected });
+      return Response.json({ ...SETTINGS_BODY, ...(method === "PATCH" ? { cyclone_patch_bot_logins: expected } : {}) });
+    };
+    const text = await captureLog(() => cmdSettings(["--cyclone-patch-bot", ...args, "--json"]));
+    assert.deepEqual(seen, methods);
+    assert.deepEqual(JSON.parse(text).cyclone_patch_bot_logins, expected);
+    assert.deepEqual(JSON.parse(text).ignored_bot_logins, ["renovate"]);
   });
 }
 

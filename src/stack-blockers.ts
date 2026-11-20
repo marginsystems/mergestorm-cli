@@ -314,6 +314,10 @@ function vortexFindingsRestAtHead(layer: StackLayerDto): boolean {
   return layer.vortexStatus === "findings" || layer.vortexStatus === "throttled";
 }
 
+function vortexThrottledAtHead(layer: StackLayerDto): boolean {
+  return vortexFindingsRestAtHead(layer) && layer.vortexStatus === "throttled";
+}
+
 function vortexChangesRequestedAtHead(layer: StackLayerDto): boolean {
   return vortexFindingsRestAtHead(layer) && layer.reviewStatus === "changes_requested";
 }
@@ -409,11 +413,18 @@ export function autoResolveActive(stack: StackDto, layer: StackLayerDto): boolea
     !sameHead(layer.cycloneConflictHandoff?.headSha, layer.headSha);
 }
 
+const CONFLICT_RETRY_GATES: ReadonlySet<string> = new Set(["credits_exhausted", "auto_resolve_daily_cap"]);
+
 function conflictHandoffNote(stack: StackDto, layer: StackLayerDto): string | null {
   if (isLandPrLayer(stack, layer)) return null;
   const handoff = layer.cycloneConflictHandoff;
   if (handoff && sameHead(handoff.headSha, layer.headSha)) {
-    return `Cyclone tried to resolve this conflict at ${layer.headSha ?? handoff.headSha} and left it for a person (${cycloneHandoffWords(handoff.reason)}), so it will not try this head again.`;
+    const head = layer.headSha ?? handoff.headSha;
+    const why = cycloneHandoffWords(handoff.reason);
+    if (CONFLICT_RETRY_GATES.has(handoff.reason) && !stack.cycloneConflictOff) {
+      return `Cyclone did not start on this conflict at ${head} (${why}). It tries this head again later, waiting longer after each try that is stopped the same way.`;
+    }
+    return `Cyclone tried to resolve this conflict at ${head} and left it for a person (${why}), so it will not try this head again.`;
   }
   if (stack.cycloneConflictOff) {
     return `Cyclone will not resolve this conflict by itself: ${cycloneHandoffWords(stack.cycloneConflictOff)}.`;
@@ -446,25 +457,10 @@ function ciHandoffNote(stack: StackDto, layer: StackLayerDto): string | null {
   return null;
 }
 
-const CYCLONE_HELD_FINDINGS_REASONS: readonly string[] = [
-  "failed",
-  CYCLONE_FIX_HELD_REASON,
-  "left_for_human",
-  "infra_failure",
-  "pr_state_unavailable",
-  "vortex_patch_cap",
-  "patch_job_lost",
-  "run_deadline",
-  "unsupported_language",
-  "credits_exhausted",
-  "no_billing",
-  "policy_owner_changed",
-];
+const CYCLONE_GOVERNANCE_HOLD_REASON = "hold";
 
-function vortexImportantFindingsHeldAtHead(layer: StackLayerDto): boolean {
-  return vortexFindingsRestAtHead(layer) && layer.reviewStatus === "reviewed" &&
-    sameHead(layer.cycloneHandoff?.headSha, layer.headSha) &&
-    CYCLONE_HELD_FINDINGS_REASONS.includes(layer.cycloneHandoff!.reason);
+function vortexImportantFindingsAtHead(layer: StackLayerDto): boolean {
+  return vortexFindingsRestAtHead(layer) && layer.reviewStatus === "reviewed";
 }
 
 function seamApprovedAtHead(stack: StackDto, layer: StackLayerDto): boolean {
@@ -475,8 +471,10 @@ function seamApprovedAtHead(stack: StackDto, layer: StackLayerDto): boolean {
 function vortexFindingsLeftForPerson(stack: StackDto, layer: StackLayerDto, nowMs: number): boolean {
   if (layerAgentsBusy(layer).cyclone) return false;
   if (seamApprovedAtHead(stack, layer)) return false;
-  return vortexImportantFindingsHeldAtHead(layer) ||
-    (vortexChangesRequestedAtHead(layer) && cycloneHandoffAtHead(stack, layer, nowMs) !== null);
+  const handoff = cycloneHandoffAtHead(stack, layer, nowMs);
+  if (handoff === null) return false;
+  return vortexChangesRequestedAtHead(layer) ||
+    (vortexImportantFindingsAtHead(layer) && handoff !== CYCLONE_GOVERNANCE_HOLD_REASON);
 }
 
 function quotaSkippedReview(layer: StackLayerDto): boolean {
@@ -611,7 +609,7 @@ function layerAttention(
   const bounce = queue.filter((entry) => entry.state === "bounced")
     .sort((a, b) => (Date.parse(b.finishedAt ?? "") || 0) - (Date.parse(a.finishedAt ?? "") || 0))[0];
   const kind = bounce?.bounceDetail?.kind;
-  const recoverable = kind === "head_moved" || kind === "must_consolidate";
+  const recoverable = kind === "head_moved" || kind === "must_consolidate" || kind === "vortex_review";
   const hardBlock = (blocker: string, reason: StackBlockerReason): LayerAttention => ({ blocker, reason, bounceKind: null });
   if (layer) {
     if (layer.restackError && layer.state !== "restacking") {
@@ -720,6 +718,8 @@ const AUTO_LAND_PROMOTE_FAILED_ATTEMPTS = 3;
 const AUTO_LAND_CI_FAILED_BLOCKER = "CI failed — Auto land reads a failing check on GitHub at this head";
 const AUTO_LAND_CI_PENDING_PREFIX = "CI pending for ";
 const AUTO_LAND_VORTEX_WAIT_PREFIX = "No green Vortex review for ";
+export const AUTO_LAND_VORTEX_THROTTLED_BLOCKER =
+  "Vortex paused review at this head with findings open — Auto land will not land it until a push fixes them";
 const AUTO_LAND_PROMOTE_FAILED_PREFIX = "Promote failed ";
 const AUTO_LAND_WAIT_ATTENTION_MS = 45 * 60_000;
 const AUTO_LAND_CI_UNREADABLE_ATTENTION_MS = 10 * 60_000;
@@ -826,6 +826,9 @@ function autoLandWaitNamed(stack: StackDto, layer: StackLayerDto, nowMs: number)
         reason: "auto_land_members_remaining",
       };
     case "vortex_not_green":
+      if (vortexThrottledAtHead(layer)) {
+        return { blocker: AUTO_LAND_VORTEX_THROTTLED_BLOCKER, reason: "auto_land_vortex_wait" };
+      }
       return waited >= AUTO_LAND_VORTEX_WAIT_ATTENTION_MS && !vortexRetryScheduled(layer)
         ? {
           blocker: `${AUTO_LAND_VORTEX_WAIT_PREFIX}${minutes}m — Auto land is waiting for an approving Vortex review at this head`,
@@ -1246,7 +1249,7 @@ export function stackRepair(
       branch: layer.branch,
       handoff,
       findings,
-      steps: `Vortex ${vortexImportantFindingsHeldAtHead(layer) ? "left Important findings" : "requested changes"} on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them undone${handoff ? ` (${cycloneHandoffWords(handoff, cycloneHandoffDetailAtHead(layer))})` : ""}, so nothing will patch them and Auto land waits. You fix them: read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). Dismiss a finding you verified is wrong yourself: mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> --finding <id> --reason <why> --evidence <link>. Ask the human only for a product or design decision. Do not retarget the PR base.`,
+      steps: `Vortex ${vortexImportantFindingsAtHead(layer) ? "left Important findings" : "requested changes"} on ${layer.branch} at ${layer.headSha ?? "its live head"} and Cyclone left them undone${handoff ? ` (${cycloneHandoffWords(handoff, cycloneHandoffDetailAtHead(layer))})` : ""}, so nothing will patch them and Auto land waits. You fix them: read the newest Vortex review and its inline comments (${findings}), verify each finding against ${layer.branch} at its live remote head, fix the real ones with the smallest patch, run the tests, confirm the remote head is still ${layer.headSha ?? "the head you started from"}, then an ordinary git push (no force). Dismiss a finding you verified is wrong yourself: mg dismiss ${stack.owner}/${stack.repo}#${layer.prNumber} --head <sha> --review <id> --finding <id> --reason <why> --evidence <link>. Ask the human only for a product or design decision. Do not retarget the PR base.`,
     };
   }
   if (reason === "ci_failed" || attention.bounceKind === "ci_failure") {

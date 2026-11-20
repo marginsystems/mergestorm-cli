@@ -27,7 +27,7 @@ After install, both `mergestorm` and `mg` invoke the same CLI.
 
 ## Source
 
-This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.70`, …).
+This repository is the public source for the [`mergestorm`](https://www.npmjs.com/package/mergestorm) npm package (MIT). Tags match npm versions (`v0.3.71`, …).
 
 ```bash
 git clone https://github.com/marginsystems/mergestorm-cli.git
@@ -48,12 +48,12 @@ On a TTY, bare `mergestorm` (or `mergestorm shell`) opens a branded REPL: a comp
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.70                                             │
+│  ▀▀▀▀▀▀▀▀▀▀▘  mergestorm v0.3.71                                             │
 │ ▀▀▀▀▀▀▀▀▀     ● msk_live_… · maelstrom                                       │
 │  ▀▀▀▀▀▀       [████████░░░░░░░░░░░░░░░░░░░░░░] 25% used                      │
 │   ▝▀▀▀▀▀      local reviews + stacked PRs · mergestorm.ai                    │
 │     ▝▀▀▘      review a diff · usage for tabs · /help for all commands        │
-│       ▀       New in v0.3.70: Watch: merge conflicts show at once            │
+│       ▀       New in v0.3.71: Watch: throttled heads wake you at once        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 mergestorm
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -156,7 +156,7 @@ Both paths are one command:
 
 `--onto` or `--base` with a branch other than trunk and no `--extend` is refused, so nothing is added to a stack by accident. Every create, submit and publish prints which one it made: a new single PR onto trunk, or a layer stacked on its parent.
 
-`stack submit` walks the **active** local stack: `git push -u origin` each layer, opens a PR with `gh` (`--base` = parent or trunk; adopt then moves the bottom of a 2+ PR stack onto `mg-stack-<n>` — leave it there; skips heads that already have an open PR; body from the tip commit — Summary + Test plan, preserving Fixes/Closes/Resolves), registers the stack with `POST /api/v1/stacks/adopt` internally (Mergestorm API key), then drops that local stack entry so the next create onto trunk is clean. Push is always your local `git` credentials. PRs open as you when `gh` is installed and `gh api user` succeeds; otherwise `stack submit` asks the Mergestorm API (`POST /api/v1/stacks/pulls`) to open them as the Mergestorm Surge App on your behalf, after checking your GitHub account has write access, and assigns you. Stacks, the merge queue and Auto land run through Surge, and Cyclone is the auto-patch App. Without Surge, submit stops before pushing and prints the server's message, which names the App to install and links its install page. `mg settings` prints a `Stacks, merge queue, Auto land` line when the server reports whether that App is ready.
+`stack submit` walks the **active** local stack: `git push -u origin` each layer, opens a PR with `gh` (`--base` = parent or trunk; adopt then moves the bottom of a 2+ PR stack onto `mg-stack-<n>` — leave it there; skips heads that already have an open PR; body from the tip commit — its body under Summary as written, with hard-wrapped lines of a paragraph joined and Markdown unchanged, the subject only when the body is empty, `Co-Authored-By:` and `Signed-off-by:` dropped, then a Test plan stub unless the body has its own Test plan heading, and each Fixes/Closes/Resolves once), registers the stack with `POST /api/v1/stacks/adopt` internally (Mergestorm API key), then drops that local stack entry so the next create onto trunk is clean. Push is always your local `git` credentials. PRs open as you when `gh` is installed and `gh api user` succeeds; otherwise `stack submit` asks the Mergestorm API (`POST /api/v1/stacks/pulls`) to open them as the Mergestorm Surge App on your behalf, after checking your GitHub account has write access, and assigns you. Stacks, the merge queue and Auto land run through Surge, and Cyclone is the auto-patch App. Without Surge, submit stops before pushing and prints the server's message, which names the App to install and links its install page. `mg settings` prints a `Stacks, merge queue, Auto land` line when the server reports whether that App is ready.
 
 #### Publishing without GitHub credentials
 

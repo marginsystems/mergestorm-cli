@@ -351,6 +351,7 @@ export type StackLayerDto = {
   headSha?: string | null;
   /** Head SHA that produced mergeable / mergeableState. */
   mergeableHeadSha?: string | null;
+  mergeabilityError?: string | null;
   staleBaseMergeable?: boolean;
   /** GitHub PR draft flag from enrich; the auto-land watcher never enqueues a draft. */
   draft?: boolean | null;
@@ -562,7 +563,8 @@ export type MergeQueueBounceKind =
   | "pr_draft"
   | "must_consolidate"
   | "merge_failed"
-  | "gh_error";
+  | "gh_error"
+  | "vortex_review";
 
 /** Every bounce kind understood by the shared contract. */
 export const MERGE_QUEUE_BOUNCE_KINDS = [
@@ -575,6 +577,7 @@ export const MERGE_QUEUE_BOUNCE_KINDS = [
   "must_consolidate",
   "merge_failed",
   "gh_error",
+  "vortex_review",
 ] as const satisfies readonly MergeQueueBounceKind[];
 
 export const BOUNCE_KIND_LABELS: Readonly<Record<MergeQueueBounceKind, string>> = {
@@ -587,6 +590,7 @@ export const BOUNCE_KIND_LABELS: Readonly<Record<MergeQueueBounceKind, string>> 
   must_consolidate: "needs promote",
   merge_failed: "merge failed",
   gh_error: "GitHub error",
+  vortex_review: "Vortex review",
 };
 
 export function mergeQueueBounceLabel(entry: MergeQueueEntryDto): string {

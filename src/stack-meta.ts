@@ -192,13 +192,6 @@ export function activeLayers(meta: StackMeta): StackLayerMeta[] {
   return activeStack(meta).layers;
 }
 
-export function setActiveAutoEnqueue(
-  meta: StackMeta,
-  enabled: boolean | undefined,
-): StackMeta {
-  return setActiveStackFlag(meta, "autoEnqueueWhenReady", enabled);
-}
-
 /** Per-open automation flags remembered on the active local stack until submit. */
 export type LocalStackPolicy = {
   autoEnqueueWhenReady?: boolean;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AutoLandOffReason, MergeQueueEntryDto, StackDto, StackLayerDto } from "./stack-dto.js";
 import {
+  AUTO_LAND_VORTEX_THROTTLED_BLOCKER,
   VORTEX_FINDINGS_NEED_PERSON,
   conflictRepairSteps,
   cycloneStatusWords,
@@ -152,6 +153,21 @@ test("a CI fix Cyclone held on purpose is named as held, with the reason, and no
   );
 });
 
+test("a conflict hand-off names whether Cyclone retries the head", () => {
+  const note = (reason: string) => {
+    const repair = stackBlockers(stack([layer({ mergeable: false, mergeableState: "dirty", cycloneConflictHandoff: { headSha: HEAD, reason, at: null } })], { cycloneConflictOff: undefined })).repair;
+    return repair?.kind === "merge_conflict" ? repair.note ?? null : null;
+  };
+  for (const reason of ["credits_exhausted", "auto_resolve_daily_cap"]) {
+    assert.match(note(reason) ?? "", new RegExp(`^Cyclone did not start on this conflict at ${HEAD} \\(.+\\)\\. It tries this head again later, waiting longer after each try that is stopped the same way\\.$`), reason);
+  }
+  for (const reason of ["conflict_needs_person", "conflict_unresolved", "run_deadline", "no_billing", "policy_owner_changed"]) {
+    assert.match(note(reason) ?? "", /so it will not try this head again\.$/, reason);
+  }
+  const off = stackBlockers(stack([layer({ mergeable: false, mergeableState: "dirty", cycloneConflictHandoff: { headSha: HEAD, reason: "credits_exhausted", at: null } })], { cycloneConflictOff: "stack_auto_resolve_off" })).repair;
+  assert.match(off?.kind === "merge_conflict" ? off.note ?? "" : "", /so it will not try this head again\.$/);
+});
+
 const H1 = "332a61e".padEnd(40, "1");
 const H2 = "827099e".padEnd(40, "2");
 const H3 = "9c3b8f0".padEnd(40, "3");
@@ -206,10 +222,10 @@ test("stack 8: findings on layer 2 with auto-patch off are attention behind a cl
   assert.equal(result.repair?.kind, "vortex_findings");
   assert.equal(result.repair?.prNumber, 1088);
   assert.equal(result.agents?.prNumber, 1088);
-  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.issues, [{ prNumber: 1089, headSha: H3, blocker: VORTEX_FINDINGS_NEED_PERSON, bounceKind: null }]);
   assert.equal(
     stackBlockersSummary(result.attention, result.issues, result.busy, result.landGatePending, null, result.queueWait),
-    ` · blocked: #1088 ${VORTEX_FINDINGS_NEED_PERSON}`,
+    ` · blocked: #1088 ${VORTEX_FINDINGS_NEED_PERSON} · issues: #1089 ${VORTEX_FINDINGS_NEED_PERSON}`,
   );
 });
 
@@ -223,18 +239,28 @@ test("a comment verdict whose Important findings Cyclone handed to a person is a
   assert.deepEqual(result.attention, { prNumber: 1089, headSha: H3, blocker: VORTEX_FINDINGS_NEED_PERSON, bounceKind: null });
 });
 
-for (const reason of ["auto_patch_off", "no_changes", "hold"]) {
-  test(`Important findings Cyclone declined on purpose (${reason}) do not stop landing and are not attention`, () => {
+for (const reason of ["auto_patch_off", "no_changes"]) {
+  test(`Important findings Cyclone declined (${reason}) hold the land, so they are attention (#7615)`, () => {
     const base = stack8({ autoLandWait: null, cyclonePatchOff: undefined, autoPatchOverride: null });
     base.layers[1] = stack8Layer({ prNumber: 1088, position: 1, branch: "mac/two", headSha: H2, parentBranch: "mac/one" });
     base.layers[2] = findings(1089, 2, "mac/three", H3, "mg-park-8-g1", "reviewed", {
       cycloneHandoff: { headSha: H3, reason, at: null },
     });
     const result = stackBlockers(base, [], {}, NOW);
-    assert.equal(result.attention, null);
-    assert.deepEqual(result.issues, []);
+    assert.deepEqual(result.attention, { prNumber: 1089, headSha: H3, blocker: VORTEX_FINDINGS_NEED_PERSON, bounceKind: null });
   });
 }
+
+test("Important findings under a Governance hold are not attention by themselves", () => {
+  const base = stack8({ autoLandWait: null, cyclonePatchOff: undefined, autoPatchOverride: null });
+  base.layers[1] = stack8Layer({ prNumber: 1088, position: 1, branch: "mac/two", headSha: H2, parentBranch: "mac/one" });
+  base.layers[2] = findings(1089, 2, "mac/three", H3, "mg-park-8-g1", "reviewed", {
+    cycloneHandoff: { headSha: H3, reason: "hold", at: null },
+  });
+  const result = stackBlockers(base, [], {}, NOW);
+  assert.equal(result.attention, null);
+  assert.deepEqual(result.issues, []);
+});
 
 test("request_changes on a layer Cyclone may still patch is not attention", () => {
   const base = stack8({ autoLandWait: null, cyclonePatchOff: undefined, autoPatchOverride: null });
@@ -276,13 +302,14 @@ test("a stack whose only blocked layer is being patched stays held", () => {
   base.layers[1] = findings(1088, 1, "mac/two", H2, "mac/one", "changes_requested", {
     ciStatus: "failure", cycloneStatus: "patching", agentRuns: [{ agent: "cyclone", status: "patching", sha: H2 }],
   });
+  base.layers[2] = stack8Layer({ prNumber: 1089, position: 2, branch: "mac/three", headSha: H3, parentBranch: "mg-park-8-g1" });
   const result = stackBlockers(base, [], {}, NOW);
   assert.equal(result.attention, null);
 });
 
 type Shape = "clean" | "ci" | "findings" | "draft" | "conflict" | "warnings";
 
-const BLOCKING_SHAPES: readonly Shape[] = ["ci", "findings", "draft", "conflict"];
+const BLOCKING_SHAPES: readonly Shape[] = ["ci", "findings", "draft", "conflict", "warnings"];
 
 function shaped(prNumber: number, position: number, shape: Shape, busy: boolean): StackLayerDto {
   const branch = `mac/${position}`;
@@ -367,9 +394,20 @@ test("request_changes findings Cyclone settled at the head, or a producer that d
   }
 });
 
-test("Important findings with no handoff row stay advisory: a failed Cyclone check or no Cyclone run is not attention", () => {
-  for (const extra of [{ cycloneStatus: "failed" as const }, { cycloneFindingsTakenAtHead: false }]) {
-    assert.equal(stackBlockers(stack([reviewedAt("reviewed", extra)]), [], {}, settledPlus(120)).attention, null, JSON.stringify(extra));
+test("Important findings with no handoff row are attention once a Cyclone check failed or Cyclone has not run for 30 minutes (#7615)", () => {
+  const failed = stackBlockers(stack([reviewedAt("reviewed", { cycloneStatus: "failed" })]), [], {}, settledPlus(1));
+  assert.equal(failed.attention?.blocker, VORTEX_FINDINGS_NEED_PERSON);
+  assert.match(failed.repair?.steps ?? "", /Vortex left Important findings on/);
+  const never = stack([reviewedAt("reviewed", { cycloneFindingsTakenAtHead: false })]);
+  assert.equal(stackBlockers(never, [], {}, settledPlus(29)).attention, null);
+  const late = stackBlockers(never, [], {}, settledPlus(30));
+  assert.equal(late.attention?.blocker, VORTEX_FINDINGS_NEED_PERSON);
+  assert.equal(late.repair?.kind === "vortex_findings" ? late.repair.handoff : null, "not_run");
+});
+
+test("Important findings Cyclone settled at the head, or a producer that does not say, are not named as not run", () => {
+  for (const settled of [true, undefined]) {
+    assert.equal(stackBlockers(stack([reviewedAt("reviewed", { cycloneFindingsTakenAtHead: settled })]), [], {}, settledPlus(120)).attention, null, String(settled));
   }
 });
 
@@ -483,4 +521,42 @@ test("a Draft PR is still held while Vortex reviews", () => {
     agentRuns: [{ agent: "vortex", status: "reviewing", sha: HEAD }] })]), []);
   assert.equal(result.attention, null);
   assert.deepEqual(result.held?.waitingOn, ["vortex"]);
+});
+
+function throttledWaitStack(layerOverrides: Partial<StackLayerDto>, since = "2026-11-20T16:17:29Z"): StackDto {
+  return stack([layer({
+    prNumber: 289, ciStatus: "none", reviewStatus: "reviewed", vortexStatus: "throttled",
+    vortexReview: { status: "done", head_sha: HEAD, pass: 1, skip_reason: null, settled_at: since } as StackLayerDto["vortexReview"],
+    cycloneHandoff: { headSha: HEAD, reason: "hold", at: since },
+    agentRuns: [{ agent: "vortex", status: "throttled", sha: HEAD, pass: 1 }],
+    ...layerOverrides,
+  })], {
+    autoEnqueueWhenReady: true,
+    autoLandWait: { reason: "vortex_not_green", prNumber: 289, headSha: HEAD, since, attempts: null, detail: null },
+  });
+}
+
+test("Auto land's Vortex wait on a Governance-throttled head is attention at once (#7694)", () => {
+  const justNow = Date.parse("2026-11-20T16:18:30Z");
+  const result = stackBlockers(throttledWaitStack({}), [], {}, justNow);
+  assert.deepEqual(result.attention, { prNumber: 289, headSha: HEAD, blocker: AUTO_LAND_VORTEX_THROTTLED_BLOCKER, bounceKind: null });
+  assert.equal(result.repair?.kind, "vortex_not_green");
+  assert.equal(result.repair?.prNumber, 289);
+});
+
+test("Auto land's Vortex wait still waits 30 minutes when the head is not throttled", () => {
+  const justNow = Date.parse("2026-11-20T16:18:30Z");
+  const findingsHead = throttledWaitStack({ vortexStatus: "findings", cycloneHandoff: null, agentRuns: [] });
+  assert.equal(stackBlockers(findingsHead, [], {}, justNow).attention, null);
+  const late = stackBlockers(findingsHead, [], {}, Date.parse("2026-11-20T16:48:30Z"));
+  assert.match(late.attention?.blocker ?? "", /^No green Vortex review for 31m/);
+});
+
+test("a throttle on an older head does not name the Vortex wait at once", () => {
+  const older = "b".repeat(40);
+  const justNow = Date.parse("2026-11-20T16:18:30Z");
+  const stale = throttledWaitStack({
+    vortexReview: { status: "done", head_sha: older, pass: 1, skip_reason: null, settled_at: null } as StackLayerDto["vortexReview"],
+  });
+  assert.equal(stackBlockers(stale, [], {}, justNow).attention, null);
 });

@@ -19,6 +19,7 @@ export const BEARER_SETTINGS = [
   { key: "merge_queue_lands_alone_paths", flag: "--merge-queue-lands-alone", label: "Merge queue lands-alone paths", kind: "paths", defaults: ["**/migrations/**", "db/migrate/**", ".github/workflows/**"] },
   { key: "merge_queue_overdrive", flag: "--merge-queue-overdrive", label: "Merge queue overdrive (up to 10 per batch)" },
   { key: "ignored_bot_logins", flag: "--ignore-bot", label: "Ignored bot logins", kind: "logins" },
+  { key: "cyclone_patch_bot_logins", flag: "--cyclone-patch-bot", label: "Bots Cyclone patches", kind: "logins" },
   { key: "vortex_bot_skip_check", flag: "--vortex-skip-check", label: "Vortex bot skip check", kind: "enum", values: ["none", "neutral"] },
   { key: "vortex_findings_check", flag: "--vortex-findings", label: "Vortex findings check", kind: "enum", values: ["failure", "neutral", "success"] },
   { key: "cyclone_patch_failure_check", flag: "--cyclone-fail-check", label: "Cyclone patch failure check", kind: "enum", values: ["failure", "neutral"] },

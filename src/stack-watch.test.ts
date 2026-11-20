@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ApiFetchInit, ApiFetchResult } from "./api.js";
-import type { MergeQueueBounceKind, StackAgentRun, StackDto, StackLayerDto, MergeQueueEntryDto } from "./stack-dto.js";
+import type { MergeQueueBounceKind, StackDto, StackLayerDto, MergeQueueEntryDto } from "./stack-dto.js";
 import {
   pollStackWatch, StackWatchError, StackWatchTimeoutError,
   STACK_WATCH_CLOSING_READ_RESERVE_MS, STACK_WATCH_DEADLINE_SNAPSHOT_TIMEOUT_MS, STACK_WATCH_ONE_SHOT_READ_TIMEOUT_MS,
@@ -1545,97 +1545,36 @@ test("a missing land PR is not raised while the gate only waits, on an open laye
 
 const OLD_SERVER_LAND = () => layer({ branch: "mg-stack-79", parentBranch: "main", prNumber: 2874, position: 1 });
 
-for (const token of ["tempest_findings", "tempest_failed", "tempest_stopped", "tempest_skipped", "tempest_trigger_failed"]) {
-  test(`old server: land gate ${token} is attention with the server's text and no repair, like any unrecognised land gate`, async () => {
-    const reason = `landing blocked: ${token} on land PR #2874`;
-    const h = harness(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874,
-      tempestLandStatus: "failed", landingBlockReason: reason } as Partial<NonNullable<StackDto["unit"]>>));
-    h.options.timeoutMs = 0;
-    const result = await pollStackWatch(cfg, "stack", h.options);
-    const unknown = stackBlockers(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874,
-      landingBlockReason: "landing blocked: some_new_gate on land PR #2874" }));
-    assert.equal(result.status, "attention");
-    assert.equal(result.blocker, reason);
-    assert.equal(result.prNumber, 2874);
-    assert.equal(result.repair, null);
-    assert.equal(result.landGatePending, null);
-    assert.equal(result.watch.done, false);
-    assert.equal(unknown.attention?.blocker, "landing blocked: some_new_gate on land PR #2874");
-    assert.equal(unknown.repair, null);
-  });
-}
-
-for (const token of ["tempest_pending", "tempest_running"]) {
-  test(`old server: land gate ${token} is a wait, like any other pending or running land gate`, async () => {
-    const reason = `landing blocked: ${token} on land PR #2874`;
-    const h = harness(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874, landingBlockReason: reason }));
-    h.options.timeoutMs = 0;
-    const result = await pollStackWatch(cfg, "stack", h.options);
-    assert.equal(result.status, "in_progress");
-    assert.equal(result.blocker, null);
-    assert.deepEqual(result.landGatePending, { prNumber: 2874, headSha: HEAD, reason });
-    assert.equal(result.watch.done, false);
-  });
-}
-
-test("old server: tempestLandStatus failed with no landing block reason is ignored", () => {
-  const blockers = stackBlockers(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874,
-    tempestLandStatus: "failed", landingBlockReason: null } as Partial<NonNullable<StackDto["unit"]>>));
-  assert.equal(blockers.attention, null);
-  assert.deepEqual(blockers.issues, []);
+test("an unrecognised land gate is attention with the server's text and no repair", async () => {
+  const reason = "landing blocked: some_new_gate on land PR #2874";
+  const h = harness(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874, landingBlockReason: reason }));
+  h.options.timeoutMs = 0;
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.blocker, reason);
+  assert.equal(result.prNumber, 2874);
+  assert.equal(result.repair, null);
+  assert.equal(result.landGatePending, null);
+  assert.equal(result.watch.done, false);
 });
 
-test("old server: a Tempest agent run is ignored, neither a blocker nor a busy agent", async () => {
-  for (const status of ["findings", "failed", "running", "queued"] as const) {
-    const run = { agent: "tempest", status, sha: HEAD } as unknown as StackAgentRun;
-    const onLayer = stackBlockers(stack([layer({ tempestStatus: "findings", agentRuns: [run] } as Partial<StackLayerDto>)]));
-    assert.equal(onLayer.attention, null, status);
-    assert.deepEqual(onLayer.busy, [], status);
-    assert.deepEqual(onLayer.agents?.busy, { vortex: false, cyclone: false }, status);
-    const onLand = stackBlockers(unitStack([{ ...OLD_SERVER_LAND(), agentRuns: [run] }], { state: "landing", landPrNumber: 2874 }));
-    assert.equal(onLand.attention, null, status);
-    assert.equal(onLand.repair, null, status);
-  }
-  const behind = harness(stack([layer({
-    vortexStatus: "failed", agentRuns: [{ agent: "tempest", status: "findings", sha: HEAD } as unknown as StackAgentRun],
-  })]));
-  assert.equal((await pollStackWatch(cfg, "stack", behind.options)).blocker, "Review failed");
+test("an unknown queue bounce kind is attention with the stored bounce reason and no repair", async () => {
+  const kind = "some_new_bounce";
+  const entry = bounce({ bounceReason: kind, bounceDetail: { kind: kind as string as MergeQueueBounceKind, headSha: HEAD, prNumber: 2874, message: "landing blocked: some_new_gate on land PR #2874" } });
+  const h = harness(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874 }), [entry]);
+  h.options.timeoutMs = 0;
+  const result = await pollStackWatch(cfg, "stack", h.options);
+  assert.equal(result.status, "attention");
+  assert.equal(result.bounceKind, kind);
+  assert.equal(result.blocker, kind);
+  assert.equal(result.repair, null);
+  assert.equal(result.watch.done, false);
 });
 
-for (const kind of ["tempest_findings", "tempest_rerun"] as const) {
-  test(`old server: a ${kind} queue bounce is attention with the stored bounce reason and no repair, like any unknown bounce kind`, async () => {
-    const message = `landing blocked: ${kind === "tempest_rerun" ? "tempest_skipped" : kind} on land PR #2874`;
-    const entry = bounce({ bounceReason: kind, bounceDetail: { kind: kind as string as MergeQueueBounceKind, headSha: HEAD, prNumber: 2874, message } });
-    const h = harness(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874 }), [entry]);
-    h.options.timeoutMs = 0;
-    const result = await pollStackWatch(cfg, "stack", h.options);
-    assert.equal(result.status, "attention");
-    assert.equal(result.bounceKind, kind);
-    assert.equal(result.blocker, kind);
-    assert.equal(result.repair, null);
-    assert.equal(result.watch.done, false);
-    const other = stackBlockers(unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874 }),
-      [bounce({ bounceDetail: { kind: "seam_findings", headSha: HEAD, prNumber: 2874 } })]);
-    assert.equal(other.attention?.bounceKind, "seam_findings");
-    assert.equal(other.repair, null);
-  });
-}
-
-test("old server: a tempest_pending Auto land wait is read as a plain wait, then named in generic words", () => {
-  const s = waiting("tempest_pending");
-  assert.equal(stackBlockers(s, [], {}, 10 * MINUTE).attention, null);
-  const late = stackBlockers(s, [], {}, 50 * MINUTE);
-  assert.equal(late.attention?.blocker, "Auto land has waited 50m: tempest pending");
-  assert.equal(late.repair?.kind, "auto_land_waiting");
-});
-
-test("new server: a payload with no Tempest fields at all is read without a crash", async () => {
-  const bareLayer = OLD_SERVER_LAND();
-  assert.equal("tempestStatus" in bareLayer, false);
-  const base = unitStack([bareLayer], { state: "landing", landPrNumber: 2874,
+test("a land unit payload with a pending, clear and failed land gate is read without a crash", async () => {
+  const base = unitStack([OLD_SERVER_LAND()], { state: "landing", landPrNumber: 2874,
     landingBlockReason: "landing blocked: ci_pending on land PR #2874" });
   const bareUnit = base.unit!;
-  assert.equal("tempestLandStatus" in bareUnit, false);
   const h = harness({ ...base, unit: bareUnit as NonNullable<StackDto["unit"]> });
   h.options.timeoutMs = 0;
   const waitingResult = await pollStackWatch(cfg, "stack", h.options);
@@ -2170,14 +2109,19 @@ test("the repair for a fix Cyclone held names the hold, and a plain failure says
   assert.ok((plain.repair?.steps ?? "").includes("(Cyclone's patch failed, so it pushed nothing)"));
 });
 
-test("Important findings Cyclone did not hold at the head are not attention", () => {
+test("Important findings nothing will patch at the head are attention, since they hold the land (#7615)", () => {
+  const held = { headSha: HEAD, reason: "failed", at: null };
+  assert.equal(stackBlockers({ ...stack([importantFindings()]), autoPatchOverride: false }).attention?.blocker, "Vortex findings need a person");
+  assert.equal(stackBlockers({ ...stack([importantFindings()]), cyclonePatchOff: "account_auto_patch_off" }).attention?.blocker, "Vortex findings need a person");
+  for (const reason of ["no_changes", "auto_patch_off"]) {
+    assert.equal(stackBlockers(stack([importantFindings({ cycloneHandoff: { ...held, reason } })])).attention?.blocker, "Vortex findings need a person", reason);
+  }
+});
+
+test("Important findings Cyclone may still patch, or under a Governance hold, are not attention by themselves", () => {
   const held = { headSha: HEAD, reason: "failed", at: null };
   assert.equal(stackBlockers(stack([importantFindings()])).attention, null);
-  assert.equal(stackBlockers({ ...stack([importantFindings()]), autoPatchOverride: false }).attention, null);
-  assert.equal(stackBlockers({ ...stack([importantFindings()]), cyclonePatchOff: "account_auto_patch_off" }).attention, null);
-  for (const reason of ["no_changes", "auto_patch_off", "hold"]) {
-    assert.equal(stackBlockers(stack([importantFindings({ cycloneHandoff: { ...held, reason } })])).attention, null, reason);
-  }
+  assert.equal(stackBlockers(stack([importantFindings({ cycloneHandoff: { ...held, reason: "hold" } })])).attention, null);
   assert.equal(stackBlockers(stack([importantFindings({ cycloneHandoff: { ...held, headSha: "0".repeat(40) } })])).attention, null);
   assert.equal(stackBlockers(stack([layer({ vortexStatus: "all_clear", reviewStatus: "approved", vortexReview: done(HEAD), cycloneHandoff: held })])).attention, null);
 });
@@ -2666,7 +2610,7 @@ test("after Cyclone hands the conflict off at the head, the watch returns attent
   assert.equal(result.status, "attention");
   assert.equal(result.blocker, "Conflict");
   assert.equal(result.repair?.kind, "restack_conflict");
-  assert.match(result.repair?.kind === "restack_conflict" ? result.repair.note ?? "" : "", /left it for a person \(Cyclone already resolved conflicts on this PR twice today, its daily cap\)/);
+  assert.match(result.repair?.kind === "restack_conflict" ? result.repair.note ?? "" : "", /did not start on this conflict at \w+ \(Cyclone already resolved conflicts on this PR twice today, its daily cap\)\. It tries this head again later/);
 });
 
 test("a conflict handed off at the head is attention while Vortex is busy", async () => {

@@ -4,6 +4,12 @@
  */
 
 const TRAILER_RE = /^(fixes|closes|resolves)\s+#(\d+)\s*$/i;
+const DROPPED_TRAILER_RE = /^(?:co-authored-by|signed-off-by):/i;
+const FENCE_RE = /^ {0,3}(`{3,}|~{3,})/;
+const MARKDOWN_LINE_RE = /^(?:\s|#{1,6}(?:\s|$)|[-*+]\s|\d+[.)]\s|>|\||<)/;
+const HORIZONTAL_RULE_RE = /^([-*_])(?:\s*\1){2,}\s*$/;
+const HARD_BREAK_RE = /(?: {2}|\\)$/;
+const TEST_PLAN_HEADING_RE = /^ {0,3}#{1,6}\s+test\s+plan\s*[\p{P}]*\s*#*\s*$/iu;
 
 /**
  * Turn `git log -1 --format=%B` output into a non-empty PR description.
@@ -13,48 +19,120 @@ export function buildPrBodyFromCommit(fullMessage: string): string {
   const subject = (lines[0] ?? "").trim() || "Update";
 
   const trailers: string[] = [];
-  const bodyLines: string[] = [];
+  const bodyLines = renderCommitBody(lines.slice(1), trailers);
 
-  for (const raw of lines.slice(1)) {
-    const line = raw.trim();
-    if (!line) continue;
-    const m = TRAILER_RE.exec(line);
-    if (m) {
-      const verb = m[1]![0]!.toUpperCase() + m[1]!.slice(1).toLowerCase();
-      trailers.push(`${verb} #${m[2]}`);
-      continue;
-    }
-    bodyLines.push(line);
-  }
-
-  // Also pick trailers that appear as the whole subject (unusual but cheap).
+  const summaryLines: string[] = [];
   const subjectTrailer = TRAILER_RE.exec(subject);
-  const summaryBullets: string[] = [];
   if (subjectTrailer) {
-    const verb =
-      subjectTrailer[1]![0]!.toUpperCase() + subjectTrailer[1]!.slice(1).toLowerCase();
-    trailers.unshift(`${verb} #${subjectTrailer[2]}`);
-    summaryBullets.push(`- ${subject}`);
-  } else {
-    summaryBullets.push(`- ${subject}`);
+    trailers.unshift(closingTrailer(subjectTrailer));
   }
-  for (const para of bodyLines) {
-    summaryBullets.push(`- ${para}`);
+  if (bodyLines.length > 0) {
+    summaryLines.push(...bodyLines);
+  } else if (!subjectTrailer) {
+    summaryLines.push(`- ${subject}`);
   }
 
-  const parts = [
-    "## Summary",
-    ...summaryBullets,
-    "",
-    "## Test plan",
-    "- [ ] CI green",
-  ];
+  const parts = summaryLines.length > 0 ? ["## Summary", ...summaryLines] : [];
+  if (!hasTestPlanHeading(bodyLines)) {
+    if (parts.length > 0) parts.push("");
+    parts.push("## Test plan", "- [ ] CI green");
+  }
 
   if (trailers.length > 0) {
     parts.push("", ...uniqueTrailers(trailers));
   }
 
   return parts.join("\n") + "\n";
+}
+
+function closingTrailer(match: RegExpExecArray): string {
+  const verb = match[1]![0]!.toUpperCase() + match[1]!.slice(1).toLowerCase();
+  return `${verb} #${match[2]}`;
+}
+
+function hasTestPlanHeading(lines: readonly string[]): boolean {
+  let fence: string | null = null;
+  for (const line of lines) {
+    if (fence !== null) {
+      if (isClosingFence(line, fence)) fence = null;
+      continue;
+    }
+    const open = FENCE_RE.exec(line);
+    if (open) {
+      fence = open[1]!;
+      continue;
+    }
+    if (TEST_PLAN_HEADING_RE.test(line)) return true;
+  }
+  return false;
+}
+
+function isMarkdownLine(line: string): boolean {
+  return MARKDOWN_LINE_RE.test(line) || HORIZONTAL_RULE_RE.test(line);
+}
+
+function isClosingFence(line: string, fence: string): boolean {
+  const match = FENCE_RE.exec(line);
+  return !!match && match[1]![0] === fence[0] && match[1]!.length >= fence.length && line.trim() === match[1];
+}
+
+function renderCommitBody(lines: readonly string[], trailers: string[]): string[] {
+  const out: string[] = [];
+  let paragraph: string | null = null;
+  let fence: string | null = null;
+
+  const flush = () => {
+    if (paragraph !== null) out.push(paragraph);
+    paragraph = null;
+  };
+
+  for (const raw of lines) {
+    if (fence !== null) {
+      out.push(raw);
+      if (isClosingFence(raw, fence)) fence = null;
+      continue;
+    }
+    const line = raw.trimEnd();
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flush();
+      if (out.length > 0 && out[out.length - 1] !== "") out.push("");
+      continue;
+    }
+    const closing = TRAILER_RE.exec(trimmed);
+    if (closing) {
+      trailers.push(closingTrailer(closing));
+      flush();
+      continue;
+    }
+    if (DROPPED_TRAILER_RE.test(trimmed)) {
+      flush();
+      continue;
+    }
+    const open = FENCE_RE.exec(line);
+    if (open) {
+      flush();
+      fence = open[1]!;
+      out.push(raw);
+      continue;
+    }
+    const hardBreak = HARD_BREAK_RE.test(raw);
+    if (isMarkdownLine(line)) {
+      flush();
+      out.push(hardBreak ? raw : line);
+      continue;
+    }
+    const text = hardBreak ? raw : line;
+    paragraph = paragraph === null ? text : `${paragraph} ${text}`;
+    if (hardBreak) flush();
+  }
+  flush();
+  if (fence !== null) {
+    out.push(fence);
+  } else {
+    while (out.length > 0 && out[out.length - 1] === "") out.pop();
+  }
+  return out;
 }
 
 const LINKED_ISSUE_RE = /(?<![\w/#.-])(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s*:?\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)\b/gi;

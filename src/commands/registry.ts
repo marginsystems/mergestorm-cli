@@ -251,6 +251,7 @@ export const COMMAND_REGISTRY: RegistryCommand[] = [
       "  [--merge-queue-batch-size <n>]  Most pull requests per batch (2-10, default 4)",
       "  [--merge-queue-overdrive on|off]  Account default: batch up to 10 queued pull requests; --repo overrides it per repository",
       "  [--ignore-bot add <login>|remove <login>|clear]",
+      "  [--cyclone-patch-bot add <login>|remove <login>|clear]  Bots whose comments Cyclone patches (default mergestorm-vortex)",
       "  [--vortex-skip-check none|neutral] [--vortex-findings failure|neutral|success]",
       "  [--cyclone-fail-check failure|neutral]",
       "  With flags: PATCH those settings and print the stored result",
